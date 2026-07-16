@@ -1,0 +1,22 @@
+{
+  "name": "devtil-desktop",
+  "version": "1.0.0",
+  "description": "Native desktop shell for Devtil (spawns the Go backend and wraps the UI in an app window)",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder --publish never"
+  },
+  "devDependencies": {
+    "electron": "^33.0.0",
+    "electron-builder": "^25.0.0"
+  },
+  "build": {
+    "appId": "dev.devtil.app",
+    "productName": "Devtil",
+    "files": ["main.js"],
+    "extraResources": [{ "from": "../bin", "to": "bin" }],
+    "mac": { "category": "public.app-category.developer-tools", "target": "dmg" },
+    "win": { "target": "nsis" }
+  }
+}

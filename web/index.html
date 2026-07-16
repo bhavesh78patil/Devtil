@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Devtil — Developer Utilities</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🧰</text></svg>">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="app">
+  <aside id="sidebar">
+    <div class="brand">🧰 <span>Devtil</span></div>
+    <div class="sidebar-head">
+      <span>Workspaces</span>
+      <button id="add-workspace" class="icon-btn" title="New workspace">+</button>
+    </div>
+    <ul id="workspace-list"></ul>
+    <div class="sidebar-foot">
+      <span id="save-indicator" class="saved">All changes saved</span>
+    </div>
+  </aside>
+  <main id="main">
+    <div id="tabbar">
+      <div id="tabs"></div>
+      <button id="add-tab" class="icon-btn" title="New tab (pick a tool)">+</button>
+    </div>
+    <div id="tool-root"></div>
+  </main>
+</div>
+
+<div id="picker-overlay" class="hidden">
+  <div id="picker">
+    <div class="picker-head">
+      <h2>New tab — pick a tool</h2>
+      <button id="picker-close" class="icon-btn">×</button>
+    </div>
+    <div id="picker-grid"></div>
+  </div>
+</div>
+
+<script src="js/core.js"></script>
+<script src="js/tools.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>
