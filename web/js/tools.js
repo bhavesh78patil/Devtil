@@ -343,19 +343,44 @@
   // ======================================================================
   // API Client (Postman-like)
   // ======================================================================
+  /** Extract endpoints and a base URL from Swagger 2.0 / OpenAPI 3.x JSON. */
+  function parseSwagger(doc, sourceUrl) {
+    const endpoints = [];
+    for (const [path, ops] of Object.entries(doc.paths || {})) {
+      for (const m of ["get", "post", "put", "patch", "delete", "head", "options"]) {
+        if (ops && ops[m]) {
+          endpoints.push({ method: m.toUpperCase(), path, name: ops[m].summary || ops[m].operationId || "" });
+        }
+      }
+    }
+    let base = "";
+    if (Array.isArray(doc.servers) && doc.servers[0] && doc.servers[0].url) {
+      base = doc.servers[0].url; // OpenAPI 3
+    } else if (doc.host) {
+      base = ((doc.schemes && doc.schemes[0]) || "https") + "://" + doc.host + (doc.basePath || ""); // Swagger 2
+    }
+    try { base = new URL(base || "/", sourceUrl).toString(); } catch { /* keep as-is */ }
+    return { endpoints, baseUrl: base.replace(/\/+$/, "") };
+  }
+
   registerTool({
     type: "api",
     icon: "🚀",
     name: "API Client",
-    desc: "Send HTTP requests to any endpoint — methods, headers, body, timing, response viewer, history.",
+    desc: "Send HTTP requests — headers, body, history, Swagger/OpenAPI import, and collection-wide global headers.",
     defaults: () => ({
       method: "GET", url: "", headers: [{ k: "", v: "" }], body: "",
-      insecure: false, response: null, history: [],
+      insecure: false, response: null, history: [], swaggerUrl: "",
+      collection: { baseUrl: "", headers: [{ k: "", v: "" }], requests: [] },
     }),
     render(root, tab, ctx) {
       const d = tab.data;
       if (!Array.isArray(d.headers) || !d.headers.length) d.headers = [{ k: "", v: "" }];
       if (!Array.isArray(d.history)) d.history = [];
+      if (!d.collection) d.collection = { baseUrl: "", headers: [], requests: [] };
+      const col = d.collection;
+      if (!Array.isArray(col.headers) || !col.headers.length) col.headers = [{ k: "", v: "" }];
+      if (!Array.isArray(col.requests)) col.requests = [];
 
       const status = el("div", { class: "status-line dim" });
       const respArea = el("div", { class: "tool", style: "flex:1" });
@@ -373,44 +398,174 @@
       urlInput.addEventListener("keydown", (e) => { if (e.key === "Enter") send(); });
       const sendBtn = el("button", { class: "btn primary", text: "Send", onclick: () => send() });
 
-      // -- headers editor --
-      const headersBox = el("div", { style: "display:flex;flex-direction:column;gap:6px" });
-      const renderHeaders = () => {
-        headersBox.replaceChildren(el("span", { class: "pane-label", text: "Headers" }));
-        d.headers.forEach((h, i) => {
-          const key = el("input", { type: "text", class: "hk", placeholder: "Header", value: h.k });
-          const val = el("input", { type: "text", class: "hv", placeholder: "Value", value: h.v });
-          key.addEventListener("input", () => { h.k = key.value; ctx.save(); });
-          val.addEventListener("input", () => { h.v = val.value; ctx.save(); });
-          headersBox.append(el("div", { class: "header-row" }, [
-            key, val,
-            el("button", {
-              class: "icon-btn", text: "×", title: "Remove header",
-              onclick: () => { d.headers.splice(i, 1); if (!d.headers.length) d.headers.push({ k: "", v: "" }); ctx.save(); renderHeaders(); },
-            }),
+      // -- key/value editor, used for both request and collection headers --
+      const headersEditor = (list) => {
+        const box = el("div", { style: "display:flex;flex-direction:column;gap:6px" });
+        const render = () => {
+          box.replaceChildren();
+          list.forEach((h, i) => {
+            const key = el("input", { type: "text", class: "hk", placeholder: "Header", value: h.k });
+            const val = el("input", { type: "text", class: "hv", placeholder: "Value", value: h.v });
+            key.addEventListener("input", () => { h.k = key.value; ctx.save(); });
+            val.addEventListener("input", () => { h.v = val.value; ctx.save(); });
+            box.append(el("div", { class: "header-row" }, [
+              key, val,
+              el("button", {
+                class: "icon-btn", text: "×", title: "Remove header",
+                onclick: () => { list.splice(i, 1); if (!list.length) list.push({ k: "", v: "" }); ctx.save(); render(); },
+              }),
+            ]));
+          });
+          box.append(el("div", {}, [
+            el("button", { class: "btn", text: "+ Header", onclick: () => { list.push({ k: "", v: "" }); ctx.save(); render(); } }),
           ]));
-        });
-        headersBox.append(el("div", {}, [
-          el("button", { class: "btn", text: "+ Header", onclick: () => { d.headers.push({ k: "", v: "" }); ctx.save(); renderHeaders(); } }),
-        ]));
+        };
+        render();
+        return box;
       };
-      renderHeaders();
+      const headersBox = el("div", { style: "display:flex;flex-direction:column;gap:6px" }, [
+        el("span", { class: "pane-label", text: "Headers" }),
+        headersEditor(d.headers),
+      ]);
+
+      const inCollection = (url) =>
+        !!col.baseUrl && url.toLowerCase().startsWith(col.baseUrl.toLowerCase());
+      const resolveUrl = (path) => (/^https?:\/\//i.test(path) ? path : col.baseUrl + path);
+
+      const loadRequest = (r) => {
+        d.method = r.method;
+        d.url = resolveUrl(r.path);
+        methodSel.value = d.method;
+        urlInput.value = d.url;
+        ctx.save();
+      };
 
       const bodyArea = boundArea(d, "body", ctx, { class: "", rows: "5", style: "width:100%", placeholder: "Request body (raw / JSON)" });
       const insecure = bindField(el("input", { type: "checkbox" }), d, "insecure", ctx);
+
+      // -- collection subtab: base URL, global headers, saved requests, swagger import --
+      const renderCollection = () => {
+        const baseInput = el("input", { type: "text", placeholder: "https://api.example.com", value: col.baseUrl, style: "flex:1" });
+        baseInput.addEventListener("input", () => { col.baseUrl = baseInput.value.trim().replace(/\/+$/, ""); ctx.save(); });
+
+        const listBox = el("div");
+        if (!col.requests.length) {
+          listBox.append(el("div", { class: "status-line dim", text: "No saved requests yet — import from Swagger below, or save the current request." }));
+        }
+        col.requests.forEach((r, i) => {
+          listBox.append(el("div", { class: "history-item", onclick: () => loadRequest(r) }, [
+            el("span", { text: r.method, style: "min-width:52px" }),
+            el("span", { class: "h-url", text: r.path + (r.name ? "  —  " + r.name : "") }),
+            el("button", {
+              class: "icon-btn", text: "×", title: "Remove from collection",
+              onclick: (e) => { e.stopPropagation(); col.requests.splice(i, 1); ctx.save(); renderResponse("collection"); },
+            }),
+          ]));
+        });
+
+        const importBox = el("div", { style: "display:flex;flex-direction:column;gap:4px" });
+        const swaggerIn = el("input", { type: "text", placeholder: "https://api.example.com/swagger.json (Swagger/OpenAPI JSON)", value: d.swaggerUrl || "", style: "flex:1" });
+        swaggerIn.addEventListener("input", () => { d.swaggerUrl = swaggerIn.value; ctx.save(); });
+
+        respArea.append(
+          el("div", { class: "toolbar" }, [el("span", { class: "pane-label", text: "Base URL" }), baseInput]),
+          el("span", { class: "pane-label", text: "Global headers — added to every request under the base URL (request headers win on conflict)" }),
+          el("div", { class: "col-headers" }, [headersEditor(col.headers)]),
+          el("div", { class: "toolbar" }, [
+            el("span", { class: "pane-label", text: `Saved requests (${col.requests.length})` }),
+            el("button", {
+              class: "btn", text: "+ Save current request",
+              onclick: () => {
+                const url = d.url.trim();
+                if (!url) return setStatus(status, "✗ Enter a URL first", "err");
+                const path = inCollection(url) ? url.slice(col.baseUrl.length) || "/" : url;
+                if (!col.requests.some((r) => r.method === d.method && r.path === path)) {
+                  col.requests.push({ method: d.method, path, name: "" });
+                }
+                ctx.save();
+                renderResponse("collection");
+              },
+            }),
+          ]),
+          listBox,
+          el("span", { class: "pane-label", text: "Import from Swagger / OpenAPI" }),
+          el("div", { class: "toolbar" }, [
+            swaggerIn,
+            el("button", { class: "btn primary", text: "Load endpoints", onclick: () => loadSwagger(swaggerIn.value.trim(), importBox) }),
+          ]),
+          importBox
+        );
+      };
+
+      async function loadSwagger(url, box) {
+        if (!url) return setStatus(status, "✗ Enter the Swagger/OpenAPI doc URL", "err");
+        setStatus(status, "Fetching Swagger doc…", "dim");
+        box.replaceChildren();
+        let doc;
+        try {
+          const r = await api("POST", "/api/proxy", { method: "GET", url });
+          if (r.status >= 400) throw new Error("doc endpoint returned " + r.status);
+          doc = JSON.parse(r.body);
+        } catch (e) {
+          return setStatus(status, "✗ " + e.message, "err");
+        }
+        const { endpoints, baseUrl } = parseSwagger(doc, url);
+        if (!endpoints.length) return setStatus(status, "✗ No paths found in that document", "err");
+        setStatus(status, `✓ Found ${endpoints.length} endpoint(s) — pick which to import`, "ok");
+
+        const checks = endpoints.map(() => {
+          const c = el("input", { type: "checkbox" });
+          c.checked = true;
+          c.addEventListener("click", (e) => e.stopPropagation());
+          return c;
+        });
+        const selectAll = el("input", { type: "checkbox" });
+        selectAll.checked = true;
+        selectAll.addEventListener("change", () => checks.forEach((c) => (c.checked = selectAll.checked)));
+
+        box.append(
+          el("div", { class: "toolbar" }, [
+            el("label", { class: "inline" }, [selectAll, "Select all"]),
+            el("button", {
+              class: "btn primary", text: "Import selected",
+              onclick: () => {
+                if (!col.baseUrl && baseUrl) col.baseUrl = baseUrl;
+                let added = 0;
+                endpoints.forEach((ep, i) => {
+                  if (!checks[i].checked) return;
+                  if (col.requests.some((r) => r.method === ep.method && r.path === ep.path)) return;
+                  col.requests.push({ method: ep.method, path: ep.path, name: ep.name });
+                  added++;
+                });
+                ctx.save();
+                setStatus(status, `✓ Imported ${added} endpoint(s)`, "ok");
+                renderResponse("collection");
+              },
+            }),
+            el("span", { class: "status-line dim", text: baseUrl ? "Base URL: " + baseUrl : "" }),
+          ]),
+          ...endpoints.map((ep, i) =>
+            el("div", { class: "history-item", onclick: () => { checks[i].checked = !checks[i].checked; } }, [
+              checks[i],
+              el("span", { text: ep.method, style: "min-width:52px" }),
+              el("span", { class: "h-url", text: ep.path + (ep.name ? "  —  " + ep.name : "") }),
+            ])
+          )
+        );
+      }
 
       // -- response --
       const renderResponse = (view = "body") => {
         respArea.replaceChildren();
         const r = d.response;
-        const tabsBar = el("div", { class: "subtabs" }, ["body", "headers", "history"].map((name) =>
+        const tabsBar = el("div", { class: "subtabs" }, ["body", "headers", "collection", "history"].map((name) =>
           el("button", {
             class: name === view ? "active" : "", text: name[0].toUpperCase() + name.slice(1),
             onclick: () => renderResponse(name),
           })
         ));
 
-        if (r && view !== "history") {
+        if (r && view !== "history" && view !== "collection") {
           const cls = "badge s" + String(r.status)[0];
           respArea.append(el("div", { class: "resp-meta" }, [
             el("span", { class: cls, text: `${r.status} ${r.statusText}` }),
@@ -421,6 +576,7 @@
         }
         respArea.append(tabsBar);
 
+        if (view === "collection") return renderCollection();
         if (view === "history") {
           if (!d.history.length) respArea.append(el("div", { class: "status-line dim", text: "No requests yet" }));
           d.history.forEach((h) => {
@@ -459,6 +615,9 @@
         setStatus(status, "Sending…", "dim");
         try {
           const headers = {};
+          if (inCollection(d.url.trim())) {
+            for (const h of col.headers) if (h.k.trim()) headers[h.k.trim()] = h.v;
+          }
           for (const h of d.headers) if (h.k.trim()) headers[h.k.trim()] = h.v;
           const r = await api("POST", "/api/proxy", {
             method: d.method, url: d.url.trim(), headers, body: d.body, insecure: d.insecure,
@@ -483,7 +642,7 @@
         el("div", { class: "toolbar" }, [el("label", { class: "inline" }, [insecure, "Skip TLS verification (dev servers)"]), status]),
         respArea
       );
-      renderResponse(d.response ? "body" : "history");
+      renderResponse(d.response ? "body" : col.requests.length ? "collection" : "history");
     },
   });
 
@@ -494,9 +653,11 @@
     type: "kube",
     icon: "☸️",
     name: "Kube Logs",
-    desc: "Find pods for a service and search their container logs — uses your local kubectl & contexts.",
+    desc: "Find pods for a service and search their logs — kubectl contexts or a direct kubemaster address, stdout or files inside the pod.",
     defaults: () => ({
-      context: "", namespace: "", podQuery: "", selected: [], container: "",
+      context: "", server: "", token: "", insecureTLS: false,
+      namespace: "", podQuery: "", selected: [], container: "",
+      source: "stdout", filePath: "",
       tail: "2000", sinceMinutes: "", grep: "", grepRegex: false, output: [],
     }),
     render(root, tab, ctx) {
@@ -508,12 +669,29 @@
 
       const ctxSel = el("select", { style: "min-width:160px" });
       const nsSel = el("select", { style: "min-width:160px" });
+      const server = bindField(el("input", { type: "text", placeholder: "https://<kubemaster-ip>:6443 (optional)", style: "min-width:220px" }), d, "server", ctx);
+      const token = bindField(el("input", { type: "password", placeholder: "bearer token (optional)", style: "min-width:160px" }), d, "token", ctx);
+      const insecureTLS = bindField(el("input", { type: "checkbox" }), d, "insecureTLS", ctx);
       const podQuery = bindField(el("input", { type: "text", placeholder: "service / pod name filter" }), d, "podQuery", ctx);
       const container = bindField(el("input", { type: "text", placeholder: "(default)", style: "width:120px" }), d, "container", ctx);
+      const sourceSel = bindField(
+        el("select", {}, [
+          el("option", { value: "stdout", text: "Container stdout" }),
+          el("option", { value: "file", text: "File inside pod (exec)" }),
+        ]),
+        d, "source", ctx, () => syncSource()
+      );
+      const filePath = bindField(el("input", { type: "text", placeholder: "/var/log/app.log", style: "min-width:180px" }), d, "filePath", ctx);
       const tail = bindField(el("input", { type: "number", min: "1", style: "width:90px" }), d, "tail", ctx);
       const since = bindField(el("input", { type: "number", min: "0", placeholder: "all", style: "width:90px" }), d, "sinceMinutes", ctx);
       const grep = bindField(el("input", { type: "text", placeholder: "filter lines (grep)", style: "flex:1;min-width:180px" }), d, "grep", ctx);
       const grepRegex = bindField(el("input", { type: "checkbox" }), d, "grepRegex", ctx);
+
+      const connQS = () =>
+        "context=" + encodeURIComponent(d.context || "") +
+        "&server=" + encodeURIComponent(d.server || "") +
+        "&token=" + encodeURIComponent(d.token || "") +
+        "&insecure=" + (d.insecureTLS ? "true" : "false");
 
       const renderLogs = () => {
         const lines = d.output || [];
@@ -566,18 +744,18 @@
         try {
           const r = await api("GET", "/api/kube/contexts");
           fillSelect(ctxSel, r.contexts || [], d.context || r.current);
-          d.context = ctxSel.value;
+          d.context = ctxSel.value || "";
           ctx.save();
-          setStatus(status, "", "dim");
-          await loadNamespaces();
         } catch (e) {
-          setStatus(status, "✗ " + e.message, "err");
+          // no kubeconfig contexts is fine when a direct API server is set
+          if (!d.server) return setStatus(status, "✗ " + e.message, "err");
         }
+        await loadNamespaces();
       }
       async function loadNamespaces() {
         setStatus(status, "Loading namespaces…", "dim");
         try {
-          const r = await api("GET", "/api/kube/namespaces?context=" + encodeURIComponent(d.context || ""));
+          const r = await api("GET", "/api/kube/namespaces?" + connQS());
           fillSelect(nsSel, r.namespaces || [], d.namespace);
           d.namespace = nsSel.value;
           ctx.save();
@@ -590,7 +768,7 @@
         if (!d.namespace) return setStatus(status, "✗ Pick a namespace first (Connect)", "err");
         setStatus(status, "Finding pods…", "dim");
         try {
-          const r = await api("GET", "/api/kube/pods?context=" + encodeURIComponent(d.context || "") +
+          const r = await api("GET", "/api/kube/pods?" + connQS() +
             "&namespace=" + encodeURIComponent(d.namespace) + "&query=" + encodeURIComponent(d.podQuery || ""));
           renderPods(r.pods || []);
           setStatus(status, `✓ ${r.pods.length} pod(s)`, "ok");
@@ -600,13 +778,18 @@
       }
       async function fetchLogs() {
         if (!d.selected.length) return setStatus(status, "✗ Select at least one pod", "err");
+        if (d.source === "file" && !(d.filePath || "").trim()) {
+          return setStatus(status, "✗ Enter the log file path inside the pod", "err");
+        }
         setStatus(status, "Fetching logs…", "dim");
         try {
           const r = await api("POST", "/api/kube/logs", {
-            context: d.context, namespace: d.namespace, pods: d.selected,
+            context: d.context, server: d.server, token: d.token, insecure: d.insecureTLS,
+            namespace: d.namespace, pods: d.selected,
             container: d.container, tail: Number(d.tail) || 2000,
             sinceMinutes: Number(d.sinceMinutes) || 0,
             grep: d.grep, grepRegex: d.grepRegex,
+            source: d.source || "stdout", filePath: d.filePath,
           });
           d.output = r.lines;
           ctx.save();
@@ -623,20 +806,32 @@
       podQuery.addEventListener("keydown", (e) => { if (e.key === "Enter") loadPods(); });
 
       const field = (label, node) => el("div", { class: "field" }, [el("span", { text: label }), node]);
+      const filePathField = field("Log file path", filePath);
+      const sinceField = field("Since (min)", since);
+      const syncSource = () => {
+        const fileMode = d.source === "file";
+        filePathField.style.display = fileMode ? "" : "none";
+        sinceField.style.display = fileMode ? "none" : "";
+      };
 
       root.append(
         el("div", { class: "form-grid" }, [
           el("button", { class: "btn", text: "⟳ Connect", title: "Load contexts & namespaces", onclick: loadContexts }),
           field("Context", ctxSel),
+          field("API server (kubemaster, optional)", server),
+          field("Token", token),
+          el("label", { class: "inline", style: "padding-bottom:8px" }, [insecureTLS, "skip TLS verify"]),
           field("Namespace", nsSel),
           field("Service / pod filter", podQuery),
           el("button", { class: "btn primary", text: "Find pods", onclick: loadPods }),
         ]),
         podBox,
         el("div", { class: "form-grid" }, [
+          field("Log source", sourceSel),
+          filePathField,
           field("Container", container),
           field("Tail lines", tail),
-          field("Since (min)", since),
+          sinceField,
           field("Search in logs", grep),
           el("label", { class: "inline", style: "padding-bottom:8px" }, [grepRegex, "regex"]),
           el("button", { class: "btn primary", text: "Fetch logs", onclick: fetchLogs }),
@@ -645,6 +840,7 @@
         status,
         logPre
       );
+      syncSource();
       renderLogs();
       if (d.context) fillSelect(ctxSel, [d.context], d.context);
       if (d.namespace) fillSelect(nsSel, [d.namespace], d.namespace);

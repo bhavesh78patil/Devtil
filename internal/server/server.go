@@ -8,6 +8,7 @@ import (
 	"io"
 	"io/fs"
 	"net/http"
+	"net/url"
 
 	"github.com/bhavesh78patil/devtil/internal/kube"
 	"github.com/bhavesh78patil/devtil/internal/proxy"
@@ -94,11 +95,20 @@ func (s *Server) kubeContexts(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"contexts": names, "current": current})
 }
 
+func connFromQuery(q url.Values) kube.Conn {
+	return kube.Conn{
+		Context:  q.Get("context"),
+		Server:   q.Get("server"),
+		Token:    q.Get("token"),
+		Insecure: q.Get("insecure") == "true",
+	}
+}
+
 func (s *Server) kubeNamespaces(w http.ResponseWriter, r *http.Request) {
 	if !requireKubectl(w) {
 		return
 	}
-	names, err := kube.Namespaces(r.URL.Query().Get("context"))
+	names, err := kube.Namespaces(connFromQuery(r.URL.Query()))
 	if err != nil {
 		writeError(w, http.StatusBadGateway, err)
 		return
@@ -115,7 +125,7 @@ func (s *Server) kubePods(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, errString("namespace is required"))
 		return
 	}
-	pods, err := kube.Pods(q.Get("context"), q.Get("namespace"), q.Get("query"))
+	pods, err := kube.Pods(connFromQuery(q), q.Get("namespace"), q.Get("query"))
 	if err != nil {
 		writeError(w, http.StatusBadGateway, err)
 		return

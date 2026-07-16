@@ -21,10 +21,38 @@ func Available() bool {
 	return err == nil
 }
 
-func run(ctx context.Context, kubeContext string, args ...string) ([]byte, error) {
-	if kubeContext != "" {
-		args = append([]string{"--context", kubeContext}, args...)
+// Conn describes how to reach a cluster: a kubeconfig context, and/or a
+// direct API server (kubemaster) address with optional bearer token —
+// useful when the cluster isn't in the local kubeconfig.
+type Conn struct {
+	Context  string `json:"context"`
+	Server   string `json:"server"`
+	Token    string `json:"token"`
+	Insecure bool   `json:"insecure"`
+}
+
+func (c Conn) flags() []string {
+	var f []string
+	if c.Context != "" {
+		f = append(f, "--context", c.Context)
 	}
+	if s := strings.TrimSpace(c.Server); s != "" {
+		if !strings.Contains(s, "://") {
+			s = "https://" + s
+		}
+		f = append(f, "--server", s)
+	}
+	if c.Token != "" {
+		f = append(f, "--token", c.Token)
+	}
+	if c.Insecure {
+		f = append(f, "--insecure-skip-tls-verify=true")
+	}
+	return f
+}
+
+func run(ctx context.Context, conn Conn, args ...string) ([]byte, error) {
+	args = append(conn.flags(), args...)
 	cmd := exec.CommandContext(ctx, "kubectl", args...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -44,7 +72,7 @@ func Contexts() (names []string, current string, err error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	out, err := run(ctx, "", "config", "get-contexts", "-o", "name")
+	out, err := run(ctx, Conn{}, "config", "get-contexts", "-o", "name")
 	if err != nil {
 		return nil, "", err
 	}
@@ -53,17 +81,17 @@ func Contexts() (names []string, current string, err error) {
 			names = append(names, line)
 		}
 	}
-	if cur, err := run(ctx, "", "config", "current-context"); err == nil {
+	if cur, err := run(ctx, Conn{}, "config", "current-context"); err == nil {
 		current = strings.TrimSpace(string(cur))
 	}
 	return names, current, nil
 }
 
-func Namespaces(kubeContext string) ([]string, error) {
+func Namespaces(conn Conn) ([]string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	out, err := run(ctx, kubeContext, "get", "namespaces",
+	out, err := run(ctx, conn, "get", "namespaces",
 		"-o", "jsonpath={range .items[*]}{.metadata.name}{\"\\n\"}{end}")
 	if err != nil {
 		return nil, err
@@ -89,11 +117,11 @@ type Pod struct {
 // Pods lists pods in a namespace, optionally filtered by a case-insensitive
 // substring match against the pod name or its labels — so searching for a
 // service name like "checkout" finds its pods.
-func Pods(kubeContext, namespace, query string) ([]Pod, error) {
+func Pods(conn Conn, namespace, query string) ([]Pod, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
-	out, err := run(ctx, kubeContext, "get", "pods", "-n", namespace, "-o", "json")
+	out, err := run(ctx, conn, "get", "pods", "-n", namespace, "-o", "json")
 	if err != nil {
 		return nil, err
 	}
@@ -151,7 +179,7 @@ func Pods(kubeContext, namespace, query string) ([]Pod, error) {
 }
 
 type LogsRequest struct {
-	Context      string   `json:"context"`
+	Conn
 	Namespace    string   `json:"namespace"`
 	Pods         []string `json:"pods"`
 	Container    string   `json:"container"`
@@ -160,6 +188,16 @@ type LogsRequest struct {
 	Previous     bool     `json:"previous"`
 	Grep         string   `json:"grep"`
 	GrepRegex    bool     `json:"grepRegex"`
+	// Source "stdout" (default) reads container logs via `kubectl logs`;
+	// "file" execs into the pod and tails FilePath — for services that
+	// write log files instead of logging to stdout.
+	Source   string `json:"source"`
+	FilePath string `json:"filePath"`
+}
+
+// shellQuote makes s safe to embed in the `sh -c` command run inside the pod.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 type LogsResponse struct {
@@ -178,6 +216,9 @@ const maxLogLines = 20000
 func Logs(req LogsRequest) (*LogsResponse, error) {
 	if req.Namespace == "" || len(req.Pods) == 0 {
 		return nil, fmt.Errorf("namespace and at least one pod are required")
+	}
+	if req.Source == "file" && strings.TrimSpace(req.FilePath) == "" {
+		return nil, fmt.Errorf("a file path is required when reading a log file inside the pod")
 	}
 
 	var matcher func(string) bool
@@ -199,25 +240,36 @@ func Logs(req LogsRequest) (*LogsResponse, error) {
 	resp := &LogsResponse{Lines: []string{}}
 	multi := len(req.Pods) > 1
 
+	tail := req.Tail
+	if tail <= 0 || tail > maxLogLines {
+		tail = 2000
+	}
+
 	for _, pod := range req.Pods {
-		args := []string{"logs", pod, "-n", req.Namespace, "--timestamps"}
-		if req.Container != "" {
-			args = append(args, "-c", req.Container)
-		}
-		tail := req.Tail
-		if tail <= 0 || tail > maxLogLines {
-			tail = 2000
-		}
-		args = append(args, fmt.Sprintf("--tail=%d", tail))
-		if req.SinceMinutes > 0 {
-			args = append(args, fmt.Sprintf("--since=%dm", req.SinceMinutes))
-		}
-		if req.Previous {
-			args = append(args, "--previous")
+		var args []string
+		if req.Source == "file" {
+			args = []string{"exec", pod, "-n", req.Namespace}
+			if req.Container != "" {
+				args = append(args, "-c", req.Container)
+			}
+			args = append(args, "--", "sh", "-c",
+				fmt.Sprintf("tail -n %d -- %s", tail, shellQuote(strings.TrimSpace(req.FilePath))))
+		} else {
+			args = []string{"logs", pod, "-n", req.Namespace, "--timestamps"}
+			if req.Container != "" {
+				args = append(args, "-c", req.Container)
+			}
+			args = append(args, fmt.Sprintf("--tail=%d", tail))
+			if req.SinceMinutes > 0 {
+				args = append(args, fmt.Sprintf("--since=%dm", req.SinceMinutes))
+			}
+			if req.Previous {
+				args = append(args, "--previous")
+			}
 		}
 
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-		out, err := run(ctx, req.Context, args...)
+		out, err := run(ctx, req.Conn, args...)
 		cancel()
 		if err != nil {
 			resp.Errors = append(resp.Errors, fmt.Sprintf("%s: %v", pod, err))
