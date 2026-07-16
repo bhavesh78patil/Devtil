@@ -653,9 +653,10 @@
     type: "kube",
     icon: "☸️",
     name: "Kube Logs",
-    desc: "Find pods for a service and search their logs — kubectl contexts or a direct kubemaster address, stdout or files inside the pod.",
+    desc: "Find pods for a service and search their logs — local kubectl, or kubectl over SSH on the kubemaster; stdout or files inside the pod.",
     defaults: () => ({
-      context: "", server: "", token: "", insecureTLS: false,
+      context: "", sshHost: "", sshPort: "", sshKey: "",
+      server: "", token: "", insecureTLS: false,
       namespace: "", podQuery: "", selected: [], container: "",
       source: "stdout", filePath: "",
       tail: "2000", sinceMinutes: "", grep: "", grepRegex: false, output: [],
@@ -669,7 +670,10 @@
 
       const ctxSel = el("select", { style: "min-width:160px" });
       const nsSel = el("select", { style: "min-width:160px" });
-      const server = bindField(el("input", { type: "text", placeholder: "https://<kubemaster-ip>:6443 (optional)", style: "min-width:220px" }), d, "server", ctx);
+      const sshHost = bindField(el("input", { type: "text", placeholder: "user@kubemaster", style: "min-width:180px" }), d, "sshHost", ctx);
+      const sshPort = bindField(el("input", { type: "text", placeholder: "22", style: "width:70px" }), d, "sshPort", ctx);
+      const sshKey = bindField(el("input", { type: "text", placeholder: "~/.ssh/id_ed25519 (optional)", style: "min-width:170px" }), d, "sshKey", ctx);
+      const server = bindField(el("input", { type: "text", placeholder: "https://<apiserver>:6443 (optional)", style: "min-width:200px" }), d, "server", ctx);
       const token = bindField(el("input", { type: "password", placeholder: "bearer token (optional)", style: "min-width:160px" }), d, "token", ctx);
       const insecureTLS = bindField(el("input", { type: "checkbox" }), d, "insecureTLS", ctx);
       const podQuery = bindField(el("input", { type: "text", placeholder: "service / pod name filter" }), d, "podQuery", ctx);
@@ -691,7 +695,10 @@
         "context=" + encodeURIComponent(d.context || "") +
         "&server=" + encodeURIComponent(d.server || "") +
         "&token=" + encodeURIComponent(d.token || "") +
-        "&insecure=" + (d.insecureTLS ? "true" : "false");
+        "&insecure=" + (d.insecureTLS ? "true" : "false") +
+        "&sshHost=" + encodeURIComponent(d.sshHost || "") +
+        "&sshPort=" + encodeURIComponent(d.sshPort || "") +
+        "&sshKey=" + encodeURIComponent(d.sshKey || "");
 
       const renderLogs = () => {
         const lines = d.output || [];
@@ -742,7 +749,7 @@
       async function loadContexts() {
         setStatus(status, "Loading contexts…", "dim");
         try {
-          const r = await api("GET", "/api/kube/contexts");
+          const r = await api("GET", "/api/kube/contexts?" + connQS());
           fillSelect(ctxSel, r.contexts || [], d.context || r.current);
           d.context = ctxSel.value || "";
           ctx.save();
@@ -785,6 +792,7 @@
         try {
           const r = await api("POST", "/api/kube/logs", {
             context: d.context, server: d.server, token: d.token, insecure: d.insecureTLS,
+            sshHost: d.sshHost, sshPort: d.sshPort, sshKey: d.sshKey,
             namespace: d.namespace, pods: d.selected,
             container: d.container, tail: Number(d.tail) || 2000,
             sinceMinutes: Number(d.sinceMinutes) || 0,
@@ -816,11 +824,16 @@
 
       root.append(
         el("div", { class: "form-grid" }, [
-          el("button", { class: "btn", text: "⟳ Connect", title: "Load contexts & namespaces", onclick: loadContexts }),
-          field("Context", ctxSel),
-          field("API server (kubemaster, optional)", server),
+          field("SSH host — kubectl runs here (optional)", sshHost),
+          field("SSH port", sshPort),
+          field("SSH key", sshKey),
+          field("API server (optional)", server),
           field("Token", token),
           el("label", { class: "inline", style: "padding-bottom:8px" }, [insecureTLS, "skip TLS verify"]),
+        ]),
+        el("div", { class: "form-grid" }, [
+          el("button", { class: "btn", text: "⟳ Connect", title: "Load contexts & namespaces", onclick: loadContexts }),
+          field("Context", ctxSel),
           field("Namespace", nsSel),
           field("Service / pod filter", podQuery),
           el("button", { class: "btn primary", text: "Find pods", onclick: loadPods }),

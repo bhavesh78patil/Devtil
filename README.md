@@ -19,7 +19,7 @@ the UI in an app window.
 | **URL Tools** | Encode/decode components or full URIs, plus a URL/query-param breakdown table |
 | **JWT Decoder** | Decode header & payload, human-readable `exp`/`iat`/`nbf`, expiry check |
 | **API Client** | Postman-like: any method, custom headers, body, response viewer with status/time/size, pretty-printed JSON, headers tab, request history. Requests are proxied through the Go backend so CORS never gets in the way, with an opt-in "skip TLS verification" for dev servers. Plus **collections**: import endpoints from a Swagger/OpenAPI JSON URL (pick individual endpoints or select all), save requests, and define **global headers** that are automatically sent with every request under the collection's base URL (request-level headers override on conflict) |
-| **Kube Logs** | Uses your local `kubectl`: pick a kubeconfig context **or point directly at a kubemaster** (`--server` address + optional bearer token + skip-TLS), find pods for a service by name/label, fetch logs from one or many pods (multi-pod lines are prefixed with the pod name), tail/since filters, and grep (substring or regex) with match highlighting. Log source is either **container stdout** (`kubectl logs`) or a **file inside the pod** — devtil execs in and tails the file for services that write log files instead of stdout |
+| **Kube Logs** | Runs kubectl locally **or over SSH on the kubemaster** (`ssh user@host kubectl …`) for clusters only reachable from a jump/master host — using your own ssh config, keys and agent. Pick a kubeconfig context (listed from the SSH host when one is set), or point at an API server directly (`--server` + token + skip-TLS). Find pods for a service by name/label, fetch logs from one or many pods (multi-pod lines are prefixed with the pod name), tail/since filters, and grep (substring or regex) with match highlighting. Log source is either **container stdout** (`kubectl logs`) or a **file inside the pod** — devtil execs in and tails the file for services that write log files instead of stdout |
 | **Notepad** | Autosaving scratch pads with char/word/line counts |
 | **Generators** | UUID v4 (bulk), random strings/tokens, SHA-1/256/384/512 hashes |
 | **Timestamps** | Auto-detects epoch seconds/millis/date strings; converts to ISO, local, relative |
@@ -85,12 +85,21 @@ make cross    # dist/devtil-{darwin-arm64,darwin-amd64,windows-amd64.exe,linux-a
   never exposed to the network.
 - **Frontend** (`web/`): dependency-free vanilla JS/CSS embedded with
   `go:embed`; each tool is a small module registered in `web/js/tools.js`.
-- **Kube integration** shells out to your `kubectl`, so it honours existing
-  kubeconfigs, contexts and auth plugins. A cluster that isn't in your
-  kubeconfig can be reached by entering its API server (kubemaster) address —
-  passed to kubectl as `--server` (a bare IP is auto-prefixed with `https://`)
-  along with an optional `--token` and `--insecure-skip-tls-verify`. If
-  `kubectl` isn't installed the tool degrades gracefully with a hint.
+- **Kube integration** shells out to `kubectl`, so it honours existing
+  kubeconfigs, contexts and auth plugins. Two ways to reach a cluster that
+  your machine can't talk to directly:
+  - **SSH host** (the common jump-host/kubemaster setup): enter
+    `user@host` (+ optional port and identity file) and every kubectl
+    command runs on that machine via your system `ssh` — key/agent auth,
+    `BatchMode` (no password prompts), arguments safely quoted for the
+    remote shell. Contexts, namespaces and pods are then all listed from
+    the remote host's kubeconfig. Local kubectl isn't needed in this mode.
+  - **API server address**: passed to kubectl as `--server` (a bare IP is
+    auto-prefixed with `https://`) with optional `--token` and
+    `--insecure-skip-tls-verify`.
+
+  devtil stores no cluster credentials, and if `kubectl`/`ssh` are missing
+  the tool degrades gracefully with a hint.
 
 ## Adding a new tool
 

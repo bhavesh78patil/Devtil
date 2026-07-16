@@ -21,14 +21,36 @@ func Available() bool {
 	return err == nil
 }
 
-// Conn describes how to reach a cluster: a kubeconfig context, and/or a
-// direct API server (kubemaster) address with optional bearer token —
-// useful when the cluster isn't in the local kubeconfig.
+// SSHAvailable reports whether the ssh client is on PATH.
+func SSHAvailable() bool {
+	_, err := exec.LookPath("ssh")
+	return err == nil
+}
+
+// Conn describes how to reach a cluster. Three ways, combinable:
+//   - a kubeconfig context of the machine running kubectl
+//   - a direct API server address (--server/--token)
+//   - an SSH host (e.g. the kubemaster): kubectl is executed on that machine
+//     over `ssh`, using the developer's own ssh config/keys/agent, for setups
+//     where the cluster is only reachable from a jump/master host.
 type Conn struct {
 	Context  string `json:"context"`
 	Server   string `json:"server"`
 	Token    string `json:"token"`
 	Insecure bool   `json:"insecure"`
+	SSHHost  string `json:"sshHost"` // user@host — run kubectl here via ssh
+	SSHPort  string `json:"sshPort"`
+	SSHKey   string `json:"sshKey"` // optional identity file path
+}
+
+// SSH reports whether kubectl should run on a remote host over ssh.
+func (c Conn) SSH() bool { return strings.TrimSpace(c.SSHHost) != "" }
+
+// sshOnly keeps just the transport part of the connection — used for
+// commands like `kubectl config get-contexts` that must run on the right
+// machine but shouldn't carry --context/--server flags.
+func (c Conn) sshOnly() Conn {
+	return Conn{SSHHost: c.SSHHost, SSHPort: c.SSHPort, SSHKey: c.SSHKey}
 }
 
 func (c Conn) flags() []string {
@@ -53,7 +75,27 @@ func (c Conn) flags() []string {
 
 func run(ctx context.Context, conn Conn, args ...string) ([]byte, error) {
 	args = append(conn.flags(), args...)
-	cmd := exec.CommandContext(ctx, "kubectl", args...)
+
+	var cmd *exec.Cmd
+	if conn.SSH() {
+		sshArgs := []string{"-o", "BatchMode=yes", "-o", "ConnectTimeout=10"}
+		if p := strings.TrimSpace(conn.SSHPort); p != "" {
+			sshArgs = append(sshArgs, "-p", p)
+		}
+		if k := strings.TrimSpace(conn.SSHKey); k != "" {
+			sshArgs = append(sshArgs, "-i", k)
+		}
+		sshArgs = append(sshArgs, strings.TrimSpace(conn.SSHHost), "kubectl")
+		// ssh joins the command words and hands them to the remote shell,
+		// so every kubectl argument must be quoted for that shell
+		for _, a := range args {
+			sshArgs = append(sshArgs, shellQuote(a))
+		}
+		cmd = exec.CommandContext(ctx, "ssh", sshArgs...)
+	} else {
+		cmd = exec.CommandContext(ctx, "kubectl", args...)
+	}
+
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -62,17 +104,24 @@ func run(ctx context.Context, conn Conn, args ...string) ([]byte, error) {
 		if msg == "" {
 			msg = err.Error()
 		}
-		return nil, fmt.Errorf("kubectl: %s", msg)
+		tool := "kubectl"
+		if conn.SSH() {
+			tool = "ssh " + conn.SSHHost
+		}
+		return nil, fmt.Errorf("%s: %s", tool, msg)
 	}
 	return stdout.Bytes(), nil
 }
 
-// Contexts returns all kubeconfig context names plus the current one.
-func Contexts() (names []string, current string, err error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+// Contexts returns kubeconfig context names plus the current one — from the
+// SSH host's kubeconfig when an SSH connection is configured, otherwise from
+// the local one.
+func Contexts(conn Conn) (names []string, current string, err error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	out, err := run(ctx, Conn{}, "config", "get-contexts", "-o", "name")
+	transport := conn.sshOnly()
+	out, err := run(ctx, transport, "config", "get-contexts", "-o", "name")
 	if err != nil {
 		return nil, "", err
 	}
@@ -81,7 +130,7 @@ func Contexts() (names []string, current string, err error) {
 			names = append(names, line)
 		}
 	}
-	if cur, err := run(ctx, Conn{}, "config", "current-context"); err == nil {
+	if cur, err := run(ctx, transport, "config", "current-context"); err == nil {
 		current = strings.TrimSpace(string(cur))
 	}
 	return names, current, nil
