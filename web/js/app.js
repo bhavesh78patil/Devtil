@@ -86,6 +86,7 @@
         }),
       ]);
       item.addEventListener("click", () => {
+        if (state.activeWorkspaceId === ws.id) return; // keep DOM stable so dblclick-rename works
         state.activeWorkspaceId = ws.id;
         save();
         renderAll();
@@ -96,16 +97,23 @@
         nameSpan.replaceWith(input);
         input.focus();
         input.select();
-        const commit = () => {
-          ws.name = input.value.trim() || ws.name;
-          save();
+        let done = false;
+        const finish = (apply) => {
+          if (done) return; // renderAll blurs the input — don't run twice
+          done = true;
+          if (apply && input.value.trim()) {
+            ws.name = input.value.trim();
+            save();
+          }
           renderAll();
         };
-        input.addEventListener("blur", commit);
+        input.addEventListener("blur", () => finish(true));
         input.addEventListener("keydown", (ev) => {
-          if (ev.key === "Enter") input.blur();
-          if (ev.key === "Escape") renderAll();
+          ev.stopPropagation();
+          if (ev.key === "Enter") finish(true);
+          if (ev.key === "Escape") finish(false);
         });
+        input.addEventListener("click", (ev) => ev.stopPropagation());
       });
       list.append(item);
     }
@@ -117,17 +125,46 @@
     tabsBox.replaceChildren();
     for (const tab of ws.tabs) {
       const tool = getTool(tab.type);
+      const titleSpan = el("span", {
+        text: (tool ? tool.icon + " " : "") + tab.title,
+        title: "Double-click to rename",
+      });
       const node = el("div", { class: "tab" + (tab.id === ws.activeTabId ? " active" : "") }, [
-        el("span", { text: (tool ? tool.icon + " " : "") + tab.title }),
+        titleSpan,
         el("button", {
           class: "tab-close", text: "×", title: "Close tab",
           onclick: (e) => { e.stopPropagation(); closeTab(ws, tab.id); },
         }),
       ]);
       node.addEventListener("click", () => {
+        if (ws.activeTabId === tab.id) return; // keep DOM stable so dblclick-rename works
         ws.activeTabId = tab.id;
         save();
         renderAll();
+      });
+      titleSpan.addEventListener("dblclick", (e) => {
+        e.stopPropagation();
+        const input = el("input", { type: "text", class: "tab-rename", value: tab.title });
+        titleSpan.replaceWith(input);
+        input.focus();
+        input.select();
+        let done = false;
+        const finish = (apply) => {
+          if (done) return; // renderAll blurs the input — don't run twice
+          done = true;
+          if (apply && input.value.trim()) {
+            tab.title = input.value.trim();
+            save();
+          }
+          renderAll();
+        };
+        input.addEventListener("blur", () => finish(true));
+        input.addEventListener("keydown", (ev) => {
+          ev.stopPropagation();
+          if (ev.key === "Enter") finish(true);
+          if (ev.key === "Escape") finish(false);
+        });
+        input.addEventListener("click", (ev) => ev.stopPropagation());
       });
       tabsBox.append(node);
     }
@@ -192,6 +229,35 @@
     if (e.key === "Escape") overlay.classList.add("hidden");
   });
 
+  // ---- sidebar collapse ----
+
+  const navToggle = document.getElementById("nav-toggle");
+
+  function applyNav() {
+    document.getElementById("app").classList.toggle("nav-collapsed", !!state.sidebarCollapsed);
+  }
+
+  navToggle.addEventListener("click", () => {
+    state.sidebarCollapsed = !state.sidebarCollapsed;
+    applyNav();
+    save();
+  });
+
+  // ---- theme ----
+
+  const themeSelect = document.getElementById("theme-select");
+
+  function applyTheme(theme) {
+    document.documentElement.setAttribute("data-theme", theme === "dark" ? "dark" : "light");
+    themeSelect.value = theme === "dark" ? "dark" : "light";
+  }
+
+  themeSelect.addEventListener("change", () => {
+    state.theme = themeSelect.value;
+    applyTheme(state.theme);
+    save();
+  });
+
   // ---- boot ----
 
   async function boot() {
@@ -204,11 +270,13 @@
     if (loaded && Array.isArray(loaded.workspaces) && loaded.workspaces.length) {
       state = loaded;
     } else {
-      state = { version: 1, workspaces: [], activeWorkspaceId: null };
+      state = { version: 1, theme: "light", workspaces: [], activeWorkspaceId: null };
       const ws = { id: uid(), name: "Default", tabs: [], activeTabId: null };
       state.workspaces.push(ws);
       state.activeWorkspaceId = ws.id;
     }
+    applyTheme(state.theme || "light");
+    applyNav();
     renderAll();
   }
 

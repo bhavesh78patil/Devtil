@@ -17,11 +17,18 @@
     </div>
     <ul id="workspace-list"></ul>
     <div class="sidebar-foot">
+      <label class="theme-row">Theme
+        <select id="theme-select">
+          <option value="light">Light</option>
+          <option value="dark">Dark</option>
+        </select>
+      </label>
       <span id="save-indicator" class="saved">All changes saved</span>
     </div>
   </aside>
   <main id="main">
     <div id="tabbar">
+      <button id="nav-toggle" class="icon-btn" title="Show/hide the workspace sidebar">☰</button>
       <div id="tabs"></div>
       <button id="add-tab" class="icon-btn" title="New tab (pick a tool)">+</button>
     </div>
