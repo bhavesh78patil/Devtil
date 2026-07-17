@@ -258,6 +258,24 @@
     save();
   });
 
+  // ---- report UI errors into the backend log (best effort) ----
+
+  function reportClientError(message) {
+    try {
+      fetch("/api/logs/client", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message }),
+      }).catch(() => {});
+    } catch { /* never let logging break the app */ }
+  }
+  window.addEventListener("error", (e) => {
+    reportClientError(`${e.message} at ${e.filename}:${e.lineno}`);
+  });
+  window.addEventListener("unhandledrejection", (e) => {
+    reportClientError("unhandled rejection: " + (e.reason && e.reason.message ? e.reason.message : String(e.reason)));
+  });
+
   // ---- boot ----
 
   async function boot() {

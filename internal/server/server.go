@@ -9,9 +9,13 @@ import (
 	"io/fs"
 	"net/http"
 	"net/url"
+	"strconv"
+	"strings"
+	"time"
 
 	"github.com/bhavesh78patil/devtil/internal/clients"
 	"github.com/bhavesh78patil/devtil/internal/kube"
+	"github.com/bhavesh78patil/devtil/internal/logging"
 	"github.com/bhavesh78patil/devtil/internal/proxy"
 	"github.com/bhavesh78patil/devtil/internal/store"
 )
@@ -48,8 +52,64 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/kube/pods", s.kubePods)
 	mux.HandleFunc("POST /api/kube/logs", s.kubeLogs)
 
+	mux.HandleFunc("GET /api/logs", s.getLogs)
+	mux.HandleFunc("POST /api/logs/client", s.clientLog)
+
 	mux.Handle("/", http.FileServer(http.FS(s.web)))
-	return mux
+	return logRequests(mux)
+}
+
+// statusRecorder captures the response code for the request log.
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+}
+
+func (r *statusRecorder) WriteHeader(code int) {
+	r.status = code
+	r.ResponseWriter.WriteHeader(code)
+}
+
+// logRequests logs every /api call (except the log viewer's own polling)
+// with method, path, status and duration. Query strings are dropped —
+// they can carry tokens.
+func logRequests(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasPrefix(r.URL.Path, "/api/") || strings.HasPrefix(r.URL.Path, "/api/logs") {
+			next.ServeHTTP(w, r)
+			return
+		}
+		rec := &statusRecorder{ResponseWriter: w, status: 200}
+		start := time.Now()
+		next.ServeHTTP(rec, r)
+		logging.Logf("http: %s %s -> %d (%dms)", r.Method, r.URL.Path, rec.status, time.Since(start).Milliseconds())
+	})
+}
+
+func (s *Server) getLogs(w http.ResponseWriter, r *http.Request) {
+	n, _ := strconv.Atoi(r.URL.Query().Get("lines"))
+	if n <= 0 || n > 5000 {
+		n = 500
+	}
+	lines, err := logging.Tail(n)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, map[string]any{"lines": lines, "path": logging.Path()})
+}
+
+// clientLog lets the frontend record its own errors into the same log.
+func (s *Server) clientLog(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Message string `json:"message"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 16<<10)).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	logging.Logf("ui: %s", logging.Snippet(req.Message, 2000))
+	writeJSON(w, map[string]any{"ok": true})
 }
 
 func (s *Server) getState(w http.ResponseWriter, r *http.Request) {

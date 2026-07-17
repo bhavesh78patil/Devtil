@@ -1691,6 +1691,69 @@
   });
 
   // ======================================================================
+  // App Logs — devtil's own diagnostic log, for debugging the tools
+  // ======================================================================
+  registerTool({
+    type: "applogs",
+    icon: "🐞",
+    name: "App Logs",
+    desc: "Devtil's own diagnostic log: every kubectl/ssh command, proxy call, DB/Kafka connection and UI error — for debugging the tools themselves.",
+    defaults: () => ({ lines: "500", filter: "", auto: false }),
+    render(root, tab, ctx) {
+      const d = tab.data;
+      const status = el("div", { class: "status-line dim" });
+      const pre = el("pre", { class: "output", style: "flex:1;min-height:200px" });
+      let cached = [];
+      let timer = null;
+
+      const lines = bindField(el("input", { type: "number", min: "50", max: "5000", style: "width:90px" }), d, "lines", ctx);
+      const filter = bindField(el("input", { type: "text", placeholder: "filter (e.g. kube:, error, pods)", style: "flex:1;min-width:180px" }), d, "filter", ctx, () => draw());
+      const auto = bindField(el("input", { type: "checkbox" }), d, "auto", ctx, () => schedule());
+
+      const draw = () => {
+        const q = (d.filter || "").trim().toLowerCase();
+        const shown = q ? cached.filter((l) => l.toLowerCase().includes(q)) : cached;
+        pre.textContent = shown.join("\n") || "(no matching log lines)";
+        pre.scrollTop = pre.scrollHeight;
+      };
+
+      const refresh = async () => {
+        try {
+          const r = await api("GET", "/api/logs?lines=" + (Number(d.lines) || 500));
+          cached = r.lines || [];
+          draw();
+          setStatus(status, `✓ ${cached.length} line(s) · file: ${r.path}`, "ok");
+        } catch (e) {
+          setStatus(status, "✗ " + e.message, "err");
+        }
+      };
+
+      const schedule = () => {
+        clearInterval(timer);
+        if (d.auto) timer = setInterval(() => {
+          // stop polling once this tab is no longer on screen
+          if (!root.isConnected) return clearInterval(timer);
+          refresh();
+        }, 3000);
+      };
+
+      root.append(
+        el("div", { class: "toolbar" }, [
+          el("button", { class: "btn primary", text: "⟳ Refresh", onclick: refresh }),
+          el("label", { class: "inline" }, ["Tail", lines, "lines"]),
+          filter,
+          el("label", { class: "inline" }, [auto, "Auto-refresh (3s)"]),
+          copyBtn(() => pre.textContent, "Copy"),
+        ]),
+        status,
+        pre
+      );
+      refresh();
+      schedule();
+    },
+  });
+
+  // ======================================================================
   // Notepad
   // ======================================================================
   registerTool({

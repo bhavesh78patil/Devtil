@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"runtime"
 
+	"github.com/bhavesh78patil/devtil/internal/logging"
 	"github.com/bhavesh78patil/devtil/internal/server"
 	"github.com/bhavesh78patil/devtil/internal/store"
 )
@@ -43,6 +44,9 @@ func main() {
 	if err != nil {
 		log.Fatalf("devtil: %v", err)
 	}
+	if err := logging.Init(dir); err != nil {
+		log.Printf("devtil: file logging disabled: %v", err)
+	}
 
 	web, err := fs.Sub(webFS, "web")
 	if err != nil {
@@ -56,7 +60,7 @@ func main() {
 	}
 	url := fmt.Sprintf("http://%s", ln.Addr().String())
 
-	log.Printf("devtil running at %s (state: %s)", url, st.Path())
+	log.Printf("devtil running at %s (state: %s, log: %s)", url, st.Path(), logging.Path())
 	if !*noBrowser {
 		openBrowser(url)
 	}

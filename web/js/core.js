@@ -92,8 +92,16 @@ window.Devtil = (() => {
       opts.body = JSON.stringify(body);
     }
     const res = await fetch(path, opts);
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(data.error || `${res.status} ${res.statusText}`);
+    const text = await res.text();
+    let data = {};
+    if (text) {
+      try {
+        data = JSON.parse(text);
+      } catch {
+        throw new Error(`${res.status} ${res.statusText} — server sent a non-JSON response (${text.length} bytes); check the App Logs tool`);
+      }
+    }
+    if (!res.ok) throw new Error(data.error || `${res.status} ${res.statusText}${text ? "" : " (empty response)"}`);
     return data;
   }
 

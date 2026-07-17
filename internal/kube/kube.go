@@ -16,6 +16,8 @@ import (
 	"time"
 
 	"golang.org/x/crypto/ssh"
+
+	"github.com/bhavesh78patil/devtil/internal/logging"
 )
 
 // Available reports whether kubectl is on PATH.
@@ -77,6 +79,18 @@ func (c Conn) flags() []string {
 	return f
 }
 
+// redactArgs hides secret values (e.g. --token) in logged command lines.
+func redactArgs(args []string) string {
+	out := make([]string, len(args))
+	for i, a := range args {
+		out[i] = a
+		if i > 0 && args[i-1] == "--token" {
+			out[i] = "***"
+		}
+	}
+	return strings.Join(out, " ")
+}
+
 func run(ctx context.Context, conn Conn, args ...string) ([]byte, error) {
 	args = append(conn.flags(), args...)
 
@@ -106,17 +120,23 @@ func run(ctx context.Context, conn Conn, args ...string) ([]byte, error) {
 		cmd = exec.CommandContext(ctx, "kubectl", args...)
 	}
 
+	tool := "kubectl"
+	if conn.SSH() {
+		tool = "ssh " + conn.SSHHost
+	}
+	logging.Logf("kube: run [%s] kubectl %s", tool, redactArgs(args))
+
+	start := time.Now()
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
+	err := cmd.Run()
+	logging.Logf("kube: done in %dms, stdout=%dB, stderr=%q, err=%v",
+		time.Since(start).Milliseconds(), stdout.Len(), logging.Snippet(stderr.String(), 400), err)
+	if err != nil {
 		msg := strings.TrimSpace(stderr.String())
 		if msg == "" {
 			msg = err.Error()
-		}
-		tool := "kubectl"
-		if conn.SSH() {
-			tool = "ssh " + conn.SSHHost
 		}
 		return nil, fmt.Errorf("%s: %s", tool, msg)
 	}
@@ -184,6 +204,9 @@ func Pods(conn Conn, namespace, query string) ([]Pod, error) {
 	if err != nil {
 		return nil, err
 	}
+	if len(bytes.TrimSpace(out)) == 0 {
+		return nil, fmt.Errorf("kubectl produced no output for 'get pods -n %s' — open the App Logs tool to see the exact command and its stderr", namespace)
+	}
 
 	var list struct {
 		Items []struct {
@@ -203,7 +226,8 @@ func Pods(conn Conn, namespace, query string) ([]Pod, error) {
 		} `json:"items"`
 	}
 	if err := json.Unmarshal(out, &list); err != nil {
-		return nil, fmt.Errorf("parse kubectl output: %w", err)
+		logging.Logf("kube: unparseable 'get pods' output (%dB): %s", len(out), logging.Snippet(string(out), 600))
+		return nil, fmt.Errorf("kubectl returned %d bytes that are not valid JSON (%v) — the output starts with %q; see the App Logs tool for details", len(out), err, logging.Snippet(string(out), 80))
 	}
 
 	query = strings.ToLower(strings.TrimSpace(query))
@@ -315,9 +339,15 @@ func runSSHPassword(ctx context.Context, conn Conn, args []string) ([]byte, erro
 	for _, a := range args {
 		cmd += " " + shellQuote(a)
 	}
+	logging.Logf("kube: run [ssh-password %s@%s] kubectl %s", user, addr, redactArgs(args))
+
+	start := time.Now()
 	var stdout, stderr bytes.Buffer
 	sess.Stdout, sess.Stderr = &stdout, &stderr
-	if err := sess.Run(cmd); err != nil {
+	err = sess.Run(cmd)
+	logging.Logf("kube: done in %dms, stdout=%dB, stderr=%q, err=%v",
+		time.Since(start).Milliseconds(), stdout.Len(), logging.Snippet(stderr.String(), 400), err)
+	if err != nil {
 		msg := strings.TrimSpace(stderr.String())
 		if msg == "" {
 			msg = err.Error()

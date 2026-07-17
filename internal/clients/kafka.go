@@ -13,6 +13,8 @@ import (
 
 	"github.com/segmentio/kafka-go"
 	"github.com/segmentio/kafka-go/sasl/plain"
+
+	"github.com/bhavesh78patil/devtil/internal/logging"
 )
 
 type KafkaConn struct {
@@ -68,8 +70,10 @@ func KafkaTopics(conn KafkaConn) ([]KafkaTopic, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
+	logging.Logf("kafka: list topics via %s", brokers[0])
 	c, err := conn.dialer().DialContext(ctx, "tcp", brokers[0])
 	if err != nil {
+		logging.Logf("kafka: dial %s failed: %v", brokers[0], err)
 		return nil, fmt.Errorf("kafka: %v", err)
 	}
 	defer c.Close()
