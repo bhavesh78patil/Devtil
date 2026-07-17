@@ -192,6 +192,21 @@
     if (e.key === "Escape") overlay.classList.add("hidden");
   });
 
+  // ---- theme ----
+
+  const themeSelect = document.getElementById("theme-select");
+
+  function applyTheme(theme) {
+    document.documentElement.setAttribute("data-theme", theme === "dark" ? "dark" : "light");
+    themeSelect.value = theme === "dark" ? "dark" : "light";
+  }
+
+  themeSelect.addEventListener("change", () => {
+    state.theme = themeSelect.value;
+    applyTheme(state.theme);
+    save();
+  });
+
   // ---- boot ----
 
   async function boot() {
@@ -204,11 +219,12 @@
     if (loaded && Array.isArray(loaded.workspaces) && loaded.workspaces.length) {
       state = loaded;
     } else {
-      state = { version: 1, workspaces: [], activeWorkspaceId: null };
+      state = { version: 1, theme: "light", workspaces: [], activeWorkspaceId: null };
       const ws = { id: uid(), name: "Default", tabs: [], activeTabId: null };
       state.workspaces.push(ws);
       state.activeWorkspaceId = ws.id;
     }
+    applyTheme(state.theme || "light");
     renderAll();
   }
 

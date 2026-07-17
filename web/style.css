@@ -1,4 +1,22 @@
 :root {
+  /* light theme (default) */
+  --bg: #f4f5f8;
+  --bg2: #ffffff;
+  --bg3: #e9ebf1;
+  --border: #d5d9e2;
+  --text: #1f2430;
+  --text-dim: #667085;
+  --accent: #3b6fdb;
+  --accent-soft: rgba(59, 111, 219, 0.12);
+  --green: #1e9e55;
+  --red: #d13b33;
+  --yellow: #a3711d;
+  --overlay: rgba(15, 17, 23, 0.4);
+  --mono: ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
+  --sans: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
+
+:root[data-theme="dark"] {
   --bg: #0f1117;
   --bg2: #161923;
   --bg3: #1e2230;
@@ -10,8 +28,7 @@
   --green: #3fb970;
   --red: #e5534b;
   --yellow: #d9a03f;
-  --mono: ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
-  --sans: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --overlay: rgba(0, 0, 0, 0.6);
 }
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -92,9 +109,24 @@ body {
 #workspace-list li:hover .ws-del { visibility: visible; }
 
 .sidebar-foot {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
   padding: 10px 16px;
   border-top: 1px solid var(--border);
   font-size: 12px;
+}
+
+.theme-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: var(--text-dim);
+}
+#theme-select {
+  font-family: var(--sans);
+  font-size: 12px;
+  padding: 3px 6px;
 }
 #save-indicator.saved { color: var(--text-dim); }
 #save-indicator.saving { color: var(--yellow); }
@@ -163,7 +195,7 @@ body {
 
 #picker-overlay {
   position: fixed; inset: 0;
-  background: rgba(0, 0, 0, 0.6);
+  background: var(--overlay);
   display: flex; align-items: center; justify-content: center;
   z-index: 100;
 }
@@ -318,8 +350,8 @@ table.kv th { color: var(--text-dim); font-weight: 500; white-space: nowrap; }
 /* ---------- diff ---------- */
 
 .diff-line { display: block; padding: 0 6px; }
-.diff-line.add { background: rgba(63, 185, 112, 0.15); color: #7ee2a8; }
-.diff-line.del { background: rgba(229, 83, 75, 0.15); color: #f0928c; }
+.diff-line.add { background: rgba(63, 185, 112, 0.15); color: var(--green); }
+.diff-line.del { background: rgba(229, 83, 75, 0.15); color: var(--red); }
 
 /* ---------- kube ---------- */
 

@@ -32,6 +32,8 @@ the UI in an app window.
   with a double-click, delete with confirmation.
 - Inside a workspace, open **tabs** — each tab is one tool instance with its
   own inputs and results. `Ctrl/Cmd+K` opens the tool picker.
+- **Light & dark themes** — a selector in the sidebar (light is the
+  default); the choice is saved with the rest of your state.
 - **Everything is autosaved** (debounced) to disk via the backend — inputs,
   outputs, API responses, request history, fetched logs, notes. Kill the app,
   reopen it later, and every workspace and tab is exactly as you left it.
