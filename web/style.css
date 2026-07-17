@@ -160,6 +160,15 @@ body {
 }
 .tab:hover { color: var(--text); }
 .tab.active { color: var(--text); border-bottom-color: var(--accent); }
+.tab input.tab-rename {
+  width: 130px;
+  background: var(--bg);
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  color: var(--text);
+  font: inherit;
+  padding: 1px 6px;
+}
 .tab .tab-close {
   border: none; background: none; color: var(--text-dim);
   cursor: pointer; font-size: 14px; padding: 0 4px; border-radius: 4px;
