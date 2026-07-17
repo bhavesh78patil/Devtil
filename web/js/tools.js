@@ -960,6 +960,496 @@
   });
 
   // ======================================================================
+  // Data-infrastructure clients (Kafka / Elastic / Cassandra / Oracle)
+  // Shared pattern, mirroring the API client: a side panel of saved
+  // connections (clusters) + inner console tabs. Everything autosaves and
+  // stays until the user deletes it from the tab.
+  // ======================================================================
+
+  function clientTool(cfg) {
+    registerTool({
+      type: cfg.type,
+      icon: cfg.icon,
+      name: cfg.name,
+      desc: cfg.desc,
+      defaults: () => ({ connections: [], activeConnId: null, consoles: [], activeConsoleId: null }),
+      render(root, tab, ctx) {
+        const d = tab.data;
+        if (!Array.isArray(d.connections)) d.connections = [];
+        if (!Array.isArray(d.consoles)) d.consoles = [];
+        if (!d.consoles.length) d.consoles.push(cfg.newConsole());
+        if (!d.consoles.some((c) => c.id === d.activeConsoleId)) d.activeConsoleId = d.consoles[0].id;
+
+        const sideBox = el("div", { class: "api-side" });
+        const mainBox = el("div", { class: "api-main" });
+        root.append(el("div", { class: "api-layout" }, [sideBox, mainBox]));
+
+        const activeConn = () => d.connections.find((c) => c.id === d.activeConnId) || null;
+        let editingId = null;
+        let adding = false;
+
+        function connForm(existing) {
+          const form = el("div", { class: "conn-form" });
+          const values = {};
+          cfg.fields.forEach((f) => {
+            const input = f.type === "checkbox"
+              ? el("input", { type: "checkbox" })
+              : el("input", { type: f.type || "text", placeholder: f.placeholder || "", style: "width:100%" });
+            if (existing) {
+              if (f.type === "checkbox") input.checked = !!existing[f.key];
+              else input.value = existing[f.key] || "";
+            }
+            values[f.key] = input;
+            form.append(f.type === "checkbox"
+              ? el("label", { class: "inline" }, [input, f.label])
+              : el("div", { class: "field" }, [el("span", { class: "pane-label", text: f.label }), input]));
+          });
+          form.append(el("div", { class: "toolbar" }, [
+            el("button", {
+              class: "btn primary", text: existing ? "Save" : "Add",
+              onclick: () => {
+                const target = existing || { id: uid() };
+                cfg.fields.forEach((f) => {
+                  target[f.key] = f.type === "checkbox" ? values[f.key].checked : values[f.key].value.trim();
+                });
+                if (!existing) {
+                  d.connections.push(target);
+                  d.activeConnId = target.id;
+                }
+                adding = false;
+                editingId = null;
+                ctx.save();
+                renderSide();
+                renderMain();
+              },
+            }),
+            el("button", { class: "btn", text: "Cancel", onclick: () => { adding = false; editingId = null; renderSide(); } }),
+          ]));
+          return form;
+        }
+
+        function renderSide() {
+          const box = el("div", { class: "api-side-content" });
+          sideBox.replaceChildren(
+            el("div", { class: "subtabs" }, [
+              el("button", { class: "active", text: `${cfg.connLabel} (${d.connections.length})` }),
+            ]),
+            box
+          );
+          if (!d.connections.length && !adding) {
+            box.append(el("div", { class: "status-line dim", text: `No ${cfg.connLabel.toLowerCase()} yet — add one to get started. Click a ${cfg.connSingular} to make it active.` }));
+          }
+          d.connections.forEach((c, i) => {
+            box.append(el("div", {
+              class: "history-item" + (c.id === d.activeConnId ? " conn-active" : ""),
+              title: "Click to make this the active " + cfg.connSingular,
+              onclick: () => { d.activeConnId = c.id; ctx.save(); renderSide(); renderMain(); },
+            }, [
+              el("span", { class: "conn-dot" + (c.id === d.activeConnId ? " on" : "") }),
+              el("span", { class: "h-url", text: c.name || cfg.connName(c) || cfg.connSingular }),
+              el("button", { class: "icon-btn", text: "✎", title: "Edit", onclick: (e) => { e.stopPropagation(); editingId = c.id; adding = false; renderSide(); } }),
+              el("button", {
+                class: "icon-btn", text: "×", title: "Delete " + cfg.connSingular,
+                onclick: (e) => {
+                  e.stopPropagation();
+                  if (!confirm(`Delete ${cfg.connSingular} "${c.name || cfg.connName(c)}"?`)) return;
+                  d.connections.splice(i, 1);
+                  if (d.activeConnId === c.id) d.activeConnId = d.connections[0]?.id ?? null;
+                  ctx.save();
+                  renderSide();
+                  renderMain();
+                },
+              }),
+            ]));
+            if (editingId === c.id) box.append(connForm(c));
+          });
+          if (adding) box.append(connForm(null));
+          else box.append(el("div", {}, [
+            el("button", { class: "btn", text: "+ Add " + cfg.connSingular, onclick: () => { adding = true; editingId = null; renderSide(); } }),
+          ]));
+        }
+
+        function renderMain() {
+          mainBox.replaceChildren();
+          mainBox.append(el("div", { class: "req-tabs" }, [
+            ...d.consoles.map((c) =>
+              el("div", {
+                class: "req-tab" + (c.id === d.activeConsoleId ? " active" : ""),
+                onclick: () => {
+                  if (d.activeConsoleId === c.id) return;
+                  d.activeConsoleId = c.id;
+                  ctx.save();
+                  renderMain();
+                },
+              }, [
+                el("span", { text: cfg.consoleLabel(c) }),
+                el("button", {
+                  class: "tab-close", text: "×", title: "Close console tab",
+                  onclick: (e) => {
+                    e.stopPropagation();
+                    const idx = d.consoles.findIndex((x) => x.id === c.id);
+                    d.consoles.splice(idx, 1);
+                    if (!d.consoles.length) d.consoles.push(cfg.newConsole());
+                    if (d.activeConsoleId === c.id) d.activeConsoleId = d.consoles[Math.min(idx, d.consoles.length - 1)].id;
+                    ctx.save();
+                    renderMain();
+                  },
+                }),
+              ])
+            ),
+            el("button", {
+              class: "icon-btn", text: "+", title: "New console tab",
+              onclick: () => {
+                const c = cfg.newConsole();
+                d.consoles.push(c);
+                d.activeConsoleId = c.id;
+                ctx.save();
+                renderMain();
+              },
+            }),
+          ]));
+
+          const conn = activeConn();
+          const consoleData = d.consoles.find((c) => c.id === d.activeConsoleId) || d.consoles[0];
+          const body = el("div", { class: "tool", style: "flex:1" });
+          mainBox.append(body);
+          if (!conn) {
+            body.append(el("div", { class: "empty-hint" }, [
+              el("div", { class: "big", text: cfg.icon }),
+              el("div", { text: `Add a ${cfg.connSingular} in the left panel and click it to make it active.` }),
+            ]));
+            return;
+          }
+          cfg.renderConsole(body, conn, consoleData, ctx);
+        }
+
+        renderSide();
+        renderMain();
+      },
+    });
+  }
+
+  /** Render a QueryResult (or {error}) as a status line + data grid. */
+  function resultGrid(res) {
+    if (!res) return el("div", { class: "status-line dim", text: "Run a query to see results here" });
+    if (res.error) return el("div", { class: "status-line err", text: "✗ " + res.error });
+    if (!res.columns || !res.columns.length) {
+      return el("div", { class: "status-line ok", text: `✓ OK — ${res.rowsAffected ?? 0} row(s) affected · ${res.durationMs ?? 0} ms` });
+    }
+    return el("div", { class: "tool", style: "flex:1;min-height:0" }, [
+      el("div", { class: "status-line ok", text: `✓ ${res.rows.length} row(s)${res.truncated ? " (truncated)" : ""} · ${res.durationMs} ms` }),
+      el("div", { style: "overflow:auto;flex:1;min-height:120px" }, [
+        el("table", { class: "kv" }, [
+          el("tr", {}, res.columns.map((c) => el("th", { text: c }))),
+          ...res.rows.map((r) => el("tr", {}, r.map((v) => el("td", { text: v })))),
+        ]),
+      ]),
+    ]);
+  }
+
+  const consoleName = (q, fallback) => {
+    const words = (q || "").trim().split(/\s+/).slice(0, 3).join(" ");
+    return words ? words.slice(0, 22) : fallback;
+  };
+
+  /** Query console shared by Cassandra and Oracle. */
+  const sqlConsole = (dbType, placeholder) => (body, conn, c, ctx) => {
+    const status = el("div", { class: "status-line dim" });
+    const out = el("div", { style: "flex:1;overflow:auto;display:flex;flex-direction:column" });
+
+    const query = el("textarea", { rows: "5", style: "width:100%", spellcheck: "false", placeholder });
+    query.value = c.query || "";
+    query.addEventListener("input", () => { c.query = query.value; ctx.save(); });
+
+    const maxRows = el("input", { type: "number", min: "1", max: "5000", style: "width:90px" });
+    maxRows.value = c.maxRows || "200";
+    maxRows.addEventListener("input", () => { c.maxRows = maxRows.value; ctx.save(); });
+
+    const run = async () => {
+      if (!(c.query || "").trim()) return setStatus(status, "✗ Enter a query", "err");
+      setStatus(status, "Running…", "dim");
+      try {
+        const res = await api("POST", "/api/db/query", {
+          type: dbType,
+          conn: { ...conn, port: Number(conn.port) || 0 },
+          query: c.query,
+          maxRows: Number(c.maxRows) || 200,
+        });
+        c.result = res;
+        setStatus(status, "", "dim");
+      } catch (e) {
+        c.result = { error: e.message };
+        setStatus(status, "", "dim");
+      }
+      c.name = consoleName(c.query, "query");
+      ctx.save();
+      out.replaceChildren(resultGrid(c.result));
+    };
+    query.addEventListener("keydown", (e) => { if ((e.ctrlKey || e.metaKey) && e.key === "Enter") run(); });
+
+    body.append(
+      query,
+      el("div", { class: "toolbar" }, [
+        el("button", { class: "btn primary", text: "Run (Ctrl+Enter)", onclick: run }),
+        el("label", { class: "inline" }, ["Max rows", maxRows]),
+        status,
+      ]),
+      out
+    );
+    out.replaceChildren(resultGrid(c.result));
+  };
+
+  /** Kafka console: topics browser, tail consumer, producer. */
+  function kafkaConsole(body, conn, c, ctx) {
+    const status = el("div", { class: "status-line dim" });
+    const out = el("div", { style: "flex:1;overflow:auto;display:flex;flex-direction:column;gap:10px" });
+
+    const topic = el("input", { type: "text", placeholder: "topic", style: "min-width:200px" });
+    topic.value = c.topic || "";
+    topic.addEventListener("input", () => { c.topic = topic.value.trim(); ctx.save(); });
+    const max = el("input", { type: "number", min: "1", max: "500", style: "width:80px" });
+    max.value = c.max || "50";
+    max.addEventListener("input", () => { c.max = max.value; ctx.save(); });
+
+    const draw = () => {
+      out.replaceChildren();
+      if (Array.isArray(c.topics)) {
+        out.append(
+          el("span", { class: "pane-label", text: `Topics (${c.topics.length}) — click to select` }),
+          el("table", { class: "kv" }, [
+            el("tr", {}, [el("th", { text: "Topic" }), el("th", { text: "Partitions" })]),
+            ...c.topics.map((t) => el("tr", {
+              class: "pod-row",
+              onclick: () => { c.topic = t.name; topic.value = t.name; ctx.save(); },
+            }, [el("td", { text: t.name }), el("td", { text: String(t.partitions) })])),
+          ])
+        );
+      }
+      if (Array.isArray(c.messages)) {
+        out.append(
+          el("span", { class: "pane-label", text: `Messages (${c.messages.length}, oldest first)` }),
+          el("table", { class: "kv" }, [
+            el("tr", {}, [el("th", { text: "P/Offset" }), el("th", { text: "Time" }), el("th", { text: "Key" }), el("th", { text: "Value" })]),
+            ...c.messages.map((m) => el("tr", {}, [
+              el("td", { text: m.partition + "/" + m.offset }),
+              el("td", { text: m.time }),
+              el("td", { text: m.key }),
+              el("td", { text: m.value }),
+            ])),
+          ])
+        );
+      }
+    };
+
+    const listTopics = async () => {
+      setStatus(status, "Listing topics…", "dim");
+      try {
+        const r = await api("POST", "/api/kafka/topics", { conn });
+        c.topics = r.topics;
+        ctx.save();
+        draw();
+        setStatus(status, `✓ ${r.topics.length} topic(s)`, "ok");
+      } catch (e) {
+        setStatus(status, "✗ " + e.message, "err");
+      }
+    };
+    const consume = async () => {
+      if (!c.topic) return setStatus(status, "✗ Enter or pick a topic", "err");
+      setStatus(status, "Reading latest messages…", "dim");
+      try {
+        const r = await api("POST", "/api/kafka/consume", { conn, topic: c.topic, max: Number(c.max) || 50 });
+        c.messages = r.messages;
+        c.name = c.topic;
+        ctx.save();
+        draw();
+        setStatus(status, `✓ ${r.messages.length} message(s)`, "ok");
+      } catch (e) {
+        setStatus(status, "✗ " + e.message, "err");
+      }
+    };
+
+    const prodKey = el("input", { type: "text", placeholder: "key (optional)", style: "width:160px" });
+    prodKey.value = c.prodKey || "";
+    prodKey.addEventListener("input", () => { c.prodKey = prodKey.value; ctx.save(); });
+    const prodValue = el("input", { type: "text", placeholder: "message value", style: "flex:1;min-width:200px" });
+    prodValue.value = c.prodValue || "";
+    prodValue.addEventListener("input", () => { c.prodValue = prodValue.value; ctx.save(); });
+    const produce = async () => {
+      if (!c.topic) return setStatus(status, "✗ Enter or pick a topic", "err");
+      setStatus(status, "Producing…", "dim");
+      try {
+        await api("POST", "/api/kafka/produce", { conn, topic: c.topic, key: c.prodKey || "", value: c.prodValue || "" });
+        setStatus(status, "✓ Message produced to " + c.topic, "ok");
+      } catch (e) {
+        setStatus(status, "✗ " + e.message, "err");
+      }
+    };
+
+    body.append(
+      el("div", { class: "toolbar" }, [
+        el("button", { class: "btn", text: "List topics", onclick: listTopics }),
+        topic,
+        el("label", { class: "inline" }, ["Last", max, "msgs"]),
+        el("button", { class: "btn primary", text: "Consume", onclick: consume }),
+      ]),
+      el("div", { class: "toolbar" }, [
+        el("span", { class: "pane-label", text: "Produce" }),
+        prodKey, prodValue,
+        el("button", { class: "btn", text: "Send", onclick: produce }),
+      ]),
+      status,
+      out
+    );
+    draw();
+  }
+
+  /** Elasticsearch / OpenSearch console: REST requests through the proxy. */
+  function esConsole(body, conn, c, ctx) {
+    const status = el("div", { class: "status-line dim" });
+    const out = el("pre", { class: "output", style: "flex:1;min-height:160px" });
+
+    const methodSel = el("select", {}, ["GET", "POST", "PUT", "DELETE", "HEAD"].map((m) => el("option", { value: m, text: m })));
+    methodSel.value = c.method || "GET";
+    methodSel.addEventListener("change", () => { c.method = methodSel.value; ctx.save(); });
+    const path = el("input", { type: "text", placeholder: "_cluster/health · my-index/_search", style: "flex:1" });
+    path.value = c.path || "";
+    path.addEventListener("input", () => { c.path = path.value; ctx.save(); });
+    const reqBody = el("textarea", { rows: "4", style: "width:100%", spellcheck: "false", placeholder: '{"query": {"match_all": {}}, "size": 10}' });
+    reqBody.value = c.body || "";
+    reqBody.addEventListener("input", () => { c.body = reqBody.value; ctx.save(); });
+
+    const send = async (method, p, bodyText) => {
+      if (!conn.baseUrl) return setStatus(status, "✗ The active cluster has no base URL", "err");
+      setStatus(status, "Sending…", "dim");
+      const headers = {};
+      if (bodyText) headers["Content-Type"] = "application/json";
+      if (conn.username) headers["Authorization"] = "Basic " + btoa(conn.username + ":" + (conn.password || ""));
+      try {
+        const r = await api("POST", "/api/proxy", {
+          method,
+          url: conn.baseUrl.replace(/\/+$/, "") + "/" + String(p || "").replace(/^\/+/, ""),
+          headers,
+          body: bodyText || "",
+          insecure: !!conn.insecure,
+        });
+        let text = r.body;
+        try { text = JSON.stringify(JSON.parse(r.body), null, 2); } catch { /* not JSON */ }
+        c.response = text;
+        c.name = method + " /" + String(p || "").split("?")[0];
+        ctx.save();
+        out.textContent = text;
+        setStatus(status, `${r.status < 400 ? "✓" : "✗"} ${r.status} · ${r.durationMs} ms · ${fmtBytes(r.size)}`, r.status < 400 ? "ok" : "err");
+      } catch (e) {
+        setStatus(status, "✗ " + e.message, "err");
+      }
+    };
+    const quick = (label, method, p) => el("button", {
+      class: "btn", text: label,
+      onclick: () => { c.method = method; c.path = p; methodSel.value = method; path.value = p; ctx.save(); send(method, p, ""); },
+    });
+    path.addEventListener("keydown", (e) => { if (e.key === "Enter") send(c.method || "GET", c.path, c.body); });
+
+    body.append(
+      el("div", { class: "toolbar" }, [
+        quick("Cluster health", "GET", "_cluster/health"),
+        quick("Indices", "GET", "_cat/indices?v&format=json"),
+        quick("Nodes", "GET", "_cat/nodes?v&format=json"),
+      ]),
+      el("div", { class: "req-line" }, [
+        methodSel, path,
+        el("button", { class: "btn primary", text: "Send", onclick: () => send(c.method || "GET", c.path, c.body) }),
+      ]),
+      el("div", {}, [el("span", { class: "pane-label", text: "Body (JSON, for _search etc.)" }), reqBody]),
+      status,
+      out
+    );
+    if (c.response) out.textContent = c.response;
+  }
+
+  clientTool({
+    type: "kafka",
+    icon: "📨",
+    name: "Kafka",
+    desc: "Browse topics, tail the latest messages and produce — multiple clusters, SASL/TLS supported.",
+    connLabel: "Clusters",
+    connSingular: "cluster",
+    connName: (c) => c.brokers,
+    fields: [
+      { key: "name", label: "Name", placeholder: "prod-cluster" },
+      { key: "brokers", label: "Brokers (comma-separated)", placeholder: "broker1:9092, broker2:9092" },
+      { key: "username", label: "SASL username (optional)" },
+      { key: "password", label: "SASL password", type: "password" },
+      { key: "tls", label: "TLS", type: "checkbox" },
+      { key: "insecure", label: "Skip TLS verification", type: "checkbox" },
+    ],
+    newConsole: () => ({ id: uid(), topic: "", max: "50" }),
+    consoleLabel: (c) => c.name || c.topic || "console",
+    renderConsole: kafkaConsole,
+  });
+
+  clientTool({
+    type: "elastic",
+    icon: "🔎",
+    name: "Elastic / OpenSearch",
+    desc: "Query Elasticsearch and OpenSearch clusters: health, indices, search — with basic auth per cluster.",
+    connLabel: "Clusters",
+    connSingular: "cluster",
+    connName: (c) => c.baseUrl,
+    fields: [
+      { key: "name", label: "Name", placeholder: "logs-cluster" },
+      { key: "baseUrl", label: "Base URL", placeholder: "http://elastic-host:9200" },
+      { key: "username", label: "Username (optional)" },
+      { key: "password", label: "Password", type: "password" },
+      { key: "insecure", label: "Skip TLS verification", type: "checkbox" },
+    ],
+    newConsole: () => ({ id: uid(), method: "GET", path: "_cluster/health", body: "" }),
+    consoleLabel: (c) => c.name || "console",
+    renderConsole: esConsole,
+  });
+
+  clientTool({
+    type: "cassandra",
+    icon: "💠",
+    name: "Cassandra",
+    desc: "Run CQL against Cassandra clusters — results grid, multiple connections and query tabs.",
+    connLabel: "Connections",
+    connSingular: "connection",
+    connName: (c) => c.hosts,
+    fields: [
+      { key: "name", label: "Name", placeholder: "cass-prod" },
+      { key: "hosts", label: "Contact points (comma-separated)", placeholder: "cass1, cass2" },
+      { key: "port", label: "Port", placeholder: "9042" },
+      { key: "keyspace", label: "Keyspace (optional)" },
+      { key: "username", label: "Username (optional)" },
+      { key: "password", label: "Password", type: "password" },
+    ],
+    newConsole: () => ({ id: uid(), query: "", maxRows: "200" }),
+    consoleLabel: (c) => c.name || "cql",
+    renderConsole: sqlConsole("cassandra", "SELECT * FROM keyspace.table LIMIT 50;"),
+  });
+
+  clientTool({
+    type: "oracle",
+    icon: "🏛",
+    name: "Oracle",
+    desc: "Run SQL against Oracle databases (no Oracle client install needed) — results grid, multiple connections.",
+    connLabel: "Connections",
+    connSingular: "connection",
+    connName: (c) => c.hosts,
+    fields: [
+      { key: "name", label: "Name", placeholder: "orders-db" },
+      { key: "hosts", label: "Host", placeholder: "oracle-host" },
+      { key: "port", label: "Port", placeholder: "1521" },
+      { key: "service", label: "Service name", placeholder: "ORCLPDB1" },
+      { key: "username", label: "Username" },
+      { key: "password", label: "Password", type: "password" },
+    ],
+    newConsole: () => ({ id: uid(), query: "", maxRows: "200" }),
+    consoleLabel: (c) => c.name || "sql",
+    renderConsole: sqlConsole("oracle", "SELECT * FROM employees FETCH FIRST 50 ROWS ONLY"),
+  });
+
+  // ======================================================================
   // Notepad
   // ======================================================================
   registerTool({

@@ -229,6 +229,20 @@
     if (e.key === "Escape") overlay.classList.add("hidden");
   });
 
+  // ---- sidebar collapse ----
+
+  const navToggle = document.getElementById("nav-toggle");
+
+  function applyNav() {
+    document.getElementById("app").classList.toggle("nav-collapsed", !!state.sidebarCollapsed);
+  }
+
+  navToggle.addEventListener("click", () => {
+    state.sidebarCollapsed = !state.sidebarCollapsed;
+    applyNav();
+    save();
+  });
+
   // ---- theme ----
 
   const themeSelect = document.getElementById("theme-select");
@@ -262,6 +276,7 @@
       state.activeWorkspaceId = ws.id;
     }
     applyTheme(state.theme || "light");
+    applyNav();
     renderAll();
   }
 

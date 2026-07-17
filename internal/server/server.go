@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 
+	"github.com/bhavesh78patil/devtil/internal/clients"
 	"github.com/bhavesh78patil/devtil/internal/kube"
 	"github.com/bhavesh78patil/devtil/internal/proxy"
 	"github.com/bhavesh78patil/devtil/internal/store"
@@ -36,6 +37,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/state", s.getState)
 	mux.HandleFunc("PUT /api/state", s.putState)
 	mux.HandleFunc("POST /api/proxy", s.doProxy)
+
+	mux.HandleFunc("POST /api/kafka/topics", s.kafkaTopics)
+	mux.HandleFunc("POST /api/kafka/consume", s.kafkaConsume)
+	mux.HandleFunc("POST /api/kafka/produce", s.kafkaProduce)
+	mux.HandleFunc("POST /api/db/query", s.dbQuery)
 
 	mux.HandleFunc("GET /api/kube/contexts", s.kubeContexts)
 	mux.HandleFunc("GET /api/kube/namespaces", s.kubeNamespaces)
@@ -154,6 +160,89 @@ func (s *Server) kubeLogs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, resp)
+}
+
+func (s *Server) kafkaTopics(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Conn clients.KafkaConn `json:"conn"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	topics, err := clients.KafkaTopics(req.Conn)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err)
+		return
+	}
+	writeJSON(w, map[string]any{"topics": topics})
+}
+
+func (s *Server) kafkaConsume(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Conn  clients.KafkaConn `json:"conn"`
+		Topic string            `json:"topic"`
+		Max   int               `json:"max"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	msgs, err := clients.KafkaTail(req.Conn, req.Topic, req.Max)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err)
+		return
+	}
+	writeJSON(w, map[string]any{"messages": msgs})
+}
+
+func (s *Server) kafkaProduce(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Conn  clients.KafkaConn `json:"conn"`
+		Topic string            `json:"topic"`
+		Key   string            `json:"key"`
+		Value string            `json:"value"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if err := clients.KafkaProduce(req.Conn, req.Topic, req.Key, req.Value); err != nil {
+		writeError(w, http.StatusBadGateway, err)
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true})
+}
+
+func (s *Server) dbQuery(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Type    string         `json:"type"`
+		Conn    clients.DBConn `json:"conn"`
+		Query   string         `json:"query"`
+		MaxRows int            `json:"maxRows"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	var (
+		res *clients.QueryResult
+		err error
+	)
+	switch req.Type {
+	case "cassandra":
+		res, err = clients.CassandraQuery(req.Conn, req.Query, req.MaxRows)
+	case "oracle":
+		res, err = clients.OracleQuery(req.Conn, req.Query, req.MaxRows)
+	default:
+		writeError(w, http.StatusBadRequest, errString("unknown db type "+req.Type))
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err)
+		return
+	}
+	writeJSON(w, res)
 }
 
 // requireTools checks that the binary this connection depends on exists:

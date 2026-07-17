@@ -44,6 +44,7 @@ body {
 }
 
 #app { display: flex; height: 100vh; }
+#app.nav-collapsed #sidebar { display: none; }
 
 /* ---------- sidebar ---------- */
 
@@ -380,6 +381,30 @@ details.section summary {
   user-select: none;
 }
 details.section[open] summary { margin-bottom: 8px; }
+
+/* ---------- infra client tools (kafka / elastic / cassandra / oracle) ---------- */
+
+.conn-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  padding: 10px;
+  background: var(--bg);
+}
+.conn-form .field { display: flex; flex-direction: column; gap: 3px; }
+
+.history-item.conn-active { background: var(--accent-soft); }
+
+.conn-dot {
+  width: 8px;
+  height: 8px;
+  min-width: 8px;
+  border-radius: 50%;
+  background: var(--border);
+}
+.conn-dot.on { background: var(--green); }
 
 .req-line { display: flex; gap: 8px; }
 .req-line select { width: 110px; }
