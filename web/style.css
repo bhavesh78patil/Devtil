@@ -406,6 +406,17 @@ details.section[open] summary { margin-bottom: 8px; }
 }
 .conn-dot.on { background: var(--green); }
 
+.cols-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+  max-height: 160px;
+  overflow-y: auto;
+  padding: 4px 0;
+}
+.cols-grid label { font-family: var(--mono); font-size: 12px; }
+.cols-grid .all-toggle { font-family: var(--sans); font-weight: 600; }
+
 .req-line { display: flex; gap: 8px; }
 .req-line select { width: 110px; }
 .req-line input { flex: 1; }

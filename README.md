@@ -21,9 +21,9 @@ the UI in an app window.
 | **API Client** | Postman-like layout: a **side panel** with the saved **Collection** and **History**, and **inner request tabs** in the main area. Clicking a saved or historical request opens it in its own tab (re-clicking focuses the existing tab), each with its own method, headers, body and response — status/time/size, pretty-printed JSON, response-headers view. Requests are proxied through the Go backend so CORS never gets in the way, with an opt-in "skip TLS verification" for dev servers. The collection holds a base URL, endpoints imported from a Swagger/OpenAPI JSON URL (pick individual endpoints or select all) or saved via "Save to collection", and **global headers** automatically sent with every request under the base URL (request-level headers override on conflict) |
 | **Kube Logs** | Runs kubectl locally **or over SSH on the kubemaster** (`ssh user@host kubectl …`) for clusters only reachable from a jump/master host — using your own ssh config, keys and agent. Pick a kubeconfig context (listed from the SSH host when one is set), or point at an API server directly (`--server` + token + skip-TLS). Find pods for a service by name/label, fetch logs from one or many pods (multi-pod lines are prefixed with the pod name), tail/since filters, and grep (substring or regex) with match highlighting. Log source is either **container stdout** (`kubectl logs`) or a **file inside the pod** — devtil execs in and tails the file for services that write log files instead of stdout |
 | **Kafka** | Connect to **multiple clusters** (plain, SASL/PLAIN, TLS): browse topics with partition counts, tail the latest N messages across all partitions (merged chronologically), and produce messages — via a pure-Go client, no local Kafka tooling needed |
-| **Elastic / OpenSearch** | Per-cluster connections with basic auth: one-click cluster health / indices / nodes, plus a free-form REST console for `_search` and any other endpoint, with pretty-printed responses |
-| **Cassandra** | CQL console against multiple connections (contact points, keyspace, auth) with a results grid, row limits, and Ctrl+Enter to run |
-| **Oracle** | SQL console using a pure-Go driver — **no Oracle client install required** — with results grid and DML support (rows-affected reporting) |
+| **Elastic / OpenSearch** | Per-cluster connections with basic auth: one-click cluster health / indices / nodes, plus a free-form REST console for `_search` and any other endpoint, with pretty-printed responses. A **query helper** lists the cluster's indices to pick from, loads the selected index's mapping into a **field/column picker** (nested fields flattened), and builds the `_search` body (query_string / match_all, `_source` projection, size) for you |
+| **Cassandra** | CQL console against multiple connections (contact points, keyspace, auth) with a results grid, row limits, and Ctrl+Enter to run. The **query helper** lists tables from `system_schema`, shows the chosen table's **columns as checkboxes**, and generates the `SELECT … LIMIT …` for you |
+| **Oracle** | SQL console using a pure-Go driver — **no Oracle client install required** — with results grid and DML support (rows-affected reporting). Same **query helper**: pick from `user_tables`, choose columns, and the `SELECT … FETCH FIRST n ROWS ONLY` is generated |
 | **Notepad** | Autosaving scratch pads with char/word/line counts |
 | **Generators** | UUID v4 (bulk), random strings/tokens, SHA-1/256/384/512 hashes |
 | **Timestamps** | Auto-detects epoch seconds/millis/date strings; converts to ISO, local, relative |
@@ -114,11 +114,14 @@ make cross    # dist/devtil-{darwin-arm64,darwin-amd64,windows-amd64.exe,linux-a
   kubeconfigs, contexts and auth plugins. Two ways to reach a cluster that
   your machine can't talk to directly:
   - **SSH host** (the common jump-host/kubemaster setup): enter
-    `user@host` (+ optional port and identity file) and every kubectl
-    command runs on that machine via your system `ssh` — key/agent auth,
-    `BatchMode` (no password prompts), arguments safely quoted for the
-    remote shell. Contexts, namespaces and pods are then all listed from
-    the remote host's kubeconfig. Local kubectl isn't needed in this mode.
+    `user@host` (+ optional port) and every kubectl command runs on that
+    machine. With an **SSH password** set, devtil uses its built-in Go SSH
+    client (password + keyboard-interactive auth — no keys, no ssh binary
+    needed). Without a password it falls back to your system `ssh` with
+    key/agent auth and an optional identity file. Either way arguments are
+    safely quoted for the remote shell, and contexts, namespaces and pods
+    are listed from the remote host's kubeconfig. Local kubectl isn't
+    needed in this mode.
   - **API server address**: passed to kubectl as `--server` (a bare IP is
     auto-prefixed with `https://`) with optional `--token` and
     `--insecure-skip-tls-verify`.

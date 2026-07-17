@@ -95,9 +95,10 @@ func connFromQuery(q url.Values) kube.Conn {
 		Server:   q.Get("server"),
 		Token:    q.Get("token"),
 		Insecure: q.Get("insecure") == "true",
-		SSHHost:  q.Get("sshHost"),
-		SSHPort:  q.Get("sshPort"),
-		SSHKey:   q.Get("sshKey"),
+		SSHHost:     q.Get("sshHost"),
+		SSHPort:     q.Get("sshPort"),
+		SSHKey:      q.Get("sshKey"),
+		SSHPassword: q.Get("sshPassword"),
 	}
 }
 
@@ -249,6 +250,9 @@ func (s *Server) dbQuery(w http.ResponseWriter, r *http.Request) {
 // the ssh client when kubectl runs on a remote host, local kubectl otherwise.
 func requireTools(w http.ResponseWriter, conn kube.Conn) bool {
 	if conn.SSH() {
+		if conn.SSHPassword != "" {
+			return true // password mode uses the built-in ssh client
+		}
 		if !kube.SSHAvailable() {
 			writeError(w, http.StatusServiceUnavailable,
 				errString("ssh not found on PATH — an ssh client is required to run kubectl on a remote host"))

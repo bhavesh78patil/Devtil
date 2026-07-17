@@ -8,11 +8,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"os/exec"
 	"regexp"
 	"sort"
 	"strings"
 	"time"
+
+	"golang.org/x/crypto/ssh"
 )
 
 // Available reports whether kubectl is on PATH.
@@ -38,9 +41,10 @@ type Conn struct {
 	Server   string `json:"server"`
 	Token    string `json:"token"`
 	Insecure bool   `json:"insecure"`
-	SSHHost  string `json:"sshHost"` // user@host — run kubectl here via ssh
-	SSHPort  string `json:"sshPort"`
-	SSHKey   string `json:"sshKey"` // optional identity file path
+	SSHHost     string `json:"sshHost"` // user@host — run kubectl here via ssh
+	SSHPort     string `json:"sshPort"`
+	SSHKey      string `json:"sshKey"`      // optional identity file path
+	SSHPassword string `json:"sshPassword"` // password auth via built-in ssh client
 }
 
 // SSH reports whether kubectl should run on a remote host over ssh.
@@ -50,7 +54,7 @@ func (c Conn) SSH() bool { return strings.TrimSpace(c.SSHHost) != "" }
 // commands like `kubectl config get-contexts` that must run on the right
 // machine but shouldn't carry --context/--server flags.
 func (c Conn) sshOnly() Conn {
-	return Conn{SSHHost: c.SSHHost, SSHPort: c.SSHPort, SSHKey: c.SSHKey}
+	return Conn{SSHHost: c.SSHHost, SSHPort: c.SSHPort, SSHKey: c.SSHKey, SSHPassword: c.SSHPassword}
 }
 
 func (c Conn) flags() []string {
@@ -75,6 +79,12 @@ func (c Conn) flags() []string {
 
 func run(ctx context.Context, conn Conn, args ...string) ([]byte, error) {
 	args = append(conn.flags(), args...)
+
+	// password auth can't be piped into the system ssh client from a
+	// background process, so it uses the built-in Go SSH client instead
+	if conn.SSH() && conn.SSHPassword != "" {
+		return runSSHPassword(ctx, conn, args)
+	}
 
 	var cmd *exec.Cmd
 	if conn.SSH() {
@@ -247,6 +257,74 @@ type LogsRequest struct {
 // shellQuote makes s safe to embed in the `sh -c` command run inside the pod.
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// runSSHPassword runs kubectl on the remote host over the built-in SSH
+// client using username/password auth (user taken from the user@host form).
+func runSSHPassword(ctx context.Context, conn Conn, args []string) ([]byte, error) {
+	host := strings.TrimSpace(conn.SSHHost)
+	user := ""
+	if i := strings.Index(host, "@"); i >= 0 {
+		user, host = host[:i], host[i+1:]
+	}
+	if user == "" || host == "" {
+		return nil, fmt.Errorf("ssh host must be user@host when using password auth")
+	}
+	port := strings.TrimSpace(conn.SSHPort)
+	if port == "" {
+		port = "22"
+	}
+	addr := net.JoinHostPort(host, port)
+
+	answerPassword := func(_, _ string, questions []string, _ []bool) ([]string, error) {
+		answers := make([]string, len(questions))
+		for i := range answers {
+			answers[i] = conn.SSHPassword
+		}
+		return answers, nil
+	}
+	cfg := &ssh.ClientConfig{
+		User:            user,
+		Auth:            []ssh.AuthMethod{ssh.Password(conn.SSHPassword), ssh.KeyboardInteractive(answerPassword)},
+		HostKeyCallback: ssh.InsecureIgnoreHostKey(), // dev tool: no known_hosts management
+		Timeout:         10 * time.Second,
+	}
+
+	tcp, err := net.DialTimeout("tcp", addr, 10*time.Second)
+	if err != nil {
+		return nil, fmt.Errorf("ssh %s: %v", addr, err)
+	}
+	if dl, ok := ctx.Deadline(); ok {
+		tcp.SetDeadline(dl)
+	}
+	cc, chans, reqs, err := ssh.NewClientConn(tcp, addr, cfg)
+	if err != nil {
+		tcp.Close()
+		return nil, fmt.Errorf("ssh %s: %v", addr, err)
+	}
+	client := ssh.NewClient(cc, chans, reqs)
+	defer client.Close()
+
+	sess, err := client.NewSession()
+	if err != nil {
+		return nil, fmt.Errorf("ssh %s: %v", addr, err)
+	}
+	defer sess.Close()
+
+	cmd := "kubectl"
+	for _, a := range args {
+		cmd += " " + shellQuote(a)
+	}
+	var stdout, stderr bytes.Buffer
+	sess.Stdout, sess.Stderr = &stdout, &stderr
+	if err := sess.Run(cmd); err != nil {
+		msg := strings.TrimSpace(stderr.String())
+		if msg == "" {
+			msg = err.Error()
+		}
+		return nil, fmt.Errorf("ssh %s: %s", conn.SSHHost, msg)
+	}
+	return stdout.Bytes(), nil
 }
 
 type LogsResponse struct {

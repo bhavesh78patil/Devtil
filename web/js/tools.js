@@ -754,7 +754,7 @@
     name: "Kube Logs",
     desc: "Find pods for a service and search their logs — local kubectl, or kubectl over SSH on the kubemaster; stdout or files inside the pod.",
     defaults: () => ({
-      context: "", sshHost: "", sshPort: "", sshKey: "",
+      context: "", sshHost: "", sshPort: "", sshKey: "", sshPassword: "",
       server: "", token: "", insecureTLS: false,
       namespace: "", podQuery: "", selected: [], container: "",
       source: "stdout", filePath: "",
@@ -772,6 +772,7 @@
       const sshHost = bindField(el("input", { type: "text", placeholder: "user@kubemaster", style: "min-width:180px" }), d, "sshHost", ctx);
       const sshPort = bindField(el("input", { type: "text", placeholder: "22", style: "width:70px" }), d, "sshPort", ctx);
       const sshKey = bindField(el("input", { type: "text", placeholder: "~/.ssh/id_ed25519 (optional)", style: "min-width:170px" }), d, "sshKey", ctx);
+      const sshPassword = bindField(el("input", { type: "password", placeholder: "ssh password (optional)", style: "min-width:150px" }), d, "sshPassword", ctx);
       const server = bindField(el("input", { type: "text", placeholder: "https://<apiserver>:6443 (optional)", style: "min-width:200px" }), d, "server", ctx);
       const token = bindField(el("input", { type: "password", placeholder: "bearer token (optional)", style: "min-width:160px" }), d, "token", ctx);
       const insecureTLS = bindField(el("input", { type: "checkbox" }), d, "insecureTLS", ctx);
@@ -797,7 +798,8 @@
         "&insecure=" + (d.insecureTLS ? "true" : "false") +
         "&sshHost=" + encodeURIComponent(d.sshHost || "") +
         "&sshPort=" + encodeURIComponent(d.sshPort || "") +
-        "&sshKey=" + encodeURIComponent(d.sshKey || "");
+        "&sshKey=" + encodeURIComponent(d.sshKey || "") +
+        "&sshPassword=" + encodeURIComponent(d.sshPassword || "");
 
       const renderLogs = () => {
         const lines = d.output || [];
@@ -891,7 +893,7 @@
         try {
           const r = await api("POST", "/api/kube/logs", {
             context: d.context, server: d.server, token: d.token, insecure: d.insecureTLS,
-            sshHost: d.sshHost, sshPort: d.sshPort, sshKey: d.sshKey,
+            sshHost: d.sshHost, sshPort: d.sshPort, sshKey: d.sshKey, sshPassword: d.sshPassword,
             namespace: d.namespace, pods: d.selected,
             container: d.container, tail: Number(d.tail) || 2000,
             sinceMinutes: Number(d.sinceMinutes) || 0,
@@ -925,6 +927,7 @@
         el("div", { class: "form-grid" }, [
           field("SSH host — kubectl runs here (optional)", sshHost),
           field("SSH port", sshPort),
+          field("SSH password (or use key/agent)", sshPassword),
           field("SSH key", sshKey),
           field("API server (optional)", server),
           field("Token", token),
@@ -1152,8 +1155,34 @@
     return words ? words.slice(0, 22) : fallback;
   };
 
-  /** Query console shared by Cassandra and Oracle. */
-  const sqlConsole = (dbType, placeholder) => (body, conn, c, ctx) => {
+  /** Checkbox grid for choosing columns/fields, with an all-toggle. */
+  function colsPicker(available, selected, onChange) {
+    const box = el("div", { class: "cols-grid" });
+    const checks = [];
+    const all = el("input", { type: "checkbox" });
+    all.checked = available.length > 0 && available.every((f) => selected.includes(f.name));
+    all.addEventListener("change", () => {
+      checks.forEach((c) => (c.checked = all.checked));
+      onChange(all.checked ? available.map((f) => f.name) : []);
+    });
+    box.append(el("label", { class: "inline all-toggle" }, [all, "All"]));
+    available.forEach((f) => {
+      const c = el("input", { type: "checkbox" });
+      c.checked = selected.includes(f.name);
+      c.addEventListener("change", () => {
+        const next = available.filter((x, i) => checks[i].checked).map((x) => x.name);
+        all.checked = next.length === available.length;
+        onChange(next);
+      });
+      checks.push(c);
+      box.append(el("label", { class: "inline", title: f.type || "" }, [c, f.name]));
+    });
+    return box;
+  }
+
+  /** Query console shared by Cassandra and Oracle, with a table/column
+      browser that builds SELECTs for you. */
+  const sqlConsole = (dbType, placeholder, browser) => (body, conn, c, ctx) => {
     const status = el("div", { class: "status-line dim" });
     const out = el("div", { style: "flex:1;overflow:auto;display:flex;flex-direction:column" });
 
@@ -1187,7 +1216,89 @@
     };
     query.addEventListener("keydown", (e) => { if ((e.ctrlKey || e.metaKey) && e.key === "Enter") run(); });
 
+    // ---- query helper: table picker → column picker → generated SELECT ----
+    const dbq = (q) => api("POST", "/api/db/query", {
+      type: dbType, conn: { ...conn, port: Number(conn.port) || 0 }, query: q, maxRows: 5000,
+    });
+
+    const tableSel = el("select", { style: "min-width:220px" });
+    const colsBox = el("div");
+    const limit = el("input", { type: "number", min: "1", max: "5000", style: "width:80px" });
+    limit.value = c.limit || "50";
+    limit.addEventListener("input", () => { c.limit = limit.value; ctx.save(); });
+
+    const fillTables = () => {
+      tableSel.replaceChildren(
+        el("option", { value: "", text: "— pick a table —" }),
+        ...(c.tables || []).map((t) => el("option", { value: t, text: t }))
+      );
+      if (c.table && (c.tables || []).includes(c.table)) tableSel.value = c.table;
+    };
+    const drawCols = () => {
+      colsBox.replaceChildren();
+      if (!c.table || !Array.isArray(c.cols) || !c.cols.length) return;
+      if (!Array.isArray(c.selectedCols)) c.selectedCols = c.cols.map((f) => f.name);
+      colsBox.append(
+        el("span", { class: "pane-label", text: `Columns of ${c.table} — pick what to select` }),
+        colsPicker(c.cols, c.selectedCols, (next) => { c.selectedCols = next; ctx.save(); })
+      );
+    };
+
+    const loadTables = async () => {
+      setStatus(status, "Loading tables…", "dim");
+      try {
+        const res = await dbq(browser.tablesQuery);
+        c.tables = res.rows.map(browser.tableFromRow).filter(Boolean);
+        ctx.save();
+        fillTables();
+        setStatus(status, `✓ ${c.tables.length} table(s)`, "ok");
+      } catch (e) {
+        setStatus(status, "✗ " + e.message, "err");
+      }
+    };
+    const loadCols = async () => {
+      if (!c.table) { c.cols = []; drawCols(); return; }
+      setStatus(status, "Loading columns…", "dim");
+      try {
+        const res = await dbq(browser.columnsQuery(c.table));
+        c.cols = res.rows.map((r) => ({ name: r[0], type: r[1] }));
+        c.selectedCols = c.cols.map((f) => f.name);
+        ctx.save();
+        drawCols();
+        setStatus(status, `✓ ${c.cols.length} column(s)`, "ok");
+      } catch (e) {
+        setStatus(status, "✗ " + e.message, "err");
+      }
+    };
+    tableSel.addEventListener("change", () => { c.table = tableSel.value; ctx.save(); loadCols(); });
+
+    const buildQuery = () => {
+      if (!c.table) { setStatus(status, "✗ Pick a table first (Load tables)", "err"); return false; }
+      const sel = c.selectedCols || [];
+      const colSql = !sel.length || sel.length === (c.cols || []).length ? "*" : sel.join(", ");
+      c.query = browser.buildSelect(c.table, colSql, Number(c.limit) || 50);
+      query.value = c.query;
+      ctx.save();
+      return true;
+    };
+
+    const helper = el("details", { class: "section" }, [
+      el("summary", { text: "Query helper — pick a table, choose columns, build the SELECT" }),
+      el("div", { class: "toolbar" }, [
+        el("button", { class: "btn", text: "Load tables", onclick: loadTables }),
+        tableSel,
+        el("label", { class: "inline" }, ["Limit", limit]),
+        el("button", { class: "btn", text: "Build query", onclick: buildQuery }),
+        el("button", { class: "btn primary", text: "Build & run", onclick: () => { if (buildQuery()) run(); } }),
+      ]),
+      colsBox,
+    ]);
+    if (c.table) helper.open = true;
+    fillTables();
+    drawCols();
+
     body.append(
+      helper,
       query,
       el("div", { class: "toolbar" }, [
         el("button", { class: "btn primary", text: "Run (Ctrl+Enter)", onclick: run }),
@@ -1303,7 +1414,19 @@
     draw();
   }
 
-  /** Elasticsearch / OpenSearch console: REST requests through the proxy. */
+  /** Flatten an ES mapping's properties into dotted field paths. */
+  function flattenProps(props, prefix = "") {
+    let out = [];
+    for (const [k, v] of Object.entries(props || {})) {
+      const path = prefix ? prefix + "." + k : k;
+      if (v && v.properties) out = out.concat(flattenProps(v.properties, path));
+      else out.push({ name: path, type: (v && v.type) || "object" });
+    }
+    return out;
+  }
+
+  /** Elasticsearch / OpenSearch console: REST requests through the proxy,
+      with an index/field browser that builds _search queries. */
   function esConsole(body, conn, c, ctx) {
     const status = el("div", { class: "status-line dim" });
     const out = el("pre", { class: "output", style: "flex:1;min-height:160px" });
@@ -1349,7 +1472,109 @@
     });
     path.addEventListener("keydown", (e) => { if (e.key === "Enter") send(c.method || "GET", c.path, c.body); });
 
+    // ---- query builder: index picker → field picker → generated _search ----
+    const esFetch = async (method, p) => {
+      if (!conn.baseUrl) throw new Error("the active cluster has no base URL");
+      const headers = {};
+      if (conn.username) headers["Authorization"] = "Basic " + btoa(conn.username + ":" + (conn.password || ""));
+      const r = await api("POST", "/api/proxy", {
+        method, url: conn.baseUrl.replace(/\/+$/, "") + "/" + p, headers, body: "", insecure: !!conn.insecure,
+      });
+      if (r.status >= 400) throw new Error(r.status + " " + r.body.slice(0, 160));
+      return JSON.parse(r.body);
+    };
+
+    const idxSel = el("select", { style: "min-width:220px" });
+    const fieldsBox = el("div");
+    const qText = el("input", { type: "text", placeholder: "search text (query_string) — empty = match_all", style: "flex:1;min-width:220px" });
+    qText.value = c.qText || "";
+    qText.addEventListener("input", () => { c.qText = qText.value; ctx.save(); });
+    const size = el("input", { type: "number", min: "1", max: "1000", style: "width:75px" });
+    size.value = c.size || "10";
+    size.addEventListener("input", () => { c.size = size.value; ctx.save(); });
+
+    const fillIndices = () => {
+      idxSel.replaceChildren(
+        el("option", { value: "", text: "— pick an index —" }),
+        ...(c.indices || []).map((n) => el("option", { value: n, text: n }))
+      );
+      if (c.index && (c.indices || []).includes(c.index)) idxSel.value = c.index;
+    };
+    const drawFields = () => {
+      fieldsBox.replaceChildren();
+      if (!c.index || !Array.isArray(c.fields) || !c.fields.length) return;
+      if (!Array.isArray(c.selectedFields)) c.selectedFields = c.fields.map((f) => f.name);
+      fieldsBox.append(
+        el("span", { class: "pane-label", text: `Fields of ${c.index} — pick which columns to return (_source)` }),
+        colsPicker(c.fields, c.selectedFields, (next) => { c.selectedFields = next; ctx.save(); })
+      );
+    };
+
+    const loadIndices = async () => {
+      setStatus(status, "Loading indices…", "dim");
+      try {
+        const list = await esFetch("GET", "_cat/indices?format=json");
+        c.indices = list.map((i) => i.index).filter((n) => n && !n.startsWith(".")).sort();
+        ctx.save();
+        fillIndices();
+        setStatus(status, `✓ ${c.indices.length} index(es)`, "ok");
+      } catch (e) {
+        setStatus(status, "✗ " + e.message, "err");
+      }
+    };
+    const loadFields = async () => {
+      if (!c.index) { c.fields = []; drawFields(); return; }
+      setStatus(status, "Loading mapping…", "dim");
+      try {
+        const m = await esFetch("GET", encodeURIComponent(c.index) + "/_mapping");
+        const entry = m[c.index] || Object.values(m)[0] || {};
+        c.fields = flattenProps(entry.mappings && entry.mappings.properties);
+        c.selectedFields = c.fields.map((f) => f.name);
+        ctx.save();
+        drawFields();
+        setStatus(status, `✓ ${c.fields.length} field(s)`, "ok");
+      } catch (e) {
+        setStatus(status, "✗ " + e.message, "err");
+      }
+    };
+    idxSel.addEventListener("change", () => { c.index = idxSel.value; ctx.save(); loadFields(); });
+
+    const buildSearch = () => {
+      if (!c.index) { setStatus(status, "✗ Pick an index first (Load indices)", "err"); return false; }
+      const q = {
+        query: (c.qText || "").trim() ? { query_string: { query: c.qText.trim() } } : { match_all: {} },
+        size: Number(c.size) || 10,
+      };
+      const sel = c.selectedFields || [];
+      if (sel.length && sel.length !== (c.fields || []).length) q._source = sel;
+      c.method = "POST";
+      c.path = c.index + "/_search";
+      c.body = JSON.stringify(q, null, 2);
+      methodSel.value = c.method;
+      path.value = c.path;
+      reqBody.value = c.body;
+      ctx.save();
+      return true;
+    };
+
+    const builder = el("details", { class: "section" }, [
+      el("summary", { text: "Query helper — pick an index, choose fields, build the search" }),
+      el("div", { class: "toolbar" }, [
+        el("button", { class: "btn", text: "Load indices", onclick: loadIndices }),
+        idxSel,
+        qText,
+        el("label", { class: "inline" }, ["Size", size]),
+        el("button", { class: "btn", text: "Build query", onclick: buildSearch }),
+        el("button", { class: "btn primary", text: "Build & search", onclick: () => { if (buildSearch()) send(c.method, c.path, c.body); } }),
+      ]),
+      fieldsBox,
+    ]);
+    if (c.index) builder.open = true;
+    fillIndices();
+    drawFields();
+
     body.append(
+      builder,
       el("div", { class: "toolbar" }, [
         quick("Cluster health", "GET", "_cluster/health"),
         quick("Indices", "GET", "_cat/indices?v&format=json"),
@@ -1425,7 +1650,18 @@
     ],
     newConsole: () => ({ id: uid(), query: "", maxRows: "200" }),
     consoleLabel: (c) => c.name || "cql",
-    renderConsole: sqlConsole("cassandra", "SELECT * FROM keyspace.table LIMIT 50;"),
+    renderConsole: sqlConsole("cassandra", "SELECT * FROM keyspace.table LIMIT 50;", {
+      tablesQuery: "SELECT keyspace_name, table_name FROM system_schema.tables",
+      tableFromRow: (r) => {
+        const system = ["system", "system_schema", "system_auth", "system_distributed", "system_traces", "system_views", "system_virtual_schema"];
+        return system.includes(r[0]) ? null : r[0] + "." + r[1];
+      },
+      columnsQuery: (t) => {
+        const [ks, tb] = t.split(".");
+        return `SELECT column_name, type FROM system_schema.columns WHERE keyspace_name='${ks}' AND table_name='${tb}'`;
+      },
+      buildSelect: (t, cols, n) => `SELECT ${cols} FROM ${t} LIMIT ${n};`,
+    }),
   });
 
   clientTool({
@@ -1446,7 +1682,12 @@
     ],
     newConsole: () => ({ id: uid(), query: "", maxRows: "200" }),
     consoleLabel: (c) => c.name || "sql",
-    renderConsole: sqlConsole("oracle", "SELECT * FROM employees FETCH FIRST 50 ROWS ONLY"),
+    renderConsole: sqlConsole("oracle", "SELECT * FROM employees FETCH FIRST 50 ROWS ONLY", {
+      tablesQuery: "SELECT table_name FROM user_tables ORDER BY table_name",
+      tableFromRow: (r) => r[0],
+      columnsQuery: (t) => `SELECT column_name, data_type FROM user_tab_columns WHERE table_name = '${String(t).replace(/'/g, "''")}' ORDER BY column_id`,
+      buildSelect: (t, cols, n) => `SELECT ${cols} FROM ${t} FETCH FIRST ${n} ROWS ONLY`,
+    }),
   });
 
   // ======================================================================
