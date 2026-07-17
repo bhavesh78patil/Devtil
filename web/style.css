@@ -320,6 +320,67 @@ table.kv th { color: var(--text-dim); font-weight: 500; white-space: nowrap; }
 
 /* ---------- API client ---------- */
 
+.api-layout { display: flex; gap: 12px; flex: 1; min-height: 0; }
+
+.api-side {
+  width: 280px;
+  min-width: 240px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg2);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.api-side .subtabs { padding: 0 8px; flex-shrink: 0; }
+.api-side-content {
+  padding: 10px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  flex: 1;
+}
+.api-side input.hk { width: 42%; min-width: 0; }
+.api-side input.hv { flex: 1; min-width: 0; }
+
+.api-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 10px; }
+
+.req-tabs {
+  display: flex;
+  align-items: center;
+  overflow-x: auto;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.req-tab {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 4px 6px 12px;
+  font-size: 12.5px;
+  cursor: pointer;
+  color: var(--text-dim);
+  border-bottom: 2px solid transparent;
+  white-space: nowrap;
+}
+.req-tab:hover { color: var(--text); }
+.req-tab.active { color: var(--text); border-bottom-color: var(--accent); }
+
+details.section {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 8px;
+  background: var(--bg2);
+}
+details.section summary {
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--text-dim);
+  user-select: none;
+}
+details.section[open] summary { margin-bottom: 8px; }
+
 .req-line { display: flex; gap: 8px; }
 .req-line select { width: 110px; }
 .req-line input { flex: 1; }

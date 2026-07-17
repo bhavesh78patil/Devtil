@@ -367,38 +367,61 @@
     type: "api",
     icon: "🚀",
     name: "API Client",
-    desc: "Send HTTP requests — headers, body, history, Swagger/OpenAPI import, and collection-wide global headers.",
+    desc: "Postman-like client: request tabs, a saved collection with global headers, Swagger/OpenAPI import, and history.",
     defaults: () => ({
-      method: "GET", url: "", headers: [{ k: "", v: "" }], body: "",
-      insecure: false, response: null, history: [], swaggerUrl: "",
       collection: { baseUrl: "", headers: [{ k: "", v: "" }], requests: [] },
+      history: [], swaggerUrl: "", reqTabs: [], activeReqId: null,
     }),
     render(root, tab, ctx) {
       const d = tab.data;
-      if (!Array.isArray(d.headers) || !d.headers.length) d.headers = [{ k: "", v: "" }];
-      if (!Array.isArray(d.history)) d.history = [];
+
+      const newReqTab = (partial = {}) => ({
+        id: uid(), name: partial.name || "New request", method: partial.method || "GET",
+        url: partial.url || "", headers: partial.headers && partial.headers.length ? partial.headers : [{ k: "", v: "" }],
+        body: partial.body || "", insecure: !!partial.insecure, response: partial.response || null,
+      });
+
+      // ---- init & migration from the pre-inner-tabs data shape ----
       if (!d.collection) d.collection = { baseUrl: "", headers: [], requests: [] };
       const col = d.collection;
       if (!Array.isArray(col.headers) || !col.headers.length) col.headers = [{ k: "", v: "" }];
       if (!Array.isArray(col.requests)) col.requests = [];
+      if (!Array.isArray(d.history)) d.history = [];
+      if (!Array.isArray(d.reqTabs)) d.reqTabs = [];
+      if (d.method !== undefined || d.url !== undefined) {
+        d.reqTabs.push(newReqTab({
+          name: "Request", method: d.method, url: d.url, headers: d.headers,
+          body: d.body, insecure: d.insecure, response: d.response,
+        }));
+        delete d.method; delete d.url; delete d.headers;
+        delete d.body; delete d.insecure; delete d.response;
+      }
+      if (!d.reqTabs.length) d.reqTabs.push(newReqTab());
+      if (!d.reqTabs.some((r) => r.id === d.activeReqId)) d.activeReqId = d.reqTabs[0].id;
 
-      const status = el("div", { class: "status-line dim" });
-      const respArea = el("div", { class: "tool", style: "flex:1" });
+      const active = () => d.reqTabs.find((r) => r.id === d.activeReqId) || d.reqTabs[0];
+      const inCollection = (url) =>
+        !!col.baseUrl && (url || "").toLowerCase().startsWith(col.baseUrl.toLowerCase());
+      const resolveUrl = (path) => (/^https?:\/\//i.test(path) ? path : col.baseUrl + path);
+      const shortPath = (url) => { try { return new URL(url).pathname; } catch { return url; } };
+      const reqLabel = (r) => r.name || r.method + " " + (shortPath(r.url) || "…");
 
-      // -- request line --
-      const methodSel = bindField(
-        el("select", {}, ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"].map((m) =>
-          el("option", { value: m, text: m }))),
-        d, "method", ctx
-      );
-      const urlInput = bindField(
-        el("input", { type: "text", placeholder: "https://api.example.com/v1/users" }),
-        d, "url", ctx
-      );
-      urlInput.addEventListener("keydown", (e) => { if (e.key === "Enter") send(); });
-      const sendBtn = el("button", { class: "btn primary", text: "Send", onclick: () => send() });
+      // open (or focus) an inner request tab
+      const openReqTab = (partial = {}) => {
+        const url = partial.url || "";
+        const existing = url && d.reqTabs.find((r) => r.method === (partial.method || "GET") && r.url === url);
+        if (existing) {
+          d.activeReqId = existing.id;
+        } else {
+          const t = newReqTab(partial);
+          d.reqTabs.push(t);
+          d.activeReqId = t.id;
+        }
+        ctx.save();
+        renderMain();
+      };
 
-      // -- key/value editor, used for both request and collection headers --
+      // ---- key/value editor, used for request and collection headers ----
       const headersEditor = (list) => {
         const box = el("div", { style: "display:flex;flex-direction:column;gap:6px" });
         const render = () => {
@@ -423,83 +446,103 @@
         render();
         return box;
       };
-      const headersBox = el("div", { style: "display:flex;flex-direction:column;gap:6px" }, [
-        el("span", { class: "pane-label", text: "Headers" }),
-        headersEditor(d.headers),
-      ]);
 
-      const inCollection = (url) =>
-        !!col.baseUrl && url.toLowerCase().startsWith(col.baseUrl.toLowerCase());
-      const resolveUrl = (path) => (/^https?:\/\//i.test(path) ? path : col.baseUrl + path);
+      // ---- layout: side panel (collection/history) + main (request tabs) ----
+      const sideBox = el("div", { class: "api-side" });
+      const mainBox = el("div", { class: "api-main" });
+      root.append(el("div", { class: "api-layout" }, [sideBox, mainBox]));
+      let sideView = "collection";
 
-      const loadRequest = (r) => {
-        d.method = r.method;
-        d.url = resolveUrl(r.path);
-        methodSel.value = d.method;
-        urlInput.value = d.url;
-        ctx.save();
-      };
+      // ================= side panel =================
 
-      const bodyArea = boundArea(d, "body", ctx, { class: "", rows: "5", style: "width:100%", placeholder: "Request body (raw / JSON)" });
-      const insecure = bindField(el("input", { type: "checkbox" }), d, "insecure", ctx);
+      function renderSide() {
+        sideBox.replaceChildren(
+          el("div", { class: "subtabs" }, [
+            el("button", {
+              class: sideView === "collection" ? "active" : "",
+              text: `Collection (${col.requests.length})`,
+              onclick: () => { sideView = "collection"; renderSide(); },
+            }),
+            el("button", {
+              class: sideView === "history" ? "active" : "",
+              text: "History",
+              onclick: () => { sideView = "history"; renderSide(); },
+            }),
+          ]),
+          sideView === "collection" ? collectionPanel() : historyPanel()
+        );
+      }
 
-      // -- collection subtab: base URL, global headers, saved requests, swagger import --
-      const renderCollection = () => {
-        const baseInput = el("input", { type: "text", placeholder: "https://api.example.com", value: col.baseUrl, style: "flex:1" });
+      function collectionPanel() {
+        const box = el("div", { class: "api-side-content" });
+
+        const baseInput = el("input", { type: "text", placeholder: "https://api.example.com", value: col.baseUrl, style: "width:100%" });
         baseInput.addEventListener("input", () => { col.baseUrl = baseInput.value.trim().replace(/\/+$/, ""); ctx.save(); });
+        box.append(el("span", { class: "pane-label", text: "Base URL" }), baseInput);
 
-        const listBox = el("div");
+        const ghCount = col.headers.filter((h) => h.k.trim()).length;
+        const gh = el("details", { class: "section" }, [
+          el("summary", { text: `Global headers (${ghCount}) — sent with every request under the base URL` }),
+          headersEditor(col.headers),
+        ]);
+        if (ghCount) gh.open = true;
+        box.append(gh);
+
+        box.append(el("span", { class: "pane-label", text: "Saved requests — click to open in a tab" }));
         if (!col.requests.length) {
-          listBox.append(el("div", { class: "status-line dim", text: "No saved requests yet — import from Swagger below, or save the current request." }));
+          box.append(el("div", { class: "status-line dim", text: "Nothing saved yet. Import from Swagger below, or use “Save to collection” on a request." }));
         }
         col.requests.forEach((r, i) => {
-          listBox.append(el("div", { class: "history-item", onclick: () => loadRequest(r) }, [
-            el("span", { text: r.method, style: "min-width:52px" }),
-            el("span", { class: "h-url", text: r.path + (r.name ? "  —  " + r.name : "") }),
+          box.append(el("div", {
+            class: "history-item", title: "Open in a request tab",
+            onclick: () => openReqTab({ name: r.name || r.method + " " + r.path, method: r.method, url: resolveUrl(r.path) }),
+          }, [
+            el("span", { text: r.method, style: "min-width:46px" }),
+            el("span", { class: "h-url", text: r.path + (r.name ? " — " + r.name : "") }),
             el("button", {
               class: "icon-btn", text: "×", title: "Remove from collection",
-              onclick: (e) => { e.stopPropagation(); col.requests.splice(i, 1); ctx.save(); renderResponse("collection"); },
+              onclick: (e) => { e.stopPropagation(); col.requests.splice(i, 1); ctx.save(); renderSide(); },
             }),
           ]));
         });
 
         const importBox = el("div", { style: "display:flex;flex-direction:column;gap:4px" });
-        const swaggerIn = el("input", { type: "text", placeholder: "https://api.example.com/swagger.json (Swagger/OpenAPI JSON)", value: d.swaggerUrl || "", style: "flex:1" });
+        const importStatus = el("div", { class: "status-line dim" });
+        const swaggerIn = el("input", { type: "text", placeholder: "https://api.example.com/swagger.json", value: d.swaggerUrl || "", style: "width:100%" });
         swaggerIn.addEventListener("input", () => { d.swaggerUrl = swaggerIn.value; ctx.save(); });
-
-        respArea.append(
-          el("div", { class: "toolbar" }, [el("span", { class: "pane-label", text: "Base URL" }), baseInput]),
-          el("span", { class: "pane-label", text: "Global headers — added to every request under the base URL (request headers win on conflict)" }),
-          el("div", { class: "col-headers" }, [headersEditor(col.headers)]),
-          el("div", { class: "toolbar" }, [
-            el("span", { class: "pane-label", text: `Saved requests (${col.requests.length})` }),
-            el("button", {
-              class: "btn", text: "+ Save current request",
-              onclick: () => {
-                const url = d.url.trim();
-                if (!url) return setStatus(status, "✗ Enter a URL first", "err");
-                const path = inCollection(url) ? url.slice(col.baseUrl.length) || "/" : url;
-                if (!col.requests.some((r) => r.method === d.method && r.path === path)) {
-                  col.requests.push({ method: d.method, path, name: "" });
-                }
-                ctx.save();
-                renderResponse("collection");
-              },
-            }),
+        box.append(el("details", { class: "section" }, [
+          el("summary", { text: "Import from Swagger / OpenAPI" }),
+          swaggerIn,
+          el("div", { style: "margin:6px 0" }, [
+            el("button", { class: "btn primary", text: "Load endpoints", onclick: () => loadSwagger(swaggerIn.value.trim(), importBox, importStatus) }),
           ]),
-          listBox,
-          el("span", { class: "pane-label", text: "Import from Swagger / OpenAPI" }),
-          el("div", { class: "toolbar" }, [
-            swaggerIn,
-            el("button", { class: "btn primary", text: "Load endpoints", onclick: () => loadSwagger(swaggerIn.value.trim(), importBox) }),
-          ]),
-          importBox
-        );
-      };
+          importStatus,
+          importBox,
+        ]));
+        return box;
+      }
 
-      async function loadSwagger(url, box) {
-        if (!url) return setStatus(status, "✗ Enter the Swagger/OpenAPI doc URL", "err");
-        setStatus(status, "Fetching Swagger doc…", "dim");
+      function historyPanel() {
+        const box = el("div", { class: "api-side-content" });
+        box.append(el("span", { class: "pane-label", text: "Sent requests — click to reopen in a tab" }));
+        if (!d.history.length) box.append(el("div", { class: "status-line dim", text: "No requests sent yet" }));
+        d.history.forEach((h) => {
+          box.append(el("div", {
+            class: "history-item", title: h.url,
+            onclick: () => openReqTab({ name: h.method + " " + shortPath(h.url), method: h.method, url: h.url }),
+          }, [
+            el("span", { class: "badge s" + String(h.status)[0], text: h.status }),
+            el("span", { text: h.method }),
+            el("span", { class: "h-url", text: h.url }),
+            el("span", { text: h.durationMs + "ms" }),
+          ]));
+        });
+        return box;
+      }
+
+      async function loadSwagger(url, box, importStatus) {
+        if (!url) return setStatus(importStatus, "✗ Enter the Swagger/OpenAPI doc URL", "err");
+        setStatus(importStatus, "Fetching Swagger doc…", "dim");
         box.replaceChildren();
         let doc;
         try {
@@ -507,11 +550,11 @@
           if (r.status >= 400) throw new Error("doc endpoint returned " + r.status);
           doc = JSON.parse(r.body);
         } catch (e) {
-          return setStatus(status, "✗ " + e.message, "err");
+          return setStatus(importStatus, "✗ " + e.message, "err");
         }
         const { endpoints, baseUrl } = parseSwagger(doc, url);
-        if (!endpoints.length) return setStatus(status, "✗ No paths found in that document", "err");
-        setStatus(status, `✓ Found ${endpoints.length} endpoint(s) — pick which to import`, "ok");
+        if (!endpoints.length) return setStatus(importStatus, "✗ No paths found in that document", "err");
+        setStatus(importStatus, `✓ ${endpoints.length} endpoint(s)` + (baseUrl ? " · base " + baseUrl : ""), "ok");
 
         const checks = endpoints.map(() => {
           const c = el("input", { type: "checkbox" });
@@ -530,119 +573,175 @@
               class: "btn primary", text: "Import selected",
               onclick: () => {
                 if (!col.baseUrl && baseUrl) col.baseUrl = baseUrl;
-                let added = 0;
                 endpoints.forEach((ep, i) => {
                   if (!checks[i].checked) return;
                   if (col.requests.some((r) => r.method === ep.method && r.path === ep.path)) return;
                   col.requests.push({ method: ep.method, path: ep.path, name: ep.name });
-                  added++;
                 });
                 ctx.save();
-                setStatus(status, `✓ Imported ${added} endpoint(s)`, "ok");
-                renderResponse("collection");
+                renderSide();
               },
             }),
-            el("span", { class: "status-line dim", text: baseUrl ? "Base URL: " + baseUrl : "" }),
           ]),
           ...endpoints.map((ep, i) =>
             el("div", { class: "history-item", onclick: () => { checks[i].checked = !checks[i].checked; } }, [
               checks[i],
-              el("span", { text: ep.method, style: "min-width:52px" }),
-              el("span", { class: "h-url", text: ep.path + (ep.name ? "  —  " + ep.name : "") }),
+              el("span", { text: ep.method, style: "min-width:46px" }),
+              el("span", { class: "h-url", text: ep.path + (ep.name ? " — " + ep.name : "") }),
             ])
           )
         );
       }
 
-      // -- response --
-      const renderResponse = (view = "body") => {
-        respArea.replaceChildren();
-        const r = d.response;
-        const tabsBar = el("div", { class: "subtabs" }, ["body", "headers", "collection", "history"].map((name) =>
-          el("button", {
-            class: name === view ? "active" : "", text: name[0].toUpperCase() + name.slice(1),
-            onclick: () => renderResponse(name),
-          })
-        ));
+      // ================= main: inner request tabs + editor + response =================
 
-        if (r && view !== "history" && view !== "collection") {
-          const cls = "badge s" + String(r.status)[0];
-          respArea.append(el("div", { class: "resp-meta" }, [
-            el("span", { class: cls, text: `${r.status} ${r.statusText}` }),
-            el("span", { text: r.durationMs + " ms" }),
-            el("span", { text: fmtBytes(r.size) + (r.truncated ? " (truncated)" : "") }),
-            copyBtn(() => r.body, "Copy body"),
-          ]));
-        }
-        respArea.append(tabsBar);
+      function renderMain(view = "body") {
+        const r = active();
+        mainBox.replaceChildren();
 
-        if (view === "collection") return renderCollection();
-        if (view === "history") {
-          if (!d.history.length) respArea.append(el("div", { class: "status-line dim", text: "No requests yet" }));
-          d.history.forEach((h) => {
-            respArea.append(el("div", {
-              class: "history-item",
+        // inner request tab bar
+        mainBox.append(el("div", { class: "req-tabs" }, [
+          ...d.reqTabs.map((t) =>
+            el("div", {
+              class: "req-tab" + (t.id === d.activeReqId ? " active" : ""),
               onclick: () => {
-                d.method = h.method; d.url = h.url;
-                methodSel.value = h.method; urlInput.value = h.url;
+                if (d.activeReqId === t.id) return;
+                d.activeReqId = t.id;
                 ctx.save();
+                renderMain();
               },
             }, [
-              el("span", { class: "badge s" + String(h.status)[0], text: h.status }),
-              el("span", { text: h.method }),
-              el("span", { class: "h-url", text: h.url }),
-              el("span", { text: h.durationMs + "ms" }),
-            ]));
-          });
-          return;
-        }
-        if (!r) return respArea.append(el("div", { class: "status-line dim", text: "Send a request to see the response" }));
+              el("span", { text: reqLabel(t) }),
+              el("button", {
+                class: "tab-close", text: "×", title: "Close request tab",
+                onclick: (e) => {
+                  e.stopPropagation();
+                  const idx = d.reqTabs.findIndex((x) => x.id === t.id);
+                  d.reqTabs.splice(idx, 1);
+                  if (!d.reqTabs.length) d.reqTabs.push(newReqTab());
+                  if (d.activeReqId === t.id) d.activeReqId = d.reqTabs[Math.min(idx, d.reqTabs.length - 1)].id;
+                  ctx.save();
+                  renderMain();
+                },
+              }),
+            ])
+          ),
+          el("button", { class: "icon-btn", text: "+", title: "New request tab", onclick: () => openReqTab() }),
+        ]));
 
-        if (view === "headers") {
-          respArea.append(el("table", { class: "kv" }, Object.entries(r.headers || {}).map(([k, v]) =>
-            el("tr", {}, [el("th", { text: k }), el("td", { text: v })])
-          )));
-        } else {
-          let body = r.body;
-          try { body = JSON.stringify(JSON.parse(r.body), null, 2); } catch { /* not JSON */ }
-          respArea.append(el("pre", { class: "output", text: body }));
-        }
-      };
+        const status = el("div", { class: "status-line dim" });
 
-      async function send() {
-        if (!d.url.trim()) return setStatus(status, "✗ Enter a URL", "err");
-        sendBtn.disabled = true;
-        setStatus(status, "Sending…", "dim");
-        try {
-          const headers = {};
-          if (inCollection(d.url.trim())) {
-            for (const h of col.headers) if (h.k.trim()) headers[h.k.trim()] = h.v;
+        const methodSel = el("select", {}, ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"].map((m) =>
+          el("option", { value: m, text: m })));
+        methodSel.value = r.method;
+        methodSel.addEventListener("change", () => { r.method = methodSel.value; ctx.save(); });
+        const urlInput = el("input", { type: "text", placeholder: "https://api.example.com/v1/users", value: r.url });
+        urlInput.addEventListener("input", () => { r.url = urlInput.value; ctx.save(); });
+        urlInput.addEventListener("keydown", (e) => { if (e.key === "Enter") send(); });
+        const sendBtn = el("button", { class: "btn primary", text: "Send", onclick: () => send() });
+        mainBox.append(el("div", { class: "req-line" }, [
+          methodSel, urlInput, sendBtn,
+          el("button", { class: "btn", text: "Save to collection", title: "Keep this request in the collection panel", onclick: saveToCollection }),
+        ]));
+
+        const hdrCount = r.headers.filter((h) => h.k.trim()).length;
+        const hdrDetails = el("details", { class: "section" }, [
+          el("summary", { text: `Request headers (${hdrCount})` }),
+          headersEditor(r.headers),
+        ]);
+        if (hdrCount) hdrDetails.open = true;
+        mainBox.append(hdrDetails);
+
+        const bodyArea = el("textarea", { rows: "4", style: "width:100%", spellcheck: "false", placeholder: "Request body (raw / JSON)" });
+        bodyArea.value = r.body || "";
+        bodyArea.addEventListener("input", () => { r.body = bodyArea.value; ctx.save(); });
+        mainBox.append(el("div", {}, [el("span", { class: "pane-label", text: "Body" }), bodyArea]));
+
+        const insecure = el("input", { type: "checkbox" });
+        insecure.checked = !!r.insecure;
+        insecure.addEventListener("change", () => { r.insecure = insecure.checked; ctx.save(); });
+        mainBox.append(el("div", { class: "toolbar" }, [
+          el("label", { class: "inline" }, [insecure, "Skip TLS verification (dev servers)"]),
+          status,
+        ]));
+
+        const respArea = el("div", { class: "tool", style: "flex:1" });
+        mainBox.append(respArea);
+        renderResponse(respArea, r, view);
+
+        async function send() {
+          if (!r.url.trim()) return setStatus(status, "✗ Enter a URL", "err");
+          sendBtn.disabled = true;
+          setStatus(status, "Sending…", "dim");
+          try {
+            const headers = {};
+            if (inCollection(r.url.trim())) {
+              for (const h of col.headers) if (h.k.trim()) headers[h.k.trim()] = h.v;
+            }
+            for (const h of r.headers) if (h.k.trim()) headers[h.k.trim()] = h.v;
+            const resp = await api("POST", "/api/proxy", {
+              method: r.method, url: r.url.trim(), headers, body: r.body, insecure: r.insecure,
+            });
+            r.response = resp;
+            if (r.name === "New request") r.name = r.method + " " + (shortPath(r.url.trim()) || r.url.trim());
+            d.history.unshift({ method: r.method, url: r.url.trim(), status: resp.status, durationMs: resp.durationMs, at: Date.now() });
+            d.history.length = Math.min(d.history.length, 50);
+            ctx.save();
+            renderMain();
+            if (sideView === "history") renderSide();
+          } catch (e) {
+            setStatus(status, "✗ " + e.message, "err");
+            sendBtn.disabled = false;
+            ctx.save();
           }
-          for (const h of d.headers) if (h.k.trim()) headers[h.k.trim()] = h.v;
-          const r = await api("POST", "/api/proxy", {
-            method: d.method, url: d.url.trim(), headers, body: d.body, insecure: d.insecure,
-          });
-          d.response = r;
-          d.history.unshift({ method: d.method, url: d.url.trim(), status: r.status, durationMs: r.durationMs, at: Date.now() });
-          d.history.length = Math.min(d.history.length, 25);
-          setStatus(status, "", "dim");
-          renderResponse("body");
-        } catch (e) {
-          setStatus(status, "✗ " + e.message, "err");
-        } finally {
-          sendBtn.disabled = false;
+        }
+
+        function saveToCollection() {
+          const url = r.url.trim();
+          if (!url) return setStatus(status, "✗ Enter a URL first", "err");
+          const path = inCollection(url) ? url.slice(col.baseUrl.length) || "/" : url;
+          if (col.requests.some((q) => q.method === r.method && q.path === path)) {
+            return setStatus(status, "Already in the collection", "dim");
+          }
+          col.requests.push({ method: r.method, path, name: r.name === "New request" ? "" : r.name });
           ctx.save();
+          setStatus(status, "✓ Saved — see the Collection panel on the left", "ok");
+          sideView = "collection";
+          renderSide();
         }
       }
 
-      root.append(
-        el("div", { class: "req-line" }, [methodSel, urlInput, sendBtn]),
-        headersBox,
-        el("div", {}, [el("span", { class: "pane-label", text: "Body" }), bodyArea]),
-        el("div", { class: "toolbar" }, [el("label", { class: "inline" }, [insecure, "Skip TLS verification (dev servers)"]), status]),
-        respArea
-      );
-      renderResponse(d.response ? "body" : col.requests.length ? "collection" : "history");
+      function renderResponse(respArea, r, view) {
+        respArea.replaceChildren();
+        const resp = r.response;
+        if (resp) {
+          respArea.append(el("div", { class: "resp-meta" }, [
+            el("span", { class: "badge s" + String(resp.status)[0], text: resp.status + " " + resp.statusText }),
+            el("span", { text: resp.durationMs + " ms" }),
+            el("span", { text: fmtBytes(resp.size) + (resp.truncated ? " (truncated)" : "") }),
+            copyBtn(() => resp.body, "Copy body"),
+          ]));
+        }
+        respArea.append(el("div", { class: "subtabs" }, [
+          el("button", { class: view === "body" ? "active" : "", text: "Response body", onclick: () => renderResponse(respArea, r, "body") }),
+          el("button", { class: view === "headers" ? "active" : "", text: "Response headers", onclick: () => renderResponse(respArea, r, "headers") }),
+        ]));
+        if (!resp) {
+          return respArea.append(el("div", { class: "status-line dim", text: "Send the request to see the response here" }));
+        }
+        if (view === "headers") {
+          respArea.append(el("table", { class: "kv" }, Object.entries(resp.headers || {}).map(([k, v]) =>
+            el("tr", {}, [el("th", { text: k }), el("td", { text: v })])
+          )));
+        } else {
+          let body = resp.body;
+          try { body = JSON.stringify(JSON.parse(resp.body), null, 2); } catch { /* not JSON */ }
+          respArea.append(el("pre", { class: "output", text: body }));
+        }
+      }
+
+      renderSide();
+      renderMain();
     },
   });
 
