@@ -1310,10 +1310,14 @@
     out.replaceChildren(resultGrid(c.result));
   };
 
-  /** Kafka console: topics browser, tail consumer, producer. */
+  /** Kafka console: topics browser, consumer (latest/beginning/time-range
+      with key & value search), producer. */
   function kafkaConsole(body, conn, c, ctx) {
     const status = el("div", { class: "status-line dim" });
     const out = el("div", { style: "flex:1;overflow:auto;display:flex;flex-direction:column;gap:10px" });
+
+    // connection payload with numeric timeout (form fields store strings)
+    const kconn = () => ({ ...conn, timeoutMs: Number(conn.timeoutMs) || 1000 });
 
     const topic = el("input", { type: "text", placeholder: "topic", style: "min-width:200px" });
     topic.value = c.topic || "";
@@ -1321,6 +1325,34 @@
     const max = el("input", { type: "number", min: "1", max: "500", style: "width:80px" });
     max.value = c.max || "50";
     max.addEventListener("input", () => { c.max = max.value; ctx.save(); });
+
+    const fromSel = el("select", {}, [
+      el("option", { value: "latest", text: "Latest" }),
+      el("option", { value: "beginning", text: "From beginning" }),
+      el("option", { value: "time", text: "Time range" }),
+    ]);
+    fromSel.value = c.from || "latest";
+    const startT = el("input", { type: "datetime-local", step: "1" });
+    startT.value = c.startT || "";
+    startT.addEventListener("input", () => { c.startT = startT.value; ctx.save(); });
+    const endT = el("input", { type: "datetime-local", step: "1", title: "optional end of range" });
+    endT.value = c.endT || "";
+    endT.addEventListener("input", () => { c.endT = endT.value; ctx.save(); });
+    const startWrap = el("label", { class: "inline" }, ["From", startT]);
+    const endWrap = el("label", { class: "inline" }, ["To", endT]);
+    const syncFrom = () => {
+      const t = fromSel.value === "time";
+      startWrap.style.display = t ? "" : "none";
+      endWrap.style.display = t ? "" : "none";
+    };
+    fromSel.addEventListener("change", () => { c.from = fromSel.value; ctx.save(); syncFrom(); });
+
+    const keyQ = el("input", { type: "text", placeholder: "search key contains…", style: "min-width:150px" });
+    keyQ.value = c.keyQ || "";
+    keyQ.addEventListener("input", () => { c.keyQ = keyQ.value; ctx.save(); });
+    const valQ = el("input", { type: "text", placeholder: "search value contains…", style: "min-width:150px;flex:1" });
+    valQ.value = c.valQ || "";
+    valQ.addEventListener("input", () => { c.valQ = valQ.value; ctx.save(); });
 
     const draw = () => {
       out.replaceChildren();
@@ -1355,7 +1387,7 @@
     const listTopics = async () => {
       setStatus(status, "Listing topics…", "dim");
       try {
-        const r = await api("POST", "/api/kafka/topics", { conn });
+        const r = await api("POST", "/api/kafka/topics", { conn: kconn() });
         c.topics = r.topics;
         ctx.save();
         draw();
@@ -1366,14 +1398,28 @@
     };
     const consume = async () => {
       if (!c.topic) return setStatus(status, "✗ Enter or pick a topic", "err");
-      setStatus(status, "Reading latest messages…", "dim");
+      if ((c.from || "latest") === "time" && !c.startT) {
+        return setStatus(status, "✗ Set the start of the time range", "err");
+      }
+      setStatus(status, "Reading messages…", "dim");
       try {
-        const r = await api("POST", "/api/kafka/consume", { conn, topic: c.topic, max: Number(c.max) || 50 });
+        const r = await api("POST", "/api/kafka/consume", {
+          conn: kconn(),
+          topic: c.topic,
+          max: Number(c.max) || 50,
+          from: c.from || "latest",
+          startMs: c.startT ? new Date(c.startT).getTime() : 0,
+          endMs: c.endT ? new Date(c.endT).getTime() : 0,
+          keyQuery: c.keyQ || "",
+          valueQuery: c.valQ || "",
+        });
         c.messages = r.messages;
         c.name = c.topic;
         ctx.save();
         draw();
-        setStatus(status, `✓ ${r.messages.length} message(s)`, "ok");
+        setStatus(status,
+          `✓ ${r.matched} match(es) of ${r.scanned} scanned, showing ${r.messages.length}${r.truncated ? " (scan capped — narrow the range or raise Last N)" : ""}`,
+          "ok");
       } catch (e) {
         setStatus(status, "✗ " + e.message, "err");
       }
@@ -1389,7 +1435,7 @@
       if (!c.topic) return setStatus(status, "✗ Enter or pick a topic", "err");
       setStatus(status, "Producing…", "dim");
       try {
-        await api("POST", "/api/kafka/produce", { conn, topic: c.topic, key: c.prodKey || "", value: c.prodValue || "" });
+        await api("POST", "/api/kafka/produce", { conn: kconn(), topic: c.topic, key: c.prodKey || "", value: c.prodValue || "" });
         setStatus(status, "✓ Message produced to " + c.topic, "ok");
       } catch (e) {
         setStatus(status, "✗ " + e.message, "err");
@@ -1400,8 +1446,15 @@
       el("div", { class: "toolbar" }, [
         el("button", { class: "btn", text: "List topics", onclick: listTopics }),
         topic,
-        el("label", { class: "inline" }, ["Last", max, "msgs"]),
+        el("label", { class: "inline" }, ["Read", fromSel]),
+        startWrap,
+        endWrap,
+        el("label", { class: "inline" }, ["Max", max, "msgs"]),
         el("button", { class: "btn primary", text: "Consume", onclick: consume }),
+      ]),
+      el("div", { class: "toolbar" }, [
+        el("span", { class: "pane-label", text: "Search" }),
+        keyQ, valQ,
       ]),
       el("div", { class: "toolbar" }, [
         el("span", { class: "pane-label", text: "Produce" }),
@@ -1411,6 +1464,7 @@
       status,
       out
     );
+    syncFrom();
     draw();
   }
 
@@ -1595,13 +1649,14 @@
     type: "kafka",
     icon: "📨",
     name: "Kafka",
-    desc: "Browse topics, tail the latest messages and produce — multiple clusters, SASL/TLS supported.",
+    desc: "Browse topics, read messages (latest, from beginning, or a time range) with key/value search, and produce — multiple clusters, SASL/TLS.",
     connLabel: "Clusters",
     connSingular: "cluster",
     connName: (c) => c.brokers,
     fields: [
       { key: "name", label: "Name", placeholder: "prod-cluster" },
       { key: "brokers", label: "Brokers (comma-separated)", placeholder: "broker1:9092, broker2:9092" },
+      { key: "timeoutMs", label: "Timeout (ms)", placeholder: "1000" },
       { key: "username", label: "SASL username (optional)" },
       { key: "password", label: "SASL password", type: "password" },
       { key: "tls", label: "TLS", type: "checkbox" },

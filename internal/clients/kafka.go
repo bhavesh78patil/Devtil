@@ -18,11 +18,36 @@ import (
 )
 
 type KafkaConn struct {
-	Brokers  string `json:"brokers"` // comma-separated host:port list
-	TLS      bool   `json:"tls"`
-	Insecure bool   `json:"insecure"`
-	Username string `json:"username"` // SASL/PLAIN when set
-	Password string `json:"password"`
+	Brokers   string `json:"brokers"` // comma-separated host:port list
+	TLS       bool   `json:"tls"`
+	Insecure  bool   `json:"insecure"`
+	Username  string `json:"username"` // SASL/PLAIN when set
+	Password  string `json:"password"`
+	TimeoutMs int    `json:"timeoutMs"` // dial/read timeout, default 1000
+}
+
+// timeout is the per-connection dial/read timeout (default 1000 ms).
+func (c KafkaConn) timeout() time.Duration {
+	ms := c.TimeoutMs
+	if ms <= 0 {
+		ms = 1000
+	}
+	if ms > 120000 {
+		ms = 120000
+	}
+	return time.Duration(ms) * time.Millisecond
+}
+
+// opDeadline bounds a whole operation (metadata + reads across partitions).
+func (c KafkaConn) opDeadline() time.Duration {
+	d := c.timeout() * 5
+	if d < 5*time.Second {
+		d = 5 * time.Second
+	}
+	if d > 2*time.Minute {
+		d = 2 * time.Minute
+	}
+	return d
 }
 
 func (c KafkaConn) brokerList() []string {
@@ -36,7 +61,7 @@ func (c KafkaConn) brokerList() []string {
 }
 
 func (c KafkaConn) dialer() *kafka.Dialer {
-	d := &kafka.Dialer{Timeout: 10 * time.Second, DualStack: true}
+	d := &kafka.Dialer{Timeout: c.timeout(), DualStack: true}
 	if c.TLS {
 		d.TLS = &tls.Config{InsecureSkipVerify: c.Insecure}
 	}
@@ -47,7 +72,7 @@ func (c KafkaConn) dialer() *kafka.Dialer {
 }
 
 func (c KafkaConn) transport() *kafka.Transport {
-	t := &kafka.Transport{DialTimeout: 10 * time.Second}
+	t := &kafka.Transport{DialTimeout: c.timeout()}
 	if c.TLS {
 		t.TLS = &tls.Config{InsecureSkipVerify: c.Insecure}
 	}
@@ -67,10 +92,10 @@ func KafkaTopics(conn KafkaConn) ([]KafkaTopic, error) {
 	if len(brokers) == 0 {
 		return nil, fmt.Errorf("at least one broker (host:port) is required")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), conn.opDeadline())
 	defer cancel()
 
-	logging.Logf("kafka: list topics via %s", brokers[0])
+	logging.Logf("kafka: list topics via %s (timeout %s)", brokers[0], conn.timeout())
 	c, err := conn.dialer().DialContext(ctx, "tcp", brokers[0])
 	if err != nil {
 		logging.Logf("kafka: dial %s failed: %v", brokers[0], err)
@@ -107,28 +132,72 @@ type KafkaMessage struct {
 
 const maxKafkaMessages = 500
 
-// KafkaTail reads up to max of the most recent messages from every partition
-// of a topic and returns them merged in chronological order.
-func KafkaTail(conn KafkaConn, topic string, max int) ([]KafkaMessage, error) {
+type KafkaConsumeRequest struct {
+	Conn       KafkaConn `json:"conn"`
+	Topic      string    `json:"topic"`
+	Max        int       `json:"max"`
+	From       string    `json:"from"` // "latest" (default), "beginning", "time"
+	StartMs    int64     `json:"startMs"`
+	EndMs      int64     `json:"endMs"`
+	KeyQuery   string    `json:"keyQuery"`   // case-insensitive substring
+	ValueQuery string    `json:"valueQuery"` // case-insensitive substring
+}
+
+type KafkaConsumeResponse struct {
+	Messages  []KafkaMessage `json:"messages"`
+	Scanned   int            `json:"scanned"`
+	Matched   int            `json:"matched"`
+	Truncated bool           `json:"truncated"` // hit the scan/result cap
+}
+
+// KafkaConsume reads messages from a topic — from the tail, the beginning,
+// or a time range — optionally filtering by key/value substrings, and
+// returns up to Max matches merged in chronological order.
+func KafkaConsume(req KafkaConsumeRequest) (*KafkaConsumeResponse, error) {
+	conn := req.Conn
 	brokers := conn.brokerList()
-	if len(brokers) == 0 || strings.TrimSpace(topic) == "" {
+	if len(brokers) == 0 || strings.TrimSpace(req.Topic) == "" {
 		return nil, fmt.Errorf("brokers and a topic are required")
 	}
+	max := req.Max
 	if max <= 0 || max > maxKafkaMessages {
 		max = 50
 	}
+	if req.From == "time" && req.StartMs <= 0 {
+		return nil, fmt.Errorf("a start time is required for time-range reads")
+	}
+
+	keyQ := strings.ToLower(strings.TrimSpace(req.KeyQuery))
+	valQ := strings.ToLower(strings.TrimSpace(req.ValueQuery))
+	// searching or reading forward needs a wider scan window than the
+	// result size, so matches aren't limited to the newest few messages
+	scanCap := max
+	if keyQ != "" || valQ != "" || req.From == "beginning" || req.From == "time" {
+		scanCap = max * 20
+		if scanCap > 10000 {
+			scanCap = 10000
+		}
+	}
+
 	dialer := conn.dialer()
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), conn.opDeadline())
 	defer cancel()
 
-	parts, err := dialer.LookupPartitions(ctx, "tcp", brokers[0], topic)
+	logging.Logf("kafka: consume topic=%s from=%s max=%d scanCap=%d keyQ=%q valQ=%q startMs=%d endMs=%d timeout=%s",
+		req.Topic, req.From, max, scanCap, keyQ, valQ, req.StartMs, req.EndMs, conn.timeout())
+
+	parts, err := dialer.LookupPartitions(ctx, "tcp", brokers[0], req.Topic)
 	if err != nil {
 		return nil, fmt.Errorf("kafka: %v", err)
 	}
 
-	msgs := []KafkaMessage{}
+	resp := &KafkaConsumeResponse{Messages: []KafkaMessage{}}
 	for _, p := range parts {
-		c, err := dialer.DialLeader(ctx, "tcp", brokers[0], topic, p.ID)
+		if resp.Scanned >= scanCap {
+			resp.Truncated = true
+			break
+		}
+		c, err := dialer.DialLeader(ctx, "tcp", brokers[0], req.Topic, p.ID)
 		if err != nil {
 			return nil, fmt.Errorf("kafka partition %d: %v", p.ID, err)
 		}
@@ -137,9 +206,22 @@ func KafkaTail(conn KafkaConn, topic string, max int) ([]KafkaMessage, error) {
 			c.Close()
 			return nil, fmt.Errorf("kafka partition %d: %v", p.ID, err)
 		}
-		start := last - int64(max)
-		if start < first {
+
+		var start int64
+		switch req.From {
+		case "beginning":
 			start = first
+		case "time":
+			off, err := c.ReadOffset(time.UnixMilli(req.StartMs))
+			if err != nil || off < first {
+				off = first
+			}
+			start = off
+		default: // latest: window of the newest messages per partition
+			start = last - int64(scanCap)
+			if start < first {
+				start = first
+			}
 		}
 		if start >= last {
 			c.Close()
@@ -149,33 +231,59 @@ func KafkaTail(conn KafkaConn, topic string, max int) ([]KafkaMessage, error) {
 			c.Close()
 			return nil, fmt.Errorf("kafka partition %d: %v", p.ID, err)
 		}
-		c.SetReadDeadline(time.Now().Add(15 * time.Second))
+		if dl, ok := ctx.Deadline(); ok {
+			c.SetReadDeadline(dl)
+		}
+
 		for off := start; off < last; off++ {
+			if resp.Scanned >= scanCap {
+				resp.Truncated = true
+				break
+			}
 			m, err := c.ReadMessage(10 << 20)
 			if err != nil {
 				break
 			}
-			msgs = append(msgs, KafkaMessage{
+			if req.EndMs > 0 && m.Time.UnixMilli() > req.EndMs {
+				break // partitions are time-ordered; past the range end
+			}
+			resp.Scanned++
+			key, value := string(m.Key), string(m.Value)
+			if keyQ != "" && !strings.Contains(strings.ToLower(key), keyQ) {
+				continue
+			}
+			if valQ != "" && !strings.Contains(strings.ToLower(value), valQ) {
+				continue
+			}
+			resp.Matched++
+			resp.Messages = append(resp.Messages, KafkaMessage{
 				Partition: p.ID,
 				Offset:    m.Offset,
 				Time:      m.Time.UTC().Format(time.RFC3339),
-				Key:       string(m.Key),
-				Value:     string(m.Value),
+				Key:       key,
+				Value:     value,
 			})
 		}
 		c.Close()
 	}
 
-	sort.Slice(msgs, func(i, j int) bool {
-		if msgs[i].Time != msgs[j].Time {
-			return msgs[i].Time < msgs[j].Time
+	sort.Slice(resp.Messages, func(i, j int) bool {
+		if resp.Messages[i].Time != resp.Messages[j].Time {
+			return resp.Messages[i].Time < resp.Messages[j].Time
 		}
-		return msgs[i].Offset < msgs[j].Offset
+		return resp.Messages[i].Offset < resp.Messages[j].Offset
 	})
-	if len(msgs) > max {
-		msgs = msgs[len(msgs)-max:]
+	if len(resp.Messages) > max {
+		resp.Truncated = true
+		if req.From == "latest" {
+			resp.Messages = resp.Messages[len(resp.Messages)-max:] // newest
+		} else {
+			resp.Messages = resp.Messages[:max] // from the range start
+		}
 	}
-	return msgs, nil
+	logging.Logf("kafka: consume done — scanned=%d matched=%d returned=%d truncated=%v",
+		resp.Scanned, resp.Matched, len(resp.Messages), resp.Truncated)
+	return resp, nil
 }
 
 func KafkaProduce(conn KafkaConn, topic, key, value string) error {

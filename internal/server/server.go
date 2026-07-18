@@ -240,21 +240,17 @@ func (s *Server) kafkaTopics(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) kafkaConsume(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		Conn  clients.KafkaConn `json:"conn"`
-		Topic string            `json:"topic"`
-		Max   int               `json:"max"`
-	}
+	var req clients.KafkaConsumeRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	msgs, err := clients.KafkaTail(req.Conn, req.Topic, req.Max)
+	resp, err := clients.KafkaConsume(req)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, err)
 		return
 	}
-	writeJSON(w, map[string]any{"messages": msgs})
+	writeJSON(w, resp)
 }
 
 func (s *Server) kafkaProduce(w http.ResponseWriter, r *http.Request) {
