@@ -1815,30 +1815,96 @@
     type: "notepad",
     icon: "📝",
     name: "Notepad",
-    desc: "A scratch pad that autosaves as you type. Keep snippets, TODOs, or paste buffers around.",
-    defaults: () => ({ text: "", mono: true }),
+    desc: "Scratch pads that autosave as you type — multiple pads as inner tabs, named after their first line.",
+    defaults: () => ({ pads: [], activePadId: null }),
     render(root, tab, ctx) {
       const d = tab.data;
-      const counter = el("span", { class: "status-line dim" });
-      const area = boundArea(d, "text", ctx, { placeholder: "Type away — everything is saved automatically." }, () => update());
-      const mono = bindField(el("input", { type: "checkbox" }), d, "mono", ctx, () => update());
+      const newPad = () => ({ id: uid(), text: "", mono: true });
 
-      const update = () => {
-        area.style.fontFamily = d.mono ? "var(--mono)" : "var(--sans)";
-        const text = d.text || "";
-        const words = text.trim() ? text.trim().split(/\s+/).length : 0;
-        counter.textContent = `${text.length} chars · ${words} words · ${text ? text.split("\n").length : 0} lines`;
+      // migrate the old single-pad shape into the first inner pad
+      if (!Array.isArray(d.pads)) d.pads = [];
+      if (d.text !== undefined || d.mono !== undefined) {
+        d.pads.unshift({ id: uid(), text: d.text || "", mono: d.mono !== false });
+        delete d.text;
+        delete d.mono;
+      }
+      if (!d.pads.length) d.pads.push(newPad());
+      if (!d.pads.some((p) => p.id === d.activePadId)) d.activePadId = d.pads[0].id;
+
+      const padLabel = (p) => {
+        const first = (p.text || "").split("\n").find((l) => l.trim());
+        return first ? first.trim().slice(0, 18) : "new pad";
       };
 
-      root.append(
-        el("div", { class: "toolbar" }, [
-          el("label", { class: "inline" }, [mono, "Monospace"]),
-          copyBtn(() => d.text || "", "Copy all"),
-          counter,
-        ]),
-        area
-      );
-      update();
+      const renderPad = () => {
+        root.replaceChildren();
+        const p = d.pads.find((x) => x.id === d.activePadId) || d.pads[0];
+
+        root.append(el("div", { class: "req-tabs" }, [
+          ...d.pads.map((pad) =>
+            el("div", {
+              class: "req-tab" + (pad.id === d.activePadId ? " active" : ""),
+              onclick: () => {
+                if (d.activePadId === pad.id) return;
+                d.activePadId = pad.id;
+                ctx.save();
+                renderPad();
+              },
+            }, [
+              el("span", { text: padLabel(pad) }),
+              el("button", {
+                class: "tab-close", text: "×", title: "Delete pad",
+                onclick: (e) => {
+                  e.stopPropagation();
+                  if ((pad.text || "").trim() && !confirm(`Delete pad "${padLabel(pad)}" and its contents?`)) return;
+                  const idx = d.pads.findIndex((x) => x.id === pad.id);
+                  d.pads.splice(idx, 1);
+                  if (!d.pads.length) d.pads.push(newPad());
+                  if (d.activePadId === pad.id) d.activePadId = d.pads[Math.min(idx, d.pads.length - 1)].id;
+                  ctx.save();
+                  renderPad();
+                },
+              }),
+            ])
+          ),
+          el("button", {
+            class: "icon-btn", text: "+", title: "New pad",
+            onclick: () => {
+              const pad = newPad();
+              d.pads.push(pad);
+              d.activePadId = pad.id;
+              ctx.save();
+              renderPad();
+            },
+          }),
+        ]));
+
+        const counter = el("span", { class: "status-line dim" });
+        const area = el("textarea", { class: "grow", placeholder: "Type away — everything is saved automatically." });
+        area.value = p.text || "";
+        const mono = el("input", { type: "checkbox" });
+        mono.checked = p.mono !== false;
+
+        const update = () => {
+          area.style.fontFamily = p.mono !== false ? "var(--mono)" : "var(--sans)";
+          const text = p.text || "";
+          const words = text.trim() ? text.trim().split(/\s+/).length : 0;
+          counter.textContent = `${text.length} chars · ${words} words · ${text ? text.split("\n").length : 0} lines`;
+        };
+        area.addEventListener("input", () => { p.text = area.value; ctx.save(); update(); });
+        mono.addEventListener("change", () => { p.mono = mono.checked; ctx.save(); update(); });
+
+        root.append(
+          el("div", { class: "toolbar" }, [
+            el("label", { class: "inline" }, [mono, "Monospace"]),
+            copyBtn(() => p.text || "", "Copy all"),
+            counter,
+          ]),
+          area
+        );
+        update();
+      };
+      renderPad();
     },
   });
 

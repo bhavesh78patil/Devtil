@@ -25,7 +25,7 @@ the UI in an app window.
 | **Cassandra** | CQL console against multiple connections (contact points, keyspace, auth) with a results grid, row limits, and Ctrl+Enter to run. The **query helper** lists tables from `system_schema`, shows the chosen table's **columns as checkboxes**, and generates the `SELECT … LIMIT …` for you |
 | **Oracle** | SQL console using a pure-Go driver — **no Oracle client install required** — with results grid and DML support (rows-affected reporting). Same **query helper**: pick from `user_tables`, choose columns, and the `SELECT … FETCH FIRST n ROWS ONLY` is generated |
 | **App Logs** | Devtil's own diagnostic log, viewable in-app: every kubectl/ssh command it ran (secrets redacted) with duration, stdout size and stderr, every proxied HTTP call, DB/Kafka connections, and UI errors — with tail size, substring filter, auto-refresh and copy. The file lives at `<data dir>/devtil.log` (5 MB rotation) |
-| **Notepad** | Autosaving scratch pads with char/word/line counts |
+| **Notepad** | Autosaving scratch pads with char/word/line counts — **multiple pads as inner tabs** per notepad, auto-named from their first line, deleted only when you close them (with confirmation if non-empty) |
 | **Generators** | UUID v4 (bulk), random strings/tokens, SHA-1/256/384/512 hashes |
 | **Timestamps** | Auto-detects epoch seconds/millis/date strings; converts to ISO, local, relative |
 | **Regex Tester** | Live match highlighting, capture groups, match list |
@@ -93,6 +93,21 @@ opens the UI in an app window; quitting the app stops the backend.
 ```sh
 make cross    # dist/devtil-{darwin-arm64,darwin-amd64,windows-amd64.exe,linux-amd64}
 ```
+
+## Releases via GitHub Actions
+
+`.github/workflows/release.yml` builds everything people need to install
+devtil:
+
+- **Standalone Go binaries** for macOS (arm64 + amd64), Windows and Linux —
+  download, `chmod +x`, run; the UI opens in the browser.
+- **Native desktop installers** — a macOS `.dmg` and a Windows setup `.exe`
+  built with Electron on real mac/windows runners (unsigned by default; add
+  signing secrets to ship signed builds).
+
+Push a tag like `v1.0.0` and all artifacts are attached to the GitHub
+Release automatically; the workflow can also be run manually from the
+Actions tab, where artifacts are downloadable from the run page.
 
 ## Architecture
 
