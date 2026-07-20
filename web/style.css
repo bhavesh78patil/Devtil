@@ -465,6 +465,57 @@ details.section[open] summary { margin-bottom: 8px; }
 .pod-row:hover td { background: var(--bg3); }
 .pod-row.selected td { background: var(--accent-soft); }
 
+.btn.chip { padding: 3px 10px; margin: 2px 4px 2px 0; font-size: 12px; }
+
+/* container terminal panels (MobaXterm-like) */
+.kube-panels { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 6px; }
+.kube-panel {
+  flex: 1 1 460px;
+  min-width: 380px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg2);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.kube-panel.max { flex-basis: 100%; }
+.kube-panel-head {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 8px;
+  background: var(--bg3);
+  border-bottom: 1px solid var(--border);
+}
+.kube-panel-title {
+  flex: 1;
+  font-family: var(--mono);
+  font-size: 12.5px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.kube-panel-body { display: flex; flex-direction: column; gap: 6px; padding: 8px; }
+.kube-panel-out {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px;
+  margin: 0;
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow: auto;
+  height: 240px;
+}
+.kube-panel.max .kube-panel-out { height: 60vh; }
+.kube-cmd-bar { display: flex; gap: 6px; }
+.kube-cmd { flex: 1; }
+
 .form-grid { display: flex; flex-wrap: wrap; gap: 8px; align-items: end; }
 .form-grid .field { display: flex; flex-direction: column; gap: 4px; }
 .form-grid .field > span { font-size: 11px; color: var(--text-dim); }

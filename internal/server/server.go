@@ -51,6 +51,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/kube/namespaces", s.kubeNamespaces)
 	mux.HandleFunc("GET /api/kube/pods", s.kubePods)
 	mux.HandleFunc("POST /api/kube/logs", s.kubeLogs)
+	mux.HandleFunc("POST /api/kube/exec", s.kubeExec)
 
 	mux.HandleFunc("GET /api/logs", s.getLogs)
 	mux.HandleFunc("POST /api/logs/client", s.clientLog)
@@ -300,6 +301,23 @@ func (s *Server) dbQuery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, res)
+}
+
+func (s *Server) kubeExec(w http.ResponseWriter, r *http.Request) {
+	var req kube.ExecRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if !requireTools(w, req.Conn) {
+		return
+	}
+	resp, err := kube.Exec(req)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err)
+		return
+	}
+	writeJSON(w, resp)
 }
 
 // requireTools checks that the binary this connection depends on exists:
