@@ -9,6 +9,8 @@ import (
 
 	"github.com/gocql/gocql"
 	go_ora "github.com/sijms/go-ora/v2"
+
+	"github.com/bhavesh78patil/devtil/internal/logging"
 )
 
 // DBConn covers both Cassandra and Oracle connections; unused fields are
@@ -99,8 +101,10 @@ func CassandraQuery(conn DBConn, query string, maxRows int) (*QueryResult, error
 	cluster.ConnectTimeout = 10 * time.Second
 	cluster.Timeout = 20 * time.Second
 
+	logging.Logf("cassandra: connect %v, query %q", hosts, logging.Snippet(query, 200))
 	session, err := cluster.CreateSession()
 	if err != nil {
+		logging.Logf("cassandra: connect failed: %v", err)
 		return nil, fmt.Errorf("cassandra: %v", err)
 	}
 	defer session.Close()
@@ -169,7 +173,9 @@ func OracleQuery(conn DBConn, query string, maxRows int) (*QueryResult, error) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
+	logging.Logf("oracle: connect %s:%d/%s, query %q", hosts[0], port, conn.Service, logging.Snippet(query, 200))
 	if err := db.PingContext(ctx); err != nil {
+		logging.Logf("oracle: connect failed: %v", err)
 		return nil, fmt.Errorf("oracle: %v", err)
 	}
 

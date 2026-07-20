@@ -20,11 +20,12 @@ the UI in an app window.
 | **JWT Decoder** | Decode header & payload, human-readable `exp`/`iat`/`nbf`, expiry check |
 | **API Client** | Postman-like layout: a **side panel** with the saved **Collection** and **History**, and **inner request tabs** in the main area. Clicking a saved or historical request opens it in its own tab (re-clicking focuses the existing tab), each with its own method, headers, body and response — status/time/size, pretty-printed JSON, response-headers view. Requests are proxied through the Go backend so CORS never gets in the way, with an opt-in "skip TLS verification" for dev servers. The collection holds a base URL, endpoints imported from a Swagger/OpenAPI JSON URL (pick individual endpoints or select all) or saved via "Save to collection", and **global headers** automatically sent with every request under the base URL (request-level headers override on conflict) |
 | **Kube Logs** | Runs kubectl locally **or over SSH on the kubemaster** (`ssh user@host kubectl …`) for clusters only reachable from a jump/master host — using your own ssh config, keys and agent. Pick a kubeconfig context (listed from the SSH host when one is set), or point at an API server directly (`--server` + token + skip-TLS). Find pods for a service by name/label, fetch logs from one or many pods (multi-pod lines are prefixed with the pod name), tail/since filters, and grep (substring or regex) with match highlighting. Log source is either **container stdout** (`kubectl logs`) or a **file inside the pod** — devtil execs in and tails the file for services that write log files instead of stdout |
-| **Kafka** | Connect to **multiple clusters** (plain, SASL/PLAIN, TLS): browse topics with partition counts, tail the latest N messages across all partitions (merged chronologically), and produce messages — via a pure-Go client, no local Kafka tooling needed |
+| **Kafka** | Connect to **multiple clusters** (plain, SASL/PLAIN, TLS) with a **configurable timeout (ms, default 1000)** per cluster: browse topics with partition counts, read messages from **latest, the beginning, or a time range** (start + optional end), **search by key and/or value** (case-insensitive substring, scans a wider window and reports matched/scanned counts), and produce messages — via a pure-Go client, no local Kafka tooling needed |
 | **Elastic / OpenSearch** | Per-cluster connections with basic auth: one-click cluster health / indices / nodes, plus a free-form REST console for `_search` and any other endpoint, with pretty-printed responses. A **query helper** lists the cluster's indices to pick from, loads the selected index's mapping into a **field/column picker** (nested fields flattened), and builds the `_search` body (query_string / match_all, `_source` projection, size) for you |
 | **Cassandra** | CQL console against multiple connections (contact points, keyspace, auth) with a results grid, row limits, and Ctrl+Enter to run. The **query helper** lists tables from `system_schema`, shows the chosen table's **columns as checkboxes**, and generates the `SELECT … LIMIT …` for you |
 | **Oracle** | SQL console using a pure-Go driver — **no Oracle client install required** — with results grid and DML support (rows-affected reporting). Same **query helper**: pick from `user_tables`, choose columns, and the `SELECT … FETCH FIRST n ROWS ONLY` is generated |
-| **Notepad** | Autosaving scratch pads with char/word/line counts |
+| **App Logs** | Devtil's own diagnostic log, viewable in-app: every kubectl/ssh command it ran (secrets redacted) with duration, stdout size and stderr, every proxied HTTP call, DB/Kafka connections, and UI errors — with tail size, substring filter, auto-refresh and copy. The file lives at `<data dir>/devtil.log` (5 MB rotation) |
+| **Notepad** | Autosaving scratch pads with char/word/line counts — **multiple pads as inner tabs** per notepad, auto-named from their first line, deleted only when you close them (with confirmation if non-empty) |
 | **Generators** | UUID v4 (bulk), random strings/tokens, SHA-1/256/384/512 hashes |
 | **Timestamps** | Auto-detects epoch seconds/millis/date strings; converts to ISO, local, relative |
 | **Regex Tester** | Live match highlighting, capture groups, match list |
@@ -92,6 +93,21 @@ opens the UI in an app window; quitting the app stops the backend.
 ```sh
 make cross    # dist/devtil-{darwin-arm64,darwin-amd64,windows-amd64.exe,linux-amd64}
 ```
+
+## Releases via GitHub Actions
+
+`.github/workflows/release.yml` builds everything people need to install
+devtil:
+
+- **Standalone Go binaries** for macOS (arm64 + amd64), Windows and Linux —
+  download, `chmod +x`, run; the UI opens in the browser.
+- **Native desktop installers** — a macOS `.dmg` and a Windows setup `.exe`
+  built with Electron on real mac/windows runners (unsigned by default; add
+  signing secrets to ship signed builds).
+
+Push a tag like `v1.0.0` and all artifacts are attached to the GitHub
+Release automatically; the workflow can also be run manually from the
+Actions tab, where artifacts are downloadable from the run page.
 
 ## Architecture
 

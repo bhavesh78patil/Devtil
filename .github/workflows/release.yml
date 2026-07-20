@@ -1,0 +1,79 @@
+# Builds installable artifacts:
+#   - standalone Go binaries for macOS (arm64/amd64), Windows and Linux
+#   - native desktop installers (.dmg / .exe) via Electron on mac/windows runners
+#
+# Runs on every v* tag (attaching everything to a GitHub Release) and can be
+# run manually from the Actions tab (artifacts downloadable from the run).
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  binaries:
+    name: Go binaries (all platforms)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+      - name: Cross-compile
+        run: make cross
+      - uses: actions/upload-artifact@v4
+        with:
+          name: devtil-binaries
+          path: dist/*
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+
+  desktop:
+    name: Desktop installer (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            binary: devtil
+            artifact: "desktop/dist/*.dmg"
+          - os: windows-latest
+            binary: devtil.exe
+            artifact: "desktop/dist/*.exe"
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Build backend
+        shell: bash
+        run: go build -o bin/${{ matrix.binary }} .
+      - name: Build installer
+        shell: bash
+        working-directory: desktop
+        env:
+          # unsigned builds; set signing secrets later to ship signed apps
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+        run: |
+          npm install
+          npx electron-builder --publish never
+      - uses: actions/upload-artifact@v4
+        with:
+          name: devtil-desktop-${{ matrix.os }}
+          path: ${{ matrix.artifact }}
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ matrix.artifact }}

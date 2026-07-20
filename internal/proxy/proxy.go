@@ -11,6 +11,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/bhavesh78patil/devtil/internal/logging"
 )
 
 type Request struct {
@@ -84,12 +86,16 @@ func Do(pr Request) (*Response, error) {
 	}
 	client := &http.Client{Timeout: timeout, Transport: transport}
 
+	logURL := *req.URL
+	logURL.RawQuery = "" // query strings can carry tokens
 	start := time.Now()
 	resp, err := client.Do(req)
 	if err != nil {
+		logging.Logf("proxy: %s %s failed: %v", method, logURL.String(), err)
 		return nil, err
 	}
 	defer resp.Body.Close()
+	logging.Logf("proxy: %s %s -> %d (%dms)", method, logURL.String(), resp.StatusCode, time.Since(start).Milliseconds())
 
 	data, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
 	if err != nil {
