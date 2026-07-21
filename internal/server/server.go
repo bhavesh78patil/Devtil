@@ -173,10 +173,10 @@ func (s *Server) doProxy(w http.ResponseWriter, r *http.Request) {
 
 func connFromQuery(q url.Values) kube.Conn {
 	return kube.Conn{
-		Context:  q.Get("context"),
-		Server:   q.Get("server"),
-		Token:    q.Get("token"),
-		Insecure: q.Get("insecure") == "true",
+		Context:     q.Get("context"),
+		Server:      q.Get("server"),
+		Token:       q.Get("token"),
+		Insecure:    q.Get("insecure") == "true",
 		SSHHost:     q.Get("sshHost"),
 		SSHPort:     q.Get("sshPort"),
 		SSHKey:      q.Get("sshKey"),
@@ -277,16 +277,17 @@ func (s *Server) kafkaConsume(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) kafkaProduce(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Conn  clients.KafkaConn `json:"conn"`
-		Topic string            `json:"topic"`
-		Key   string            `json:"key"`
-		Value string            `json:"value"`
+		Conn    clients.KafkaConn     `json:"conn"`
+		Topic   string                `json:"topic"`
+		Key     string                `json:"key"`
+		Value   string                `json:"value"`
+		Headers []clients.KafkaHeader `json:"headers"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	if err := clients.KafkaProduce(req.Conn, req.Topic, req.Key, req.Value); err != nil {
+	if err := clients.KafkaProduce(req.Conn, req.Topic, req.Key, req.Value, req.Headers); err != nil {
 		writeError(w, http.StatusBadGateway, err)
 		return
 	}

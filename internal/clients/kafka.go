@@ -122,12 +122,18 @@ func KafkaTopics(conn KafkaConn) ([]KafkaTopic, error) {
 	return topics, nil
 }
 
+type KafkaHeader struct {
+	Key   string `json:"key"`
+	Value string `json:"value"`
+}
+
 type KafkaMessage struct {
-	Partition int    `json:"partition"`
-	Offset    int64  `json:"offset"`
-	Time      string `json:"time"`
-	Key       string `json:"key"`
-	Value     string `json:"value"`
+	Partition int           `json:"partition"`
+	Offset    int64         `json:"offset"`
+	Time      string        `json:"time"`
+	Key       string        `json:"key"`
+	Value     string        `json:"value"`
+	Headers   []KafkaHeader `json:"headers,omitempty"`
 }
 
 const maxKafkaMessages = 500
@@ -256,12 +262,17 @@ func KafkaConsume(req KafkaConsumeRequest) (*KafkaConsumeResponse, error) {
 				continue
 			}
 			resp.Matched++
+			var hdrs []KafkaHeader
+			for _, h := range m.Headers {
+				hdrs = append(hdrs, KafkaHeader{Key: h.Key, Value: string(h.Value)})
+			}
 			resp.Messages = append(resp.Messages, KafkaMessage{
 				Partition: p.ID,
 				Offset:    m.Offset,
 				Time:      m.Time.UTC().Format(time.RFC3339),
 				Key:       key,
 				Value:     value,
+				Headers:   hdrs,
 			})
 		}
 		c.Close()
@@ -286,7 +297,7 @@ func KafkaConsume(req KafkaConsumeRequest) (*KafkaConsumeResponse, error) {
 	return resp, nil
 }
 
-func KafkaProduce(conn KafkaConn, topic, key, value string) error {
+func KafkaProduce(conn KafkaConn, topic, key, value string, headers []KafkaHeader) error {
 	brokers := conn.brokerList()
 	if len(brokers) == 0 || strings.TrimSpace(topic) == "" {
 		return fmt.Errorf("brokers and a topic are required")
@@ -305,6 +316,12 @@ func KafkaProduce(conn KafkaConn, topic, key, value string) error {
 	msg := kafka.Message{Value: []byte(value)}
 	if key != "" {
 		msg.Key = []byte(key)
+	}
+	for _, h := range headers {
+		if strings.TrimSpace(h.Key) == "" {
+			continue
+		}
+		msg.Headers = append(msg.Headers, kafka.Header{Key: h.Key, Value: []byte(h.Value)})
 	}
 	if err := w.WriteMessages(ctx, msg); err != nil {
 		return fmt.Errorf("kafka: %v", err)
