@@ -351,8 +351,6 @@ table.kv th { color: var(--text-dim); font-weight: 500; white-space: nowrap; }
   gap: 8px;
   flex: 1;
 }
-.api-side input.hk { width: 42%; min-width: 0; }
-.api-side input.hv { flex: 1; min-width: 0; }
 
 .api-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 10px; }
 
@@ -430,9 +428,11 @@ details.section[open] summary { margin-bottom: 8px; }
 .req-line select { width: 110px; }
 .req-line input { flex: 1; }
 
+/* key/value header rows: flex so both fields stay visible in wide (request)
+   and narrow (collection side-panel) contexts alike */
 .header-row { display: flex; gap: 6px; align-items: center; }
-.header-row input.hk { width: 220px; }
-.header-row input.hv { flex: 1; }
+.header-row input.hk { flex: 2 1 0; min-width: 0; width: auto; }
+.header-row input.hv { flex: 3 1 0; min-width: 0; width: auto; }
 
 .resp-meta { display: flex; gap: 16px; font-size: 13px; align-items: center; flex-wrap: wrap; }
 .badge {

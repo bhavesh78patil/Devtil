@@ -1528,6 +1528,8 @@
                 if (!existing) {
                   d.connections.push(target);
                   d.activeConnId = target.id;
+                  const cur = d.consoles.find((x) => x.id === d.activeConsoleId);
+                  if (cur) cur.connId = target.id; // point the current tab at the new connection
                 }
                 adding = false;
                 editingId = null;
@@ -1556,7 +1558,14 @@
             box.append(el("div", {
               class: "history-item" + (c.id === d.activeConnId ? " conn-active" : ""),
               title: "Click to make this the active " + cfg.connSingular,
-              onclick: () => { d.activeConnId = c.id; ctx.save(); renderSide(); renderMain(); },
+              onclick: () => {
+                d.activeConnId = c.id;
+                const cur = d.consoles.find((x) => x.id === d.activeConsoleId);
+                if (cur) cur.connId = c.id; // re-target the current console tab to this cluster
+                ctx.save();
+                renderSide();
+                renderMain();
+              },
             }, [
               el("span", { class: "conn-dot" + (c.id === d.activeConnId ? " on" : "") }),
               el("span", { class: "h-url", text: c.name || cfg.connName(c) || cfg.connSingular }),
@@ -1585,17 +1594,23 @@
         function renderMain() {
           mainBox.replaceChildren();
           mainBox.append(el("div", { class: "req-tabs" }, [
-            ...d.consoles.map((c) =>
-              el("div", {
+            ...d.consoles.map((c) => {
+              const consoleConn = d.connections.find((x) => x.id === c.connId);
+              const clusterName = consoleConn ? (consoleConn.name || cfg.connName(consoleConn) || "") : "";
+              return el("div", {
                 class: "req-tab" + (c.id === d.activeConsoleId ? " active" : ""),
+                title: clusterName ? cfg.connSingular + ": " + clusterName : "",
                 onclick: () => {
                   if (d.activeConsoleId === c.id) return;
                   d.activeConsoleId = c.id;
+                  // switch the active connection to whatever this tab is bound to
+                  if (c.connId && d.connections.some((x) => x.id === c.connId)) d.activeConnId = c.connId;
                   ctx.save();
+                  renderSide();
                   renderMain();
                 },
               }, [
-                el("span", { text: cfg.consoleLabel(c) }),
+                el("span", { text: cfg.consoleLabel(c) + (clusterName ? "  ·  " + clusterName : "") }),
                 el("button", {
                   class: "tab-close", text: "×", title: "Close console tab",
                   onclick: (e) => {
@@ -1608,12 +1623,13 @@
                     renderMain();
                   },
                 }),
-              ])
-            ),
+              ]);
+            }),
             el("button", {
               class: "icon-btn", text: "+", title: "New console tab",
               onclick: () => {
                 const c = cfg.newConsole();
+                c.connId = d.activeConnId; // new tab targets the current cluster
                 d.consoles.push(c);
                 d.activeConsoleId = c.id;
                 ctx.save();
@@ -1622,8 +1638,14 @@
             }),
           ]));
 
-          const conn = activeConn();
           const consoleData = d.consoles.find((c) => c.id === d.activeConsoleId) || d.consoles[0];
+          // each console remembers its own connection; migrate legacy consoles and
+          // keep the active-connection highlight in sync with the current tab
+          if (!consoleData.connId || !d.connections.some((x) => x.id === consoleData.connId)) {
+            consoleData.connId = d.activeConnId;
+          }
+          d.activeConnId = consoleData.connId;
+          const conn = d.connections.find((c) => c.id === consoleData.connId) || null;
           const body = el("div", { class: "tool", style: "flex:1" });
           mainBox.append(body);
           if (!conn) {

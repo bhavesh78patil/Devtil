@@ -20,8 +20,24 @@ telemetry**, and keeps all your data on your machine. See
 [latest release](../../releases/latest) — a standalone binary
 (`devtil-darwin-arm64`, `devtil-darwin-amd64`, `devtil-windows-amd64.exe`,
 `devtil-linux-amd64`) or the native `.dmg` / `.exe` installer. Verify against
-`SHA256SUMS`. Binaries are unsigned, so macOS Gatekeeper (right-click → Open)
-and Windows SmartScreen may prompt on first run.
+`SHA256SUMS`.
+
+### Opening on macOS (unsigned app)
+
+Devtil isn't notarized by Apple (that needs a paid developer account), so on
+first launch macOS may say **"Devtil.app is damaged and can't be opened"** or
+**"cannot be opened because Apple cannot check it for malicious software"**.
+The app is fine — this is just Gatekeeper blocking an un-notarized download.
+Clear the quarantine flag once, then open normally:
+
+```sh
+# for the app:
+xattr -dr com.apple.quarantine /Applications/Devtil.app
+# or for the standalone binary:
+xattr -d com.apple.quarantine ~/Downloads/devtil-darwin-arm64 && chmod +x ~/Downloads/devtil-darwin-arm64
+```
+
+(On Windows, SmartScreen may warn — choose **More info → Run anyway**.)
 
 **Build it yourself for Windows & Mac** (needs Go 1.25):
 
@@ -39,6 +55,20 @@ git tag v1.0.0 && git push origin v1.0.0
 
 The workflow (`.github/workflows/release.yml`) can also be run manually from
 the repo's **Actions** tab.
+
+**Upload binaries to a release from your machine** — if you'd rather build
+locally (or need to refresh assets on a release), use the helper script
+(needs the authenticated [GitHub CLI](https://cli.github.com)):
+
+```sh
+make release TAG=v1.0.0          # build cross-platform binaries + upload to the v1.0.0 release
+scripts/release.sh v1.0.0 --tag-push   # also create & push the tag (triggering CI) first
+```
+
+It runs `make cross`, writes `SHA256SUMS`, creates the release from
+`RELEASE_NOTES.md` if it doesn't exist, and uploads (clobbering same-named
+assets). The `.dmg`/`.exe` installers still come from CI, since they must be
+built on macOS/Windows.
 
 ## Tools included
 
