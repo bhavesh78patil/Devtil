@@ -56,6 +56,20 @@ git tag v1.0.0 && git push origin v1.0.0
 The workflow (`.github/workflows/release.yml`) can also be run manually from
 the repo's **Actions** tab.
 
+**Upload binaries to a release from your machine** — if you'd rather build
+locally (or need to refresh assets on a release), use the helper script
+(needs the authenticated [GitHub CLI](https://cli.github.com)):
+
+```sh
+make release TAG=v1.0.0          # build cross-platform binaries + upload to the v1.0.0 release
+scripts/release.sh v1.0.0 --tag-push   # also create & push the tag (triggering CI) first
+```
+
+It runs `make cross`, writes `SHA256SUMS`, creates the release from
+`RELEASE_NOTES.md` if it doesn't exist, and uploads (clobbering same-named
+assets). The `.dmg`/`.exe` installers still come from CI, since they must be
+built on macOS/Windows.
+
 ## Tools included
 
 | Tool | What it does |

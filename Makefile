@@ -1,6 +1,6 @@
 BIN := bin/devtil
 
-.PHONY: build run test vet cross desktop clean
+.PHONY: build run test vet cross desktop release clean
 
 build: ## build the devtil binary (UI embedded)
 	go build -o $(BIN) .
@@ -22,6 +22,10 @@ cross: ## cross-compile for mac (arm64/amd64), windows and linux into dist/
 
 desktop: build ## run the native Electron shell (requires: cd desktop && npm install)
 	cd desktop && npm start
+
+release: ## build binaries and upload them to a GitHub Release (make release TAG=v1.0.0)
+	@test -n "$(TAG)" || { echo "usage: make release TAG=v1.0.0"; exit 1; }
+	@scripts/release.sh $(TAG)
 
 clean:
 	rm -rf bin dist
