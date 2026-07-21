@@ -5,6 +5,28 @@
 (() => {
   const { registerTool, el, escapeHtml, debounce, uid, fmtBytes, copyBtn, setStatus, api } = Devtil;
 
+  /** Full-screen overlay showing text JSON pretty-printed (falls back to raw). */
+  function showJsonModal(title, raw) {
+    let pretty = raw == null ? "" : String(raw);
+    try { pretty = JSON.stringify(JSON.parse(raw), null, 2); } catch { /* not JSON */ }
+    const overlay = el("div", { class: "json-modal-overlay" });
+    const pre = el("pre", { class: "output", style: "flex:1;overflow:auto;margin:0" });
+    pre.textContent = pretty;
+    const close = () => overlay.remove();
+    overlay.append(el("div", { class: "json-modal" }, [
+      el("div", { class: "json-modal-head" }, [
+        el("span", { class: "json-modal-title", text: title }),
+        copyBtn(() => pretty, "Copy"),
+        el("button", { class: "icon-btn", text: "×", title: "Close (Esc)", onclick: close }),
+      ]),
+      pre,
+    ]));
+    overlay.addEventListener("click", (e) => { if (e.target === overlay) close(); });
+    const onKey = (e) => { if (e.key === "Escape") { close(); document.removeEventListener("keydown", onKey); } };
+    document.addEventListener("keydown", onKey);
+    document.body.appendChild(overlay);
+  }
+
   /** textarea bound to data[key]: saves on input, optional onInput hook */
   function boundArea(data, key, ctx, attrs = {}, onInput) {
     const area = el("textarea", { class: "grow", spellcheck: "false", ...attrs });
@@ -1780,18 +1802,39 @@
     valQ.value = c.valQ || "";
     valQ.addEventListener("input", () => { c.valQ = valQ.value; ctx.save(); });
 
+    const tryPretty = (v) => { try { return JSON.stringify(JSON.parse(v), null, 2); } catch { return v == null ? "" : String(v); } };
+
+    const valueCell = (m) => {
+      const pretty = tryPretty(m.value);
+      const pre = el("pre", { class: "kafka-val-pre collapsed" });
+      pre.textContent = pretty;
+      const toggle = el("button", { class: "btn xs", text: "Expand" });
+      toggle.addEventListener("click", () => {
+        const collapsed = pre.classList.toggle("collapsed");
+        toggle.textContent = collapsed ? "Expand" : "Collapse";
+      });
+      const tools = el("div", { class: "kafka-val-tools" }, [
+        toggle,
+        el("button", { class: "btn xs", text: "⤢ Maximize", title: "Open the value full-screen, JSON pretty-printed", onclick: () => showJsonModal(`Partition ${m.partition} · Offset ${m.offset}`, m.value) }),
+        copyBtn(() => pretty, "Copy"),
+      ]);
+      return el("td", { class: "kafka-val-cell" }, [tools, pre]);
+    };
+
     const draw = () => {
       out.replaceChildren();
       if (Array.isArray(c.messages)) {
+        // newest first (backend returns chronological; reverse for display)
+        const rows = c.messages.slice().reverse();
         out.append(
-          el("span", { class: "pane-label", text: `Messages (${c.messages.length}, oldest first)` }),
-          el("table", { class: "kv" }, [
+          el("span", { class: "pane-label", text: `Messages (${c.messages.length}, newest first)` }),
+          el("table", { class: "kv kafka-msgs" }, [
             el("tr", {}, [el("th", { text: "P/Offset" }), el("th", { text: "Time" }), el("th", { text: "Key" }), el("th", { text: "Value" })]),
-            ...c.messages.map((m) => el("tr", {}, [
-              el("td", { text: m.partition + "/" + m.offset }),
-              el("td", { text: m.time }),
+            ...rows.map((m) => el("tr", {}, [
+              el("td", { class: "nowrap", text: m.partition + "/" + m.offset }),
+              el("td", { class: "nowrap", text: (m.time || "").replace("T", " ").replace("Z", "") }),
               el("td", { text: m.key }),
-              el("td", { text: m.value }),
+              valueCell(m),
             ])),
           ])
         );
