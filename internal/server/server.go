@@ -55,6 +55,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/db/query", s.dbQuery)
 	mux.HandleFunc("POST /api/ssh/exec", s.sshExec)
 	mux.HandleFunc("GET /api/ssh/pty", s.sshPTY)
+	mux.HandleFunc("POST /api/sftp/list", s.sftpList)
+	mux.HandleFunc("POST /api/sftp/download", s.sftpDownload)
 
 	mux.HandleFunc("GET /api/kube/contexts", s.kubeContexts)
 	mux.HandleFunc("GET /api/kube/namespaces", s.kubeNamespaces)
@@ -446,6 +448,49 @@ func (s *Server) sshPTY(w http.ResponseWriter, r *http.Request) {
 	}
 	sess.Close()
 	logging.Logf("ssh: interactive pty to %s@%s closed", start.Username, start.Host)
+}
+
+func (s *Server) sftpList(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Conn sshx.Conn `json:"conn"`
+		Path string    `json:"path"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	entries, resolved, err := sshx.SFTPList(req.Conn, req.Path)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err)
+		return
+	}
+	writeJSON(w, map[string]any{"entries": entries, "path": resolved})
+}
+
+func (s *Server) sftpDownload(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Conn sshx.Conn `json:"conn"`
+		Path string    `json:"path"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	rc, name, size, err := sshx.SFTPOpen(req.Conn, req.Path)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err)
+		return
+	}
+	defer rc.Close()
+
+	// sanitize the filename for the Content-Disposition header
+	safe := strings.NewReplacer("\"", "_", "\r", "", "\n", "", "\\", "_").Replace(name)
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Disposition", `attachment; filename="`+safe+`"`)
+	if size > 0 {
+		w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
+	}
+	io.Copy(w, rc)
 }
 
 func (s *Server) sshExec(w http.ResponseWriter, r *http.Request) {

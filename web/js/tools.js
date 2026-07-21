@@ -1098,11 +1098,34 @@
           } catch (e) { /* ignore */ }
           return;
         }
-        const term = new Terminal({ fontFamily: "ui-monospace, Menlo, Consolas, monospace", fontSize: 12, cursorBlink: true, scrollback: 5000, theme: themeColors() });
+        const term = new Terminal({ fontFamily: "ui-monospace, Menlo, Consolas, monospace", fontSize: 12, cursorBlink: true, scrollback: 5000, rightClickSelectsWord: true, theme: themeColors() });
         const fit = new FitAddon.FitAddon();
         term.loadAddon(fit);
         term.open(hostEl);
         try { fit.fit(); } catch (e) { /* ignore */ }
+        // clipboard: Ctrl+Shift+C copies the selection, Ctrl+Shift+V pastes.
+        // (plain Ctrl+C must stay as SIGINT for the shell.)
+        term.attachCustomKeyEventHandler((e) => {
+          if (e.type !== "keydown") return true;
+          if (e.ctrlKey && e.shiftKey && (e.key === "C" || e.key === "c")) {
+            const sel = term.getSelection();
+            if (sel) navigator.clipboard.writeText(sel).catch(() => {});
+            return false;
+          }
+          if (e.ctrlKey && e.shiftKey && (e.key === "V" || e.key === "v")) {
+            navigator.clipboard.readText().then((t) => {
+              const w = rt[s.id] && rt[s.id].ws;
+              if (t && w && w.readyState === 1) w.send(JSON.stringify({ type: "input", data: t }));
+            }).catch(() => {});
+            return false;
+          }
+          return true;
+        });
+        // copy the selection to the clipboard as soon as it's made (xterm/Linux style)
+        term.onSelectionChange(() => {
+          const sel = term.getSelection();
+          if (sel) navigator.clipboard.writeText(sel).catch(() => {});
+        });
         term.onData((data) => { const w = rt[s.id] && rt[s.id].ws; if (w && w.readyState === 1) w.send(JSON.stringify({ type: "input", data })); });
         term.onResize(({ cols, rows }) => { const w = rt[s.id] && rt[s.id].ws; if (w && w.readyState === 1) w.send(JSON.stringify({ type: "resize", cols, rows })); });
         rt[s.id] = { term, fit, ws: null, wired: true };
@@ -1136,9 +1159,22 @@
           onclick: () => { s.broadcast = !s.broadcast; castBtn.className = "icon-btn cast" + (s.broadcast ? " on" : ""); castBtn.textContent = s.broadcast ? "📡 on" : "📡 off"; ctx.save(); },
         });
         const body = el("div", { class: "kube-panel-body term-body" }, [hostEl]);
+        const copySel = () => {
+          const r = rt[s.id];
+          const sel = r && r.term ? r.term.getSelection() : "";
+          if (sel) navigator.clipboard.writeText(sel).catch(() => {});
+        };
+        const pasteClip = () => {
+          navigator.clipboard.readText().then((t) => {
+            const w = rt[s.id] && rt[s.id].ws;
+            if (t && w && w.readyState === 1) w.send(JSON.stringify({ type: "input", data: t }));
+          }).catch(() => {});
+        };
         const head = el("div", { class: "kube-panel-head" }, [
           el("span", { class: "kube-panel-title", text: (s.username ? s.username + "@" : "") + s.host + ":" + s.port }),
           castBtn,
+          headBtn("⧉", "Copy selection (Ctrl+Shift+C, or auto-copies on select)", copySel),
+          headBtn("📋", "Paste (Ctrl+Shift+V)", pasteClip),
           headBtn("⟳", "Reconnect", () => reconnect(s)),
           headBtn("▾", "Minimize / expand", () => { s.minimized = !s.minimized; ctx.save(); renderPanels(); }),
           headBtn("🗖", "Maximize / restore", () => { reg.maximizedId = reg.maximizedId === s.id ? null : s.id; renderPanels(); }),
@@ -1217,6 +1253,122 @@
           }
         });
       }
+    },
+  });
+
+  // ======================================================================
+  // SFTP / Files — WinSCP-style remote file browser: list directories,
+  // navigate, and download files to your machine (password SSH)
+  // ======================================================================
+  registerTool({
+    type: "sftp",
+    icon: "📁",
+    name: "SFTP / Files",
+    desc: "Browse a remote host's files over SFTP (password auth) and download them to your machine — WinSCP-style listing and download.",
+    defaults: () => ({ host: "", port: "22", username: "", password: "", path: "", entries: [] }),
+    render(root, tab, ctx) {
+      const d = tab.data;
+      if (!Array.isArray(d.entries)) d.entries = [];
+      const status = el("div", { class: "status-line dim" });
+      const tableBox = el("div", { style: "flex:1;overflow:auto" });
+      const connOf = () => ({ host: d.host, port: d.port, username: d.username, password: d.password });
+
+      const parentOf = (p) => {
+        if (!p || p === "/") return "/";
+        const t = p.replace(/\/+$/, "");
+        const i = t.lastIndexOf("/");
+        return i <= 0 ? "/" : t.slice(0, i);
+      };
+      const joinPath = (dir, name) => (dir === "/" ? "" : dir.replace(/\/+$/, "")) + "/" + name;
+
+      const pathInput = el("input", { type: "text", placeholder: "/home/user (blank = home)", style: "flex:1;min-width:200px" });
+      pathInput.value = d.path || "";
+      pathInput.addEventListener("keydown", (e) => { if (e.key === "Enter") list(pathInput.value.trim()); });
+
+      async function list(p) {
+        if (!(d.host || "").trim()) return setStatus(status, "✗ Enter a host first", "err");
+        setStatus(status, "Listing…", "dim");
+        try {
+          const r = await api("POST", "/api/sftp/list", { conn: connOf(), path: p || "" });
+          d.path = r.path;
+          d.entries = r.entries || [];
+          pathInput.value = r.path;
+          ctx.save();
+          renderTable();
+          setStatus(status, `✓ ${d.entries.length} item(s) in ${r.path}`, "ok");
+        } catch (e) {
+          setStatus(status, "✗ " + e.message, "err");
+        }
+      }
+
+      async function download(entry) {
+        const full = joinPath(d.path || "/", entry.name);
+        setStatus(status, "Downloading " + entry.name + "…", "dim");
+        try {
+          const res = await fetch("/api/sftp/download", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ conn: connOf(), path: full }),
+          });
+          if (!res.ok) {
+            const err = await res.json().catch(() => ({}));
+            throw new Error(err.error || res.status + " " + res.statusText);
+          }
+          const blob = await res.blob();
+          const url = URL.createObjectURL(blob);
+          const a = el("a", { href: url, download: entry.name });
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+          setTimeout(() => URL.revokeObjectURL(url), 15000);
+          setStatus(status, `✓ Downloaded ${entry.name} (${fmtBytes(blob.size)})`, "ok");
+        } catch (e) {
+          setStatus(status, "✗ " + e.message, "err");
+        }
+      }
+
+      function renderTable() {
+        tableBox.replaceChildren();
+        if (!d.entries.length) { tableBox.append(el("div", { class: "status-line dim", text: "Empty directory." })); return; }
+        const table = el("table", { class: "kv" }, [
+          el("tr", {}, [el("th", { text: "Name" }), el("th", { text: "Size" }), el("th", { text: "Modified" }), el("th", { text: "" })]),
+        ]);
+        for (const e of d.entries) {
+          const nameCell = e.isDir
+            ? el("td", {}, [el("a", { href: "#", class: "sftp-dir", text: "📂 " + e.name, onclick: (ev) => { ev.preventDefault(); list(joinPath(d.path || "/", e.name)); } })])
+            : el("td", {}, [el("a", { href: "#", class: "sftp-file", text: "📄 " + e.name, title: "Download", onclick: (ev) => { ev.preventDefault(); download(e); } })]);
+          table.append(el("tr", {}, [
+            nameCell,
+            el("td", { text: e.isDir ? "—" : fmtBytes(e.size) }),
+            el("td", { text: (e.modTime || "").replace("T", " ").replace("Z", "") }),
+            el("td", {}, e.isDir ? [] : [el("button", { class: "btn", text: "Download", onclick: () => download(e) })]),
+          ]));
+        }
+        tableBox.append(table);
+      }
+
+      const field = (label, node) => el("div", { class: "field" }, [el("span", { text: label }), node]);
+      const hostIn = bindField(el("input", { type: "text", placeholder: "user@host", style: "min-width:180px" }), d, "host", ctx);
+      const portIn = bindField(el("input", { type: "text", placeholder: "22", style: "width:70px" }), d, "port", ctx);
+      const userIn = bindField(el("input", { type: "text", placeholder: "(or set in host)", style: "width:130px" }), d, "username", ctx);
+      const passIn = bindField(el("input", { type: "password", placeholder: "password", style: "min-width:150px" }), d, "password", ctx);
+      passIn.addEventListener("keydown", (e) => { if (e.key === "Enter") list(""); });
+
+      root.append(
+        el("div", { class: "form-grid" }, [
+          field("Host", hostIn), field("Port", portIn), field("User", userIn), field("Password", passIn),
+          el("button", { class: "btn primary", text: "Connect", onclick: () => list("") }),
+        ]),
+        el("div", { class: "toolbar" }, [
+          el("button", { class: "btn", text: "⬆ Up", title: "Parent directory", onclick: () => list(parentOf(d.path || "/")) }),
+          el("button", { class: "btn", text: "⟳", title: "Refresh", onclick: () => list(d.path || "") }),
+          el("span", { class: "pane-label", text: "Path" }),
+          pathInput,
+          el("button", { class: "btn", text: "Go", onclick: () => list(pathInput.value.trim()) }),
+        ]),
+        status,
+        tableBox
+      );
+      renderTable();
     },
   });
 
