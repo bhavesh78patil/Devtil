@@ -27,6 +27,34 @@
     document.body.appendChild(overlay);
   }
 
+  /** Full-screen modal with inner tabs. tabs: [{label, build: () => Node}]. */
+  function showTabsModal(title, tabs) {
+    const overlay = el("div", { class: "json-modal-overlay" });
+    const bodyBox = el("div", { style: "flex:1;overflow:auto;display:flex;flex-direction:column;min-height:0;gap:6px" });
+    let active = 0;
+    const close = () => { overlay.remove(); document.removeEventListener("keydown", onKey); };
+    const onKey = (e) => { if (e.key === "Escape") close(); };
+    const tabBar = el("div", { class: "subtabs" }, tabs.map((t, i) =>
+      el("button", { class: i === active ? "active" : "", text: t.label, onclick: () => { active = i; sync(); } })
+    ));
+    const sync = () => {
+      [...tabBar.children].forEach((b, i) => { b.className = i === active ? "active" : ""; });
+      bodyBox.replaceChildren(tabs[active].build());
+    };
+    overlay.append(el("div", { class: "json-modal" }, [
+      el("div", { class: "json-modal-head" }, [
+        el("span", { class: "json-modal-title", text: title }),
+        el("button", { class: "icon-btn", text: "×", title: "Close (Esc)", onclick: close }),
+      ]),
+      tabBar,
+      bodyBox,
+    ]));
+    overlay.addEventListener("click", (e) => { if (e.target === overlay) close(); });
+    document.addEventListener("keydown", onKey);
+    document.body.appendChild(overlay);
+    sync();
+  }
+
   /** textarea bound to data[key]: saves on input, optional onInput hook */
   function boundArea(data, key, ctx, attrs = {}, onInput) {
     const area = el("textarea", { class: "grow", spellcheck: "false", ...attrs });
@@ -1071,7 +1099,7 @@
     icon: "🖥️",
     name: "SSH / PuTTY",
     desc: "Interactive SSH terminals (real PTY over WebSocket): multiple sessions in one tab, broadcast typing to all, minimize/maximize/close each.",
-    defaults: () => ({ sessions: [], newHost: "", newPort: "22", newUser: "", newPass: "", shared: "" }),
+    defaults: () => ({ sessions: [], savedHosts: [], newHost: "", newPort: "22", newUser: "", newPass: "", shared: "" }),
     render(root, tab, ctx) {
       const d = tab.data;
       if (!Array.isArray(d.sessions)) d.sessions = [];
@@ -1087,8 +1115,8 @@
       const themeColors = () => {
         const dark = document.documentElement.getAttribute("data-theme") === "dark";
         return dark
-          ? { background: "#0f1117", foreground: "#d8dce8", cursor: "#5b8cff" }
-          : { background: "#ffffff", foreground: "#1f2430", cursor: "#3b6fdb" };
+          ? { background: "#201e1b", foreground: "#faf9f5", cursor: "#e0906f" }
+          : { background: "#faf9f5", foreground: "#141413", cursor: "#cc785c" };
       };
 
       function connect(s) {
@@ -1223,12 +1251,25 @@
         }
       }
 
+      if (!Array.isArray(d.savedHosts)) d.savedHosts = [];
+      const hostLabel = (h) => (h.username ? h.username + "@" : "") + h.host + ":" + (h.port || "22");
+
+      function saveHost(host, port, username, password) {
+        const label = hostLabel({ host, port, username });
+        const existing = d.savedHosts.find((h) => hostLabel(h) === label);
+        if (existing) { existing.password = password; return; }
+        d.savedHosts.push({ id: uid(), host, port, username, password });
+      }
+
       function openSession() {
         if (!(d.newHost || "").trim()) return setStatus(status, "✗ Enter a host (or user@host)", "err");
-        d.sessions.push({ id: uid(), host: d.newHost.trim(), port: (d.newPort || "22").trim() || "22", username: (d.newUser || "").trim(), password: d.newPass || "", minimized: false, broadcast: true });
+        const host = d.newHost.trim(), port = (d.newPort || "22").trim() || "22", username = (d.newUser || "").trim(), password = d.newPass || "";
+        d.sessions.push({ id: uid(), host, port, username, password, minimized: false, broadcast: true });
+        saveHost(host, port, username, password); // remember it for the dropdown
         reg.maximizedId = null;
         ctx.save();
         renderPanels();
+        renderForm();
         setStatus(status, "", "dim");
       }
 
@@ -1251,11 +1292,48 @@
       const newPass = bindField(el("input", { type: "password", placeholder: "password", style: "min-width:150px" }), d, "newPass", ctx);
       newPass.addEventListener("keydown", (e) => { if (e.key === "Enter") openSession(); });
 
-      root.append(
-        el("div", { class: "form-grid" }, [
+      // saved-hosts dropdown: pick a saved host to prefill the form, or "New host"
+      const hostSel = el("select", { style: "min-width:200px" });
+      const setForm = (h) => {
+        d.newHost = h ? h.host : ""; d.newPort = h ? (h.port || "22") : "22";
+        d.newUser = h ? (h.username || "") : ""; d.newPass = h ? (h.password || "") : "";
+        newHost.value = d.newHost; newPort.value = d.newPort; newUser.value = d.newUser; newPass.value = d.newPass;
+        ctx.save();
+      };
+      const fillHostSel = () => {
+        hostSel.replaceChildren(
+          el("option", { value: "", text: d.savedHosts.length ? "— New host —" : "— No saved hosts —" }),
+          ...d.savedHosts.map((h) => el("option", { value: h.id, text: hostLabel(h) }))
+        );
+      };
+      hostSel.addEventListener("change", () => {
+        const h = d.savedHosts.find((x) => x.id === hostSel.value);
+        setForm(h || null);
+      });
+      const forgetBtn = el("button", {
+        class: "btn", text: "Forget", title: "Remove the selected saved host",
+        onclick: () => {
+          if (!hostSel.value) return;
+          d.savedHosts = d.savedHosts.filter((h) => h.id !== hostSel.value);
+          ctx.save();
+          fillHostSel();
+        },
+      });
+
+      const formGrid = el("div", { class: "form-grid" });
+      const renderForm = () => {
+        fillHostSel();
+        formGrid.replaceChildren(
+          field("Saved host", hostSel),
+          forgetBtn,
           field("Host", newHost), field("Port", newPort), field("User", newUser), field("Password", newPass),
           el("button", { class: "btn primary", text: "+ Open session", onclick: openSession }),
-        ]),
+        );
+      };
+      renderForm();
+
+      root.append(
+        formGrid,
         el("div", { class: "toolbar" }, [
           el("span", { class: "pane-label", text: "Broadcast typing" }),
           sharedInput,
@@ -1813,9 +1891,26 @@
         const collapsed = pre.classList.toggle("collapsed");
         toggle.textContent = collapsed ? "Expand" : "Collapse";
       });
+      const headersView = () => {
+        const hs = m.headers || [];
+        if (!hs.length) return el("div", { class: "status-line dim", text: "No headers on this message." });
+        return el("table", { class: "kv" }, [
+          el("tr", {}, [el("th", { text: "Header" }), el("th", { text: "Value" })]),
+          ...hs.map((h) => el("tr", {}, [el("td", { text: h.key }), el("td", { text: h.value })])),
+        ]);
+      };
+      const valueView = () => {
+        const p = el("pre", { class: "output", style: "flex:1;overflow:auto;margin:0" });
+        p.textContent = pretty;
+        return el("div", { style: "display:flex;flex-direction:column;flex:1;min-height:0;gap:6px" }, [copyBtn(() => pretty, "Copy"), p]);
+      };
+      const maximize = () => showTabsModal(`Partition ${m.partition} · Offset ${m.offset}`, [
+        { label: "Value", build: valueView },
+        { label: `Headers (${(m.headers || []).length})`, build: headersView },
+      ]);
       const tools = el("div", { class: "kafka-val-tools" }, [
         toggle,
-        el("button", { class: "btn xs", text: "⤢ Maximize", title: "Open the value full-screen, JSON pretty-printed", onclick: () => showJsonModal(`Partition ${m.partition} · Offset ${m.offset}`, m.value) }),
+        el("button", { class: "btn xs", text: "⤢ Maximize", title: "Open full-screen with Value & Headers tabs", onclick: maximize }),
         copyBtn(() => pretty, "Copy"),
       ]);
       return el("td", { class: "kafka-val-cell" }, [tools, pre]);
@@ -1889,6 +1984,7 @@
       }
     };
 
+    if (!Array.isArray(c.prodHeaders)) c.prodHeaders = [{ k: "", v: "" }];
     const prodKey = el("input", { type: "text", placeholder: "key (optional)", style: "width:160px" });
     prodKey.value = c.prodKey || "";
     prodKey.addEventListener("input", () => { c.prodKey = prodKey.value; ctx.save(); });
@@ -1899,10 +1995,44 @@
       if (!c.topic) return setStatus(status, "✗ Enter or pick a topic", "err");
       setStatus(status, "Producing…", "dim");
       try {
-        await api("POST", "/api/kafka/produce", { conn: kconn(), topic: c.topic, key: c.prodKey || "", value: c.prodValue || "" });
-        setStatus(status, "✓ Message produced to " + c.topic, "ok");
+        const headers = (c.prodHeaders || []).filter((h) => h.k.trim()).map((h) => ({ key: h.k.trim(), value: h.v }));
+        await api("POST", "/api/kafka/produce", { conn: kconn(), topic: c.topic, key: c.prodKey || "", value: c.prodValue || "", headers });
+        setStatus(status, `✓ Message produced to ${c.topic}${headers.length ? " with " + headers.length + " header(s)" : ""}`, "ok");
       } catch (e) {
         setStatus(status, "✗ " + e.message, "err");
+      }
+    };
+
+    // produce area with Message / Headers subtabs
+    let prodTab = "msg";
+    const produceBox = el("div", { class: "produce-box" });
+    const renderProduce = () => {
+      produceBox.replaceChildren();
+      const hdrCount = c.prodHeaders.filter((h) => h.k.trim()).length;
+      produceBox.append(el("div", { class: "toolbar" }, [
+        el("span", { class: "pane-label", text: "Produce" }),
+        el("div", { class: "subtabs" }, [
+          el("button", { class: prodTab === "msg" ? "active" : "", text: "Message", onclick: () => { prodTab = "msg"; renderProduce(); } }),
+          el("button", { class: prodTab === "hdr" ? "active" : "", text: `Headers (${hdrCount})`, onclick: () => { prodTab = "hdr"; renderProduce(); } }),
+        ]),
+        el("button", { class: "btn primary", text: "Send", onclick: produce }),
+      ]));
+      if (prodTab === "msg") {
+        produceBox.append(el("div", { class: "toolbar" }, [el("label", { class: "inline" }, ["Key", prodKey]), prodValue]));
+      } else {
+        const box = el("div", { style: "display:flex;flex-direction:column;gap:6px" });
+        c.prodHeaders.forEach((h, i) => {
+          const k = el("input", { type: "text", class: "hk", placeholder: "Header", value: h.k });
+          const v = el("input", { type: "text", class: "hv", placeholder: "Value", value: h.v });
+          k.addEventListener("input", () => { h.k = k.value; ctx.save(); });
+          v.addEventListener("input", () => { h.v = v.value; ctx.save(); });
+          box.append(el("div", { class: "header-row" }, [
+            k, v,
+            el("button", { class: "icon-btn", text: "×", title: "Remove header", onclick: () => { c.prodHeaders.splice(i, 1); if (!c.prodHeaders.length) c.prodHeaders.push({ k: "", v: "" }); ctx.save(); renderProduce(); } }),
+          ]));
+        });
+        box.append(el("div", {}, [el("button", { class: "btn", text: "+ Header", onclick: () => { c.prodHeaders.push({ k: "", v: "" }); ctx.save(); renderProduce(); } })]));
+        produceBox.append(box);
       }
     };
 
@@ -1921,16 +2051,13 @@
         el("span", { class: "pane-label", text: "Search" }),
         keyQ, valQ,
       ]),
-      el("div", { class: "toolbar" }, [
-        el("span", { class: "pane-label", text: "Produce" }),
-        prodKey, prodValue,
-        el("button", { class: "btn", text: "Send", onclick: produce }),
-      ]),
+      produceBox,
       status,
       out
     );
     syncFrom();
     fillTopics();
+    renderProduce();
     draw();
   }
 
@@ -2320,9 +2447,10 @@
     desc: "Run SQL against Oracle databases (no Oracle client install needed) — results grid, multiple connections.",
     connLabel: "Connections",
     connSingular: "connection",
-    connName: (c) => c.hosts,
+    connName: (c) => c.url || (c.hosts ? c.hosts + (c.service ? "/" + c.service : "") : ""),
     fields: [
       { key: "name", label: "Name", placeholder: "orders-db" },
+      { key: "url", label: "JDBC / connect URL (fills in the rest below)", placeholder: "jdbc:oracle:thin:@host:1521/service" },
       { key: "hosts", label: "Host", placeholder: "oracle-host" },
       { key: "port", label: "Port", placeholder: "1521" },
       { key: "service", label: "Service name", placeholder: "ORCLPDB1" },

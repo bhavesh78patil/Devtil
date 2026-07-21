@@ -1,34 +1,38 @@
 :root {
-  /* light theme (default) */
-  --bg: #f4f5f8;
-  --bg2: #ffffff;
-  --bg3: #e9ebf1;
-  --border: #d5d9e2;
-  --text: #1f2430;
-  --text-dim: #667085;
-  --accent: #3b6fdb;
-  --accent-soft: rgba(59, 111, 219, 0.12);
-  --green: #1e9e55;
-  --red: #d13b33;
-  --yellow: #a3711d;
-  --overlay: rgba(15, 17, 23, 0.4);
-  --mono: ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
-  --sans: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  /* Claude / Anthropic warm-cream light theme (default) */
+  --bg: #f5f0e8;          /* surface-soft canvas */
+  --bg2: #fffdf7;         /* panels / inputs / cards — a hair above canvas */
+  --bg3: #efe9de;         /* surface-card — hovers, chips, active */
+  --border: #e6dfd8;      /* hairline */
+  --text: #141413;        /* ink */
+  --text-dim: #6c6a64;    /* muted */
+  --accent: #cc785c;      /* coral */
+  --accent-soft: rgba(204, 120, 92, 0.14);
+  --green: #5a9d67;
+  --red: #c64545;
+  --yellow: #b07d18;
+  --overlay: rgba(20, 20, 19, 0.38);
+  --mono: "JetBrains Mono", ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
+  --sans: Inter, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --serif: "Iowan Old Style", "Palatino Linotype", "Book Antiqua", Palatino, Georgia, "Times New Roman", serif;
+  --radius-btn: 8px;
+  --radius-card: 12px;
 }
 
 :root[data-theme="dark"] {
-  --bg: #0f1117;
-  --bg2: #161923;
-  --bg3: #1e2230;
-  --border: #2a2f40;
-  --text: #d8dce8;
-  --text-dim: #8a90a5;
-  --accent: #5b8cff;
-  --accent-soft: rgba(91, 140, 255, 0.15);
-  --green: #3fb970;
-  --red: #e5534b;
-  --yellow: #d9a03f;
-  --overlay: rgba(0, 0, 0, 0.6);
+  /* warm dark surfaces (Anthropic navy family), lifted off pure black */
+  --bg: #201e1b;          /* surface-dark, lifted */
+  --bg2: #29251f;         /* surface-dark-soft */
+  --bg3: #332e27;         /* surface-dark-elevated */
+  --border: #3d3831;
+  --text: #faf9f5;        /* on-dark (cream white) */
+  --text-dim: #a09d96;    /* on-dark-soft */
+  --accent: #e0906f;      /* coral, brightened for dark */
+  --accent-soft: rgba(224, 144, 111, 0.20);
+  --green: #6bbf82;
+  --red: #e07a72;
+  --yellow: #d4a017;
+  --overlay: rgba(10, 9, 8, 0.6);
 }
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -59,8 +63,10 @@ body {
 
 .brand {
   padding: 14px 16px;
-  font-size: 17px;
-  font-weight: 700;
+  font-family: var(--serif);
+  font-size: 20px;
+  font-weight: 500;
+  letter-spacing: -0.3px;
   border-bottom: 1px solid var(--border);
 }
 
@@ -200,6 +206,8 @@ body {
   color: var(--text-dim);
 }
 .empty-hint .big { font-size: 40px; }
+.empty-hint > div:not(.big):first-of-type,
+.empty-hint { font-family: var(--serif); }
 
 /* ---------- tool picker ---------- */
 
@@ -221,7 +229,7 @@ body {
   padding: 20px;
 }
 .picker-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
-.picker-head h2 { font-size: 16px; }
+.picker-head h2 { font-family: var(--serif); font-size: 22px; font-weight: 500; letter-spacing: -0.3px; }
 
 #picker-grid {
   display: grid;
@@ -230,9 +238,9 @@ body {
 }
 
 .picker-card {
-  background: var(--bg3);
+  background: var(--bg2);
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: var(--radius-card);
   padding: 14px;
   cursor: pointer;
   text-align: left;
@@ -251,31 +259,32 @@ body {
 .toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 
 .btn {
-  background: var(--bg3);
+  background: var(--bg2);
   border: 1px solid var(--border);
   color: var(--text);
-  border-radius: 6px;
+  border-radius: var(--radius-btn);
   padding: 6px 14px;
   font: inherit;
   font-size: 13px;
+  font-weight: 500;
   cursor: pointer;
 }
 .btn:hover { border-color: var(--accent); }
 .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
-.btn.primary:hover { filter: brightness(1.1); }
+.btn.primary:hover { filter: brightness(1.06); }
 .btn.danger:hover { border-color: var(--red); color: var(--red); }
 .btn:disabled { opacity: 0.5; cursor: default; }
 
-textarea, input[type="text"], input[type="number"], select {
+textarea, input[type="text"], input[type="number"], input[type="password"], input[type="datetime-local"], select {
   background: var(--bg2);
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: var(--radius-btn);
   color: var(--text);
   font-family: var(--mono);
   font-size: 13px;
   padding: 8px 10px;
 }
-textarea:focus, input:focus, select:focus { outline: none; border-color: var(--accent); }
+textarea:focus, input:focus, select:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
 textarea { resize: vertical; line-height: 1.5; }
 textarea.grow { flex: 1; min-height: 120px; resize: none; }
 
@@ -306,7 +315,7 @@ pre.output {
   min-height: 80px;
 }
 
-mark { background: rgba(217, 160, 63, 0.4); color: inherit; border-radius: 2px; }
+mark { background: var(--accent-soft); color: inherit; border-radius: 2px; box-shadow: 0 0 0 1px var(--accent-soft); }
 
 table.kv { border-collapse: collapse; width: 100%; font-size: 13px; }
 table.kv th, table.kv td {
@@ -428,14 +437,14 @@ details.section[open] summary { margin-bottom: 8px; }
 .resp-meta { display: flex; gap: 16px; font-size: 13px; align-items: center; flex-wrap: wrap; }
 .badge {
   font-family: var(--mono);
-  padding: 2px 8px;
-  border-radius: 10px;
+  padding: 3px 10px;
+  border-radius: 9999px;
   font-size: 12px;
   background: var(--bg3);
 }
-.badge.s2 { background: rgba(63, 185, 112, 0.2); color: var(--green); }
-.badge.s3 { background: rgba(217, 160, 63, 0.2); color: var(--yellow); }
-.badge.s4, .badge.s5 { background: rgba(229, 83, 75, 0.2); color: var(--red); }
+.badge.s2 { background: rgba(90, 157, 103, 0.16); color: var(--green); }
+.badge.s3 { background: rgba(176, 125, 24, 0.16); color: var(--yellow); }
+.badge.s4, .badge.s5 { background: rgba(198, 69, 69, 0.16); color: var(--red); }
 
 .subtabs { display: flex; gap: 2px; border-bottom: 1px solid var(--border); }
 .subtabs button {

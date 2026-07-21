@@ -47,7 +47,7 @@ async function createWindow() {
     width: 1280,
     height: 840,
     title: "Devtil",
-    backgroundColor: "#f4f5f8",
+    backgroundColor: "#f5f0e8",
     webPreferences: { contextIsolation: true },
   });
   win.removeMenu?.();

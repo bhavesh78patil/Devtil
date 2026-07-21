@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -20,8 +21,47 @@ type DBConn struct {
 	Port     int    `json:"port"`
 	Keyspace string `json:"keyspace"` // Cassandra
 	Service  string `json:"service"`  // Oracle service name
+	URL      string `json:"url"`      // Oracle JDBC/Easy-Connect URL (overrides host/port/service)
 	Username string `json:"username"`
 	Password string `json:"password"`
+}
+
+// parseOracleURL extracts host/port/service from an Oracle connect string —
+// a JDBC thin URL (jdbc:oracle:thin:@host:1521/service or …:1521:SID),
+// an Easy Connect string (host:1521/service), or a go-ora URL
+// (oracle://host:1521/service). Credentials embedded in the URL are ignored;
+// use the username/password fields.
+func parseOracleURL(u string) (host string, port int, service string, err error) {
+	s := strings.TrimSpace(u)
+	if i := strings.LastIndex(s, "@"); i >= 0 { // strip jdbc:oracle:thin:@ or oracle://user:pass@
+		s = s[i+1:]
+	} else if i := strings.Index(s, "://"); i >= 0 {
+		s = s[i+3:]
+	}
+	s = strings.TrimPrefix(s, "//")
+	if q := strings.IndexAny(s, "?"); q >= 0 { // drop any query params
+		s = s[:q]
+	}
+
+	port = 1521
+	if slash := strings.Index(s, "/"); slash >= 0 { // host:port/service
+		service = strings.Trim(s[slash+1:], "/ ")
+		s = s[:slash]
+	} else if parts := strings.Split(s, ":"); len(parts) >= 3 { // host:port:SID
+		service = parts[2]
+		s = parts[0] + ":" + parts[1]
+	}
+	hp := strings.Split(s, ":")
+	host = strings.TrimSpace(hp[0])
+	if len(hp) >= 2 {
+		if p, e := strconv.Atoi(strings.TrimSpace(hp[1])); e == nil {
+			port = p
+		}
+	}
+	if host == "" || service == "" {
+		return "", 0, "", fmt.Errorf("could not parse Oracle URL %q (expected …@host:1521/service)", u)
+	}
+	return host, port, service, nil
 }
 
 func (c DBConn) hostList() []string {
@@ -151,20 +191,31 @@ func CassandraQuery(conn DBConn, query string, maxRows int) (*QueryResult, error
 // ------------------------------------------------------------------- Oracle
 
 func OracleQuery(conn DBConn, query string, maxRows int) (*QueryResult, error) {
-	hosts := conn.hostList()
-	if len(hosts) == 0 || conn.Service == "" {
-		return nil, fmt.Errorf("host and service name are required")
-	}
 	if strings.TrimSpace(query) == "" {
 		return nil, fmt.Errorf("query is empty")
 	}
 	maxRows = clampRows(maxRows)
 
+	var host, service string
 	port := conn.Port
 	if port <= 0 {
 		port = 1521
 	}
-	url := go_ora.BuildUrl(hosts[0], port, conn.Service, conn.Username, conn.Password, nil)
+	if strings.TrimSpace(conn.URL) != "" { // a JDBC/Easy-Connect URL wins over the separate fields
+		h, p, svc, err := parseOracleURL(conn.URL)
+		if err != nil {
+			return nil, fmt.Errorf("oracle: %v", err)
+		}
+		host, port, service = h, p, svc
+	} else {
+		hosts := conn.hostList()
+		if len(hosts) == 0 || conn.Service == "" {
+			return nil, fmt.Errorf("host and service name (or a JDBC URL) are required")
+		}
+		host, service = hosts[0], conn.Service
+	}
+
+	url := go_ora.BuildUrl(host, port, service, conn.Username, conn.Password, nil)
 	db, err := sql.Open("oracle", url)
 	if err != nil {
 		return nil, fmt.Errorf("oracle: %v", err)
@@ -173,7 +224,7 @@ func OracleQuery(conn DBConn, query string, maxRows int) (*QueryResult, error) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	logging.Logf("oracle: connect %s:%d/%s, query %q", hosts[0], port, conn.Service, logging.Snippet(query, 200))
+	logging.Logf("oracle: connect %s:%d/%s, query %q", host, port, service, logging.Snippet(query, 200))
 	if err := db.PingContext(ctx); err != nil {
 		logging.Logf("oracle: connect failed: %v", err)
 		return nil, fmt.Errorf("oracle: %v", err)
