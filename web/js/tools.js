@@ -1115,7 +1115,7 @@
       const themeColors = () => {
         const dark = document.documentElement.getAttribute("data-theme") === "dark";
         return dark
-          ? { background: "#0f1117", foreground: "#d8dce8", cursor: "#5b8cff" }
+          ? { background: "#282c34", foreground: "#dce0e8", cursor: "#6c9dff" }
           : { background: "#ffffff", foreground: "#1f2430", cursor: "#3b6fdb" };
       };
 
@@ -2447,9 +2447,10 @@
     desc: "Run SQL against Oracle databases (no Oracle client install needed) — results grid, multiple connections.",
     connLabel: "Connections",
     connSingular: "connection",
-    connName: (c) => c.hosts,
+    connName: (c) => c.url || (c.hosts ? c.hosts + (c.service ? "/" + c.service : "") : ""),
     fields: [
       { key: "name", label: "Name", placeholder: "orders-db" },
+      { key: "url", label: "JDBC / connect URL (fills in the rest below)", placeholder: "jdbc:oracle:thin:@host:1521/service" },
       { key: "hosts", label: "Host", placeholder: "oracle-host" },
       { key: "port", label: "Port", placeholder: "1521" },
       { key: "service", label: "Service name", placeholder: "ORCLPDB1" },

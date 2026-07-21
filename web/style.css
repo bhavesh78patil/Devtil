@@ -17,18 +17,19 @@
 }
 
 :root[data-theme="dark"] {
-  --bg: #0f1117;
-  --bg2: #161923;
-  --bg3: #1e2230;
-  --border: #2a2f40;
-  --text: #d8dce8;
-  --text-dim: #8a90a5;
-  --accent: #5b8cff;
-  --accent-soft: rgba(91, 140, 255, 0.15);
-  --green: #3fb970;
-  --red: #e5534b;
-  --yellow: #d9a03f;
-  --overlay: rgba(0, 0, 0, 0.6);
+  /* soft grey dark theme — deliberately not near-black */
+  --bg: #282c34;
+  --bg2: #30353f;
+  --bg3: #3a404b;
+  --border: #454c59;
+  --text: #dce0e8;
+  --text-dim: #9aa1b2;
+  --accent: #6c9dff;
+  --accent-soft: rgba(108, 157, 255, 0.18);
+  --green: #59c98a;
+  --red: #ec6b63;
+  --yellow: #e0af5c;
+  --overlay: rgba(20, 22, 27, 0.62);
 }
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
