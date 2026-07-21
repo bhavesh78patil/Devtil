@@ -2,5 +2,19 @@ bin/
 dist/
 node_modules/
 desktop/out/
+desktop/dist/
 *.log
 .DS_Store
+
+# never commit local data / credentials
+state.json
+state.json.bak
+devtil-data/
+devtil.log*
+*.env
+.env*
+
+# packaged installers / binaries
+*.dmg
+*.exe
+*.AppImage

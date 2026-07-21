@@ -10,6 +10,36 @@ opens in your browser. For a native Mac/Windows app experience there is an
 **Electron shell** (Node) in `desktop/` that spawns the same binary and wraps
 the UI in an app window.
 
+Devtil is **local-first**: the backend binds to `127.0.0.1` only, sends **no
+telemetry**, and keeps all your data on your machine. See
+[SECURITY.md](SECURITY.md) for how credentials are handled.
+
+## Download & build
+
+**Prebuilt (recommended):** grab your platform's file from the
+[latest release](../../releases/latest) — a standalone binary
+(`devtil-darwin-arm64`, `devtil-darwin-amd64`, `devtil-windows-amd64.exe`,
+`devtil-linux-amd64`) or the native `.dmg` / `.exe` installer. Verify against
+`SHA256SUMS`. Binaries are unsigned, so macOS Gatekeeper (right-click → Open)
+and Windows SmartScreen may prompt on first run.
+
+**Build it yourself for Windows & Mac** (needs Go 1.25):
+
+```sh
+make cross    # → dist/devtil-{darwin-arm64,darwin-amd64,windows-amd64.exe,linux-amd64}
+```
+
+**Cut a public release** — push a version tag and GitHub Actions builds and
+attaches every binary + installer + checksums to a GitHub Release, using
+`RELEASE_NOTES.md` as the body:
+
+```sh
+git tag v1.0.0 && git push origin v1.0.0
+```
+
+The workflow (`.github/workflows/release.yml`) can also be run manually from
+the repo's **Actions** tab.
+
 ## Tools included
 
 | Tool | What it does |
