@@ -1829,11 +1829,16 @@
         out.append(
           el("span", { class: "pane-label", text: `Messages (${c.messages.length}, newest first)` }),
           el("table", { class: "kv kafka-msgs" }, [
-            el("tr", {}, [el("th", { text: "P/Offset" }), el("th", { text: "Time" }), el("th", { text: "Key" }), el("th", { text: "Value" })]),
+            el("tr", {}, [
+              el("th", { class: "nowrap", text: "P/Offset" }),
+              el("th", { class: "nowrap", text: "Time" }),
+              el("th", { class: "nowrap", text: "Key" }),
+              el("th", { text: "Value" }),
+            ]),
             ...rows.map((m) => el("tr", {}, [
               el("td", { class: "nowrap", text: m.partition + "/" + m.offset }),
               el("td", { class: "nowrap", text: (m.time || "").replace("T", " ").replace("Z", "") }),
-              el("td", { text: m.key }),
+              el("td", { class: "kafka-key", title: m.key, text: m.key }),
               valueCell(m),
             ])),
           ])
