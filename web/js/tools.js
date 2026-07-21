@@ -1886,13 +1886,18 @@
     draw();
   }
 
-  /** Flatten an ES mapping's properties into dotted field paths. */
-  function flattenProps(props, prefix = "") {
+  /** Flatten an ES mapping's properties into dotted field paths, recording
+      the nearest `nested`-typed ancestor path so nested queries can be built. */
+  function flattenProps(props, prefix = "", nestedPath = "") {
     let out = [];
     for (const [k, v] of Object.entries(props || {})) {
       const path = prefix ? prefix + "." + k : k;
-      if (v && v.properties) out = out.concat(flattenProps(v.properties, path));
-      else out.push({ name: path, type: (v && v.type) || "object" });
+      if (v && v.properties) {
+        const np = v.type === "nested" ? path : nestedPath;
+        out = out.concat(flattenProps(v.properties, path, np));
+      } else {
+        out.push({ name: path, type: (v && v.type) || "object", nestedPath: nestedPath || undefined });
+      }
     }
     return out;
   }
@@ -1977,8 +1982,8 @@
       if (!c.index || !Array.isArray(c.fields) || !c.fields.length) return;
       if (!Array.isArray(c.selectedFields)) c.selectedFields = c.fields.map((f) => f.name);
       fieldsBox.append(
-        el("span", { class: "pane-label", text: `Fields of ${c.index} — pick which columns to return (_source)` }),
-        colsPicker(c.fields, c.selectedFields, (next) => { c.selectedFields = next; ctx.save(); })
+        el("span", { class: "pane-label", text: `Return fields (_source) — pick which columns come back` }),
+        colsPicker(c.fields, c.selectedFields, (next) => { c.selectedFields = next; syncBody(); })
       );
     };
 
@@ -1995,7 +2000,7 @@
       }
     };
     const loadFields = async () => {
-      if (!c.index) { c.fields = []; drawFields(); return; }
+      if (!c.index) { c.fields = []; drawFields(); renderConds(); return; }
       setStatus(status, "Loading mapping…", "dim");
       try {
         const m = await esFetch("GET", encodeURIComponent(c.index) + "/_mapping");
@@ -2004,46 +2009,169 @@
         c.selectedFields = c.fields.map((f) => f.name);
         ctx.save();
         drawFields();
+        renderConds();
         setStatus(status, `✓ ${c.fields.length} field(s)`, "ok");
       } catch (e) {
         setStatus(status, "✗ " + e.message, "err");
       }
     };
-    idxSel.addEventListener("change", () => { c.index = idxSel.value; ctx.save(); loadFields(); });
+    idxSel.addEventListener("change", () => { c.index = idxSel.value; c.conds = []; ctx.save(); loadFields(); });
 
-    const buildSearch = () => {
-      if (!c.index) { setStatus(status, "✗ Pick an index first (Load indices)", "err"); return false; }
-      const q = {
-        query: (c.qText || "").trim() ? { query_string: { query: c.qText.trim() } } : { match_all: {} },
-        size: Number(c.size) || 10,
-      };
+    // ---- per-field condition builder: the clause is auto-chosen by type ----
+    const NUMERIC = ["long", "integer", "short", "byte", "double", "float", "half_float", "scaled_float", "unsigned_long"];
+    const opsFor = (type) => {
+      if (type === "text" || type === "match_only_text") return ["match", "match_phrase", "exists"];
+      if (type === "keyword" || type === "ip" || type === "constant_keyword") return ["term", "terms", "prefix", "wildcard", "exists"];
+      if (NUMERIC.includes(type)) return ["term", "gt", "gte", "lt", "lte", "between", "exists"];
+      if (type === "date") return ["gte", "lte", "between", "term", "exists"];
+      if (type === "boolean") return ["true", "false", "exists"];
+      return ["match", "term", "exists"];
+    };
+    const OP_LABEL = { match: "matches", match_phrase: "phrase", term: "= (term)", terms: "in (a,b,c)", prefix: "prefix", wildcard: "wildcard *?", gt: ">", gte: "≥", lt: "<", lte: "≤", between: "between", "true": "is true", "false": "is false", exists: "exists" };
+    const noValueOp = (op) => op === "exists" || op === "true" || op === "false";
+    const coerce = (type, v) => {
+      if (NUMERIC.includes(type)) { const n = Number(v); return v !== "" && !isNaN(n) ? n : v; }
+      if (type === "boolean") return v === "true";
+      return v;
+    };
+    const fieldByName = (name) => (c.fields || []).find((f) => f.name === name);
+
+    const clauseFor = (cond) => {
+      const f = cond.field, v = (cond.value || "").trim(), v2 = (cond.value2 || "").trim(), t = cond.type;
+      let clause;
+      switch (cond.op) {
+        case "match": clause = { match: { [f]: v } }; break;
+        case "match_phrase": clause = { match_phrase: { [f]: v } }; break;
+        case "term": clause = { term: { [f]: coerce(t, v) } }; break;
+        case "terms": clause = { terms: { [f]: v.split(",").map((s) => coerce(t, s.trim())).filter((x) => x !== "") } }; break;
+        case "prefix": clause = { prefix: { [f]: v } }; break;
+        case "wildcard": clause = { wildcard: { [f]: v } }; break;
+        case "gt": case "gte": case "lt": case "lte": clause = { range: { [f]: { [cond.op]: coerce(t, v) } } }; break;
+        case "between": clause = { range: { [f]: { gte: coerce(t, v), lte: coerce(t, v2) } } }; break;
+        case "true": clause = { term: { [f]: true } }; break;
+        case "false": clause = { term: { [f]: false } }; break;
+        case "exists": clause = { exists: { field: f } }; break;
+        default: clause = { match: { [f]: v } };
+      }
+      if (cond.nestedPath) clause = { nested: { path: cond.nestedPath, query: clause } };
+      return clause;
+    };
+
+    const condsBox = el("div", { class: "es-conds" });
+    const renderConds = () => {
+      condsBox.replaceChildren();
+      if (!c.index || !Array.isArray(c.fields) || !c.fields.length) {
+        condsBox.append(el("div", { class: "status-line dim", text: "Load an index to add field conditions." }));
+        return;
+      }
+      if (!Array.isArray(c.conds)) c.conds = [];
+      const combineSel = el("select", {}, [el("option", { value: "must", text: "ALL (AND)" }), el("option", { value: "should", text: "ANY (OR)" })]);
+      combineSel.value = c.combine || "must";
+      combineSel.addEventListener("change", () => { c.combine = combineSel.value; syncBody(); });
+      condsBox.append(el("div", { class: "toolbar" }, [
+        el("span", { class: "pane-label", text: "Where — match" }),
+        combineSel,
+        el("span", { class: "pane-label", text: "of:" }),
+        el("button", {
+          class: "btn", text: "+ Add field condition",
+          onclick: () => {
+            const f = c.fields[0];
+            c.conds.push({ field: f.name, type: f.type, nestedPath: f.nestedPath, op: opsFor(f.type)[0], value: "", value2: "" });
+            syncBody();
+            renderConds();
+          },
+        }),
+      ]));
+
+      c.conds.forEach((cond, i) => {
+        const fieldSel = el("select", { style: "min-width:200px" }, c.fields.map((f) => el("option", { value: f.name, text: `${f.name} (${f.type})${f.nestedPath ? " ⓝ" : ""}` })));
+        fieldSel.value = cond.field;
+        const opSel = el("select", {}, opsFor(cond.type).map((o) => el("option", { value: o, text: OP_LABEL[o] || o })));
+        if (!opsFor(cond.type).includes(cond.op)) cond.op = opsFor(cond.type)[0];
+        opSel.value = cond.op;
+
+        const valWrap = el("span", { style: "display:inline-flex;gap:4px;flex:1;align-items:center" });
+        const buildVals = () => {
+          valWrap.replaceChildren();
+          if (noValueOp(cond.op)) return;
+          const ph = cond.type === "date" ? "2026-01-01 or now-7d" : "value";
+          const v1 = el("input", { type: "text", placeholder: ph, style: "flex:1;min-width:90px", value: cond.value || "" });
+          v1.addEventListener("input", () => { cond.value = v1.value; syncBody(); });
+          valWrap.append(v1);
+          if (cond.op === "between") {
+            const v2 = el("input", { type: "text", placeholder: "to", style: "flex:1;min-width:90px", value: cond.value2 || "" });
+            v2.addEventListener("input", () => { cond.value2 = v2.value; syncBody(); });
+            valWrap.append(el("span", { class: "pane-label", text: "…" }), v2);
+          }
+        };
+        buildVals();
+
+        fieldSel.addEventListener("change", () => {
+          const f = fieldByName(fieldSel.value);
+          cond.field = f.name; cond.type = f.type; cond.nestedPath = f.nestedPath;
+          cond.op = opsFor(f.type)[0];
+          syncBody();
+          renderConds();
+        });
+        opSel.addEventListener("change", () => { cond.op = opSel.value; syncBody(); buildVals(); });
+
+        condsBox.append(el("div", { class: "header-row" }, [
+          fieldSel, opSel, valWrap,
+          el("button", { class: "icon-btn", text: "×", title: "Remove condition", onclick: () => { c.conds.splice(i, 1); syncBody(); renderConds(); } }),
+        ]));
+      });
+    };
+
+    const buildQueryObj = () => {
+      const clauses = (c.conds || []).filter((cond) => noValueOp(cond.op) || (cond.value || "").trim() !== "").map(clauseFor);
+      if ((c.qText || "").trim()) clauses.push({ query_string: { query: c.qText.trim() } });
+      let query;
+      if (!clauses.length) query = { match_all: {} };
+      else if (clauses.length === 1 && (c.combine || "must") === "must") query = clauses[0];
+      else {
+        const combine = c.combine || "must";
+        query = { bool: { [combine]: clauses } };
+        if (combine === "should") query.bool.minimum_should_match = 1;
+      }
+      const q = { query, size: Number(c.size) || 10 };
       const sel = c.selectedFields || [];
       if (sel.length && sel.length !== (c.fields || []).length) q._source = sel;
+      return q;
+    };
+
+    const syncBody = () => {
+      ctx.save();
+      if (!c.index) return;
       c.method = "POST";
       c.path = c.index + "/_search";
-      c.body = JSON.stringify(q, null, 2);
+      c.body = JSON.stringify(buildQueryObj(), null, 2);
       methodSel.value = c.method;
       path.value = c.path;
       reqBody.value = c.body;
-      ctx.save();
+    };
+    const buildSearch = () => {
+      if (!c.index) { setStatus(status, "✗ Pick an index first (Load indices)", "err"); return false; }
+      syncBody();
       return true;
     };
 
     const builder = el("details", { class: "section" }, [
-      el("summary", { text: "Query helper — pick an index, choose fields, build the search" }),
+      el("summary", { text: "Query builder — pick an index & fields; the query is generated from each field's schema type" }),
       el("div", { class: "toolbar" }, [
         el("button", { class: "btn", text: "Load indices", onclick: loadIndices }),
         idxSel,
-        qText,
         el("label", { class: "inline" }, ["Size", size]),
         el("button", { class: "btn", text: "Build query", onclick: buildSearch }),
         el("button", { class: "btn primary", text: "Build & search", onclick: () => { if (buildSearch()) send(c.method, c.path, c.body); } }),
       ]),
+      condsBox,
+      el("div", { class: "toolbar" }, [el("span", { class: "pane-label", text: "Extra query_string (optional)" }), qText]),
       fieldsBox,
     ]);
     if (c.index) builder.open = true;
     fillIndices();
     drawFields();
+    renderConds();
 
     body.append(
       builder,
