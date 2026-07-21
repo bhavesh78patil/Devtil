@@ -4,14 +4,20 @@
 package server
 
 import (
+	"bufio"
 	"encoding/json"
 	"io"
 	"io/fs"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
+
+	"github.com/gorilla/websocket"
+	"golang.org/x/crypto/ssh"
 
 	"github.com/bhavesh78patil/devtil/internal/clients"
 	"github.com/bhavesh78patil/devtil/internal/kube"
@@ -48,6 +54,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/kafka/produce", s.kafkaProduce)
 	mux.HandleFunc("POST /api/db/query", s.dbQuery)
 	mux.HandleFunc("POST /api/ssh/exec", s.sshExec)
+	mux.HandleFunc("GET /api/ssh/pty", s.sshPTY)
 
 	mux.HandleFunc("GET /api/kube/contexts", s.kubeContexts)
 	mux.HandleFunc("GET /api/kube/namespaces", s.kubeNamespaces)
@@ -71,6 +78,16 @@ type statusRecorder struct {
 func (r *statusRecorder) WriteHeader(code int) {
 	r.status = code
 	r.ResponseWriter.WriteHeader(code)
+}
+
+// Hijack lets the WebSocket (PTY) endpoint take over the connection even
+// though the response is wrapped for request logging.
+func (r *statusRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	h, ok := r.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, errString("underlying ResponseWriter is not a http.Hijacker")
+	}
+	return h.Hijack()
 }
 
 // logRequests logs every /api call (except the log viewer's own polling)
@@ -303,6 +320,132 @@ func (s *Server) dbQuery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, res)
+}
+
+// ptyUpgrader upgrades the interactive-terminal endpoint. The server binds
+// to localhost only, so any local origin is acceptable.
+var ptyUpgrader = websocket.Upgrader{
+	ReadBufferSize:  4096,
+	WriteBufferSize: 32 * 1024,
+	CheckOrigin:     func(r *http.Request) bool { return true },
+}
+
+// sshPTY bridges a browser xterm.js terminal to a real interactive SSH shell.
+// Protocol: the client sends JSON text frames — first {type:"start", host,
+// port, username, password, cols, rows}, then {type:"input", data} and
+// {type:"resize", cols, rows}. The server streams raw PTY output back as
+// binary frames.
+func (s *Server) sshPTY(w http.ResponseWriter, r *http.Request) {
+	c, err := ptyUpgrader.Upgrade(w, r, nil)
+	if err != nil {
+		return
+	}
+	defer c.Close()
+
+	var writeMu sync.Mutex
+	send := func(b []byte) error {
+		writeMu.Lock()
+		defer writeMu.Unlock()
+		return c.WriteMessage(websocket.BinaryMessage, b)
+	}
+	fail := func(msg string) { send([]byte("\r\n\x1b[31m" + msg + "\x1b[0m\r\n")) }
+
+	_, msg, err := c.ReadMessage()
+	if err != nil {
+		return
+	}
+	var start struct {
+		Host, Port, Username, Password string
+		Cols, Rows                     int
+	}
+	if err := json.Unmarshal(msg, &start); err != nil {
+		fail("bad start message")
+		return
+	}
+	cols, rows := start.Cols, start.Rows
+	if cols <= 0 {
+		cols = 80
+	}
+	if rows <= 0 {
+		rows = 24
+	}
+
+	client, err := sshx.Dial(sshx.Conn{Host: start.Host, Port: start.Port, Username: start.Username, Password: start.Password})
+	if err != nil {
+		fail(err.Error())
+		return
+	}
+	defer client.Close()
+
+	sess, err := client.NewSession()
+	if err != nil {
+		fail(err.Error())
+		return
+	}
+	defer sess.Close()
+
+	modes := ssh.TerminalModes{ssh.ECHO: 1, ssh.TTY_OP_ISPEED: 14400, ssh.TTY_OP_OSPEED: 14400}
+	if err := sess.RequestPty("xterm-256color", rows, cols, modes); err != nil {
+		fail("pty request failed: " + err.Error())
+		return
+	}
+	stdin, err := sess.StdinPipe()
+	if err != nil {
+		fail(err.Error())
+		return
+	}
+	stdout, err := sess.StdoutPipe()
+	if err != nil {
+		fail(err.Error())
+		return
+	}
+	if err := sess.Shell(); err != nil {
+		fail("shell failed: " + err.Error())
+		return
+	}
+	logging.Logf("ssh: interactive pty opened to %s@%s (%dx%d)", start.Username, start.Host, cols, rows)
+
+	// pump PTY output to the browser
+	go func() {
+		buf := make([]byte, 32*1024)
+		for {
+			n, err := stdout.Read(buf)
+			if n > 0 {
+				if send(buf[:n]) != nil {
+					break
+				}
+			}
+			if err != nil {
+				break
+			}
+		}
+		c.Close() // unblock the read loop below
+	}()
+
+	// browser input → PTY
+	for {
+		_, data, err := c.ReadMessage()
+		if err != nil {
+			break
+		}
+		var m struct {
+			Type, Data string
+			Cols, Rows int
+		}
+		if json.Unmarshal(data, &m) != nil {
+			continue
+		}
+		switch m.Type {
+		case "input":
+			stdin.Write([]byte(m.Data))
+		case "resize":
+			if m.Cols > 0 && m.Rows > 0 {
+				sess.WindowChange(m.Rows, m.Cols)
+			}
+		}
+	}
+	sess.Close()
+	logging.Logf("ssh: interactive pty to %s@%s closed", start.Username, start.Host)
 }
 
 func (s *Server) sshExec(w http.ResponseWriter, r *http.Request) {

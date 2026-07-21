@@ -518,6 +518,13 @@ details.section[open] summary { margin-bottom: 8px; }
 .icon-btn.cast { font-size: 11px; padding: 3px 6px; border: 1px solid var(--border); border-radius: 5px; color: var(--text-dim); }
 .icon-btn.cast.on { color: var(--green); border-color: var(--green); }
 
+/* interactive xterm.js terminal panels */
+.term-panel .term-body { padding: 4px; gap: 0; }
+.term-host { width: 100%; height: 280px; }
+.kube-panel.max .term-host { height: 64vh; }
+.term-host .xterm { height: 100%; padding: 4px; }
+.term-host .xterm-viewport::-webkit-scrollbar { width: 8px; }
+
 .form-grid { display: flex; flex-wrap: wrap; gap: 8px; align-items: end; }
 .form-grid .field { display: flex; flex-direction: column; gap: 4px; }
 .form-grid .field > span { font-size: 11px; color: var(--text-dim); }

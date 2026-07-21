@@ -29,6 +29,56 @@ type ExecResult struct {
 	DurationMs int64  `json:"durationMs"`
 }
 
+// splitUser resolves the effective username and host from the Host field
+// (which may be "user@host") and the separate Username field.
+func (c Conn) splitUser() (user, host string) {
+	host = strings.TrimSpace(c.Host)
+	user = strings.TrimSpace(c.Username)
+	if i := strings.Index(host, "@"); i >= 0 {
+		if user == "" {
+			user = host[:i]
+		}
+		host = host[i+1:]
+	}
+	return user, host
+}
+
+func (c Conn) addr() string {
+	_, host := c.splitUser()
+	port := strings.TrimSpace(c.Port)
+	if port == "" {
+		port = "22"
+	}
+	return net.JoinHostPort(host, port)
+}
+
+// Dial opens an SSH client connection with password (and keyboard-interactive)
+// auth. The caller owns the returned client and must Close it.
+func Dial(conn Conn) (*ssh.Client, error) {
+	user, host := conn.splitUser()
+	if user == "" || host == "" {
+		return nil, fmt.Errorf("host and username are required")
+	}
+	answer := func(_, _ string, questions []string, _ []bool) ([]string, error) {
+		a := make([]string, len(questions))
+		for i := range a {
+			a[i] = conn.Password
+		}
+		return a, nil
+	}
+	cfg := &ssh.ClientConfig{
+		User:            user,
+		Auth:            []ssh.AuthMethod{ssh.Password(conn.Password), ssh.KeyboardInteractive(answer)},
+		HostKeyCallback: ssh.InsecureIgnoreHostKey(), // dev tool: no known_hosts management
+		Timeout:         15 * time.Second,
+	}
+	client, err := ssh.Dial("tcp", conn.addr(), cfg)
+	if err != nil {
+		return nil, fmt.Errorf("ssh %s: %v", conn.addr(), err)
+	}
+	return client, nil
+}
+
 // Exec runs command on the remote host and returns its combined
 // stdout+stderr, tolerating nonzero exit codes so a command that fails or
 // writes to stderr still shows its output in the terminal.

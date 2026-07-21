@@ -4,6 +4,7 @@ go 1.25.0
 
 require (
 	github.com/gocql/gocql v1.7.0
+	github.com/gorilla/websocket v1.5.3
 	github.com/segmentio/kafka-go v0.4.51
 	github.com/sijms/go-ora/v2 v2.9.0
 	golang.org/x/crypto v0.54.0

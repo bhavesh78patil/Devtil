@@ -1039,126 +1039,151 @@
   // SSH / PuTTY — multiple SSH terminal sessions in one tab, with a shared
   // command bar that broadcasts to all sessions (MobaXterm-style multi-exec)
   // ======================================================================
+  // Live terminals must survive the tool being re-rendered on every tab
+  // switch, so their xterm instances, WebSockets and panel DOM nodes live in
+  // a module-level registry keyed by tab id (never serialized).
+  const puttyReg = {};
+
   registerTool({
     type: "putty",
     icon: "🖥️",
     name: "SSH / PuTTY",
-    desc: "Open multiple SSH sessions (password auth) as terminal panels; run commands per session or broadcast one command to all. Minimize/maximize/close each.",
+    desc: "Interactive SSH terminals (real PTY over WebSocket): multiple sessions in one tab, broadcast typing to all, minimize/maximize/close each.",
     defaults: () => ({ sessions: [], newHost: "", newPort: "22", newUser: "", newPass: "", shared: "" }),
     render(root, tab, ctx) {
       const d = tab.data;
       if (!Array.isArray(d.sessions)) d.sessions = [];
+      if (!puttyReg[tab.id]) puttyReg[tab.id] = { rt: {}, nodes: {}, maximizedId: null, resizeWired: false };
+      const reg = puttyReg[tab.id];
+      const rt = reg.rt;      // session id → { term, fit, ws, wired }
+      const nodes = reg.nodes; // session id → persistent panel DOM node
+
       const status = el("div", { class: "status-line dim" });
       const panelsArea = el("div", { class: "kube-panels" });
-      const preMap = {}; // runtime: session id → live output <pre>
-      let maximizedId = null;
+      const hasXterm = typeof window.Terminal === "function" && window.FitAddon;
 
-      const connOf = (s) => ({ host: s.host, port: s.port, username: s.username, password: s.password });
-
-      const appendTo = (s, text) => {
-        let buf = (s.output || "") + text;
-        if (buf.length > 120000) buf = buf.slice(buf.length - 120000);
-        s.output = buf;
-        const pre = preMap[s.id];
-        if (pre && pre.isConnected) { pre.textContent = buf; pre.scrollTop = pre.scrollHeight; }
-        ctx.save();
+      const themeColors = () => {
+        const dark = document.documentElement.getAttribute("data-theme") === "dark";
+        return dark
+          ? { background: "#0f1117", foreground: "#d8dce8", cursor: "#5b8cff" }
+          : { background: "#ffffff", foreground: "#1f2430", cursor: "#3b6fdb" };
       };
 
-      const execOn = async (s, command) => {
-        command = (command || "").trim();
-        if (!command) return;
-        appendTo(s, "$ " + command + "\n");
-        try {
-          const r = await api("POST", "/api/ssh/exec", { conn: connOf(s), command });
-          appendTo(s, (r.output || "") + ((r.output || "").endsWith("\n") ? "" : "\n"));
-        } catch (e) {
-          appendTo(s, "✗ " + e.message + "\n");
+      function connect(s) {
+        const r = rt[s.id];
+        if (!r || !r.term) return;
+        const proto = location.protocol === "https:" ? "wss" : "ws";
+        const ws = new WebSocket(proto + "://" + location.host + "/api/ssh/pty");
+        ws.binaryType = "arraybuffer";
+        r.ws = ws;
+        ws.onopen = () => {
+          try { r.fit.fit(); } catch (e) { /* not laid out yet */ }
+          ws.send(JSON.stringify({ type: "start", host: s.host, port: s.port, username: s.username, password: s.password, cols: r.term.cols, rows: r.term.rows }));
+          r.term.focus();
+        };
+        ws.onmessage = (ev) => {
+          if (typeof ev.data === "string") r.term.write(ev.data);
+          else r.term.write(new Uint8Array(ev.data));
+        };
+        ws.onclose = () => { try { r.term.write("\r\n\x1b[33m[disconnected — use ⟳ to reconnect]\x1b[0m\r\n"); } catch (e) {} };
+        ws.onerror = () => {};
+      }
+
+      function ensureTerm(s, hostEl) {
+        let r = rt[s.id];
+        if (r && r.wired) {
+          try {
+            r.fit.fit();
+            if (r.ws && r.ws.readyState === 1) r.ws.send(JSON.stringify({ type: "resize", cols: r.term.cols, rows: r.term.rows }));
+          } catch (e) { /* ignore */ }
+          return;
         }
-      };
+        const term = new Terminal({ fontFamily: "ui-monospace, Menlo, Consolas, monospace", fontSize: 12, cursorBlink: true, scrollback: 5000, theme: themeColors() });
+        const fit = new FitAddon.FitAddon();
+        term.loadAddon(fit);
+        term.open(hostEl);
+        try { fit.fit(); } catch (e) { /* ignore */ }
+        term.onData((data) => { const w = rt[s.id] && rt[s.id].ws; if (w && w.readyState === 1) w.send(JSON.stringify({ type: "input", data })); });
+        term.onResize(({ cols, rows }) => { const w = rt[s.id] && rt[s.id].ws; if (w && w.readyState === 1) w.send(JSON.stringify({ type: "resize", cols, rows })); });
+        rt[s.id] = { term, fit, ws: null, wired: true };
+        connect(s);
+      }
+
+      function reconnect(s) {
+        const r = rt[s.id];
+        if (r && r.ws) { try { r.ws.close(); } catch (e) {} }
+        if (r && r.term) r.term.write("\r\n\x1b[36m[reconnecting…]\x1b[0m\r\n");
+        connect(s);
+      }
+
+      function disposeSession(s) {
+        const r = rt[s.id];
+        if (r) {
+          try { r.ws && r.ws.close(); } catch (e) {}
+          try { r.term && r.term.dispose(); } catch (e) {}
+          delete rt[s.id];
+        }
+        delete nodes[s.id];
+      }
+
+      function buildNode(s) {
+        const hostEl = el("div", { class: "term-host" });
+        const headBtn = (txt, title, fn) => el("button", { class: "icon-btn", text: txt, title, onclick: fn });
+        const castBtn = el("button", {
+          class: "icon-btn cast" + (s.broadcast ? " on" : ""),
+          text: s.broadcast ? "📡 on" : "📡 off",
+          title: "Include this session when broadcasting a shared command",
+          onclick: () => { s.broadcast = !s.broadcast; castBtn.className = "icon-btn cast" + (s.broadcast ? " on" : ""); castBtn.textContent = s.broadcast ? "📡 on" : "📡 off"; ctx.save(); },
+        });
+        const body = el("div", { class: "kube-panel-body term-body" }, [hostEl]);
+        const head = el("div", { class: "kube-panel-head" }, [
+          el("span", { class: "kube-panel-title", text: (s.username ? s.username + "@" : "") + s.host + ":" + s.port }),
+          castBtn,
+          headBtn("⟳", "Reconnect", () => reconnect(s)),
+          headBtn("▾", "Minimize / expand", () => { s.minimized = !s.minimized; ctx.save(); renderPanels(); }),
+          headBtn("🗖", "Maximize / restore", () => { reg.maximizedId = reg.maximizedId === s.id ? null : s.id; renderPanels(); }),
+          headBtn("×", "Close session", () => { disposeSession(s); d.sessions = d.sessions.filter((x) => x.id !== s.id); if (reg.maximizedId === s.id) reg.maximizedId = null; ctx.save(); renderPanels(); }),
+        ]);
+        const node = el("div", { class: "kube-panel term-panel" }, [head, body]);
+        node._hostEl = hostEl;
+        node._body = body;
+        return node;
+      }
+
+      function renderPanels() {
+        panelsArea.replaceChildren();
+        if (!hasXterm) { panelsArea.append(el("div", { class: "status-line err", text: "Terminal component failed to load." })); return; }
+        if (!d.sessions.length) { panelsArea.append(el("div", { class: "status-line dim", text: "No sessions. Add a host above and click “Open session”." })); return; }
+        const list = reg.maximizedId ? d.sessions.filter((s) => s.id === reg.maximizedId) : d.sessions;
+        for (const s of list) {
+          if (!nodes[s.id]) nodes[s.id] = buildNode(s);
+          const node = nodes[s.id];
+          node.className = "kube-panel term-panel" + (reg.maximizedId === s.id ? " max" : "") + (s.minimized ? " min" : "");
+          node._body.style.display = s.minimized ? "none" : "";
+          panelsArea.append(node);
+          if (!s.minimized) requestAnimationFrame(() => ensureTerm(s, node._hostEl));
+        }
+      }
 
       function openSession() {
         if (!(d.newHost || "").trim()) return setStatus(status, "✗ Enter a host (or user@host)", "err");
-        d.sessions.push({
-          id: uid(), host: d.newHost.trim(), port: (d.newPort || "22").trim() || "22",
-          username: (d.newUser || "").trim(), password: d.newPass || "",
-          output: "", cmd: "", minimized: false, broadcast: true,
-        });
-        maximizedId = null;
+        d.sessions.push({ id: uid(), host: d.newHost.trim(), port: (d.newPort || "22").trim() || "22", username: (d.newUser || "").trim(), password: d.newPass || "", minimized: false, broadcast: true });
+        reg.maximizedId = null;
         ctx.save();
         renderPanels();
         setStatus(status, "", "dim");
       }
 
-      function renderPanels() {
-        panelsArea.replaceChildren();
-        if (!d.sessions.length) {
-          panelsArea.append(el("div", { class: "status-line dim", text: "No sessions. Add a host above and click “Open session”." }));
-          return;
-        }
-        const list = maximizedId ? d.sessions.filter((s) => s.id === maximizedId) : d.sessions;
-        for (const s of list) panelsArea.append(buildPanel(s));
-      }
-
-      function buildPanel(s) {
-        const outPre = el("pre", { class: "kube-panel-out" });
-        outPre.textContent = s.output || "";
-        preMap[s.id] = outPre;
-
-        const cmdInput = el("input", { type: "text", class: "kube-cmd", placeholder: "command for this session, e.g. tail -f /var/log/syslog", value: s.cmd || "" });
-        cmdInput.addEventListener("input", () => { s.cmd = cmdInput.value; ctx.save(); });
-        const runHere = () => { execOn(s, cmdInput.value); cmdInput.value = ""; s.cmd = ""; ctx.save(); };
-        cmdInput.addEventListener("keydown", (e) => { if (e.key === "Enter") runHere(); });
-
-        const castBtn = el("button", {
-          class: "icon-btn cast" + (s.broadcast ? " on" : ""),
-          text: s.broadcast ? "📡 on" : "📡 off",
-          title: "Include this session when broadcasting a shared command",
-          onclick: () => {
-            s.broadcast = !s.broadcast;
-            castBtn.className = "icon-btn cast" + (s.broadcast ? " on" : "");
-            castBtn.textContent = s.broadcast ? "📡 on" : "📡 off";
-            ctx.save();
-          },
-        });
-        const headBtn = (txt, title, fn) => el("button", { class: "icon-btn", text: txt, title, onclick: fn });
-        const head = el("div", { class: "kube-panel-head" }, [
-          el("span", { class: "kube-panel-title", text: (s.username ? s.username + "@" : "") + s.host + ":" + s.port }),
-          castBtn,
-          headBtn(s.minimized ? "▸" : "▾", "Minimize / expand", () => { s.minimized = !s.minimized; ctx.save(); renderPanels(); }),
-          headBtn(maximizedId === s.id ? "🗗" : "🗖", "Maximize / restore", () => { maximizedId = maximizedId === s.id ? null : s.id; renderPanels(); }),
-          headBtn("×", "Close session", () => { delete preMap[s.id]; d.sessions = d.sessions.filter((x) => x.id !== s.id); if (maximizedId === s.id) maximizedId = null; ctx.save(); renderPanels(); }),
-        ]);
-
-        const bodyEl = el("div", { class: "kube-panel-body" }, [
-          el("div", { class: "toolbar" }, [
-            el("button", { class: "btn", text: "Clear", onclick: () => { s.output = ""; outPre.textContent = ""; ctx.save(); } }),
-            copyBtn(() => s.output || "", "Copy"),
-          ]),
-          outPre,
-          el("div", { class: "kube-cmd-bar" }, [
-            cmdInput,
-            el("button", { class: "btn primary", text: "Run", onclick: runHere }),
-          ]),
-        ]);
-        bodyEl.style.display = s.minimized ? "none" : "";
-
-        const cls = "kube-panel" + (maximizedId === s.id ? " max" : "") + (s.minimized ? " min" : "");
-        const node = el("div", { class: cls }, [head, bodyEl]);
-        outPre.scrollTop = outPre.scrollHeight;
-        return node;
-      }
-
-      // shared broadcast command bar
-      const sharedInput = bindField(el("input", { type: "text", class: "kube-cmd", placeholder: "shared command — runs on every session with 📡 on" }), d, "shared", ctx);
-      const runShared = async () => {
+      const runShared = () => {
         const cmd = (d.shared || "").trim();
         if (!cmd) return;
-        const targets = d.sessions.filter((s) => s.broadcast);
-        if (!targets.length) return setStatus(status, "✗ No sessions have broadcast (📡) enabled", "err");
-        setStatus(status, `Broadcasting to ${targets.length} session(s)…`, "dim");
-        await Promise.all(targets.map((s) => execOn(s, cmd)));
-        setStatus(status, `✓ Ran on ${targets.length} session(s)`, "ok");
+        const targets = d.sessions.filter((s) => s.broadcast && rt[s.id] && rt[s.id].ws && rt[s.id].ws.readyState === 1);
+        if (!targets.length) return setStatus(status, "✗ No connected sessions have broadcast (📡) enabled", "err");
+        for (const s of targets) rt[s.id].ws.send(JSON.stringify({ type: "input", data: cmd + "\n" }));
+        setStatus(status, `✓ Sent to ${targets.length} session(s)`, "ok");
       };
+
+      const sharedInput = bindField(el("input", { type: "text", class: "kube-cmd", placeholder: "shared command — typed into every session with 📡 on" }), d, "shared", ctx);
       sharedInput.addEventListener("keydown", (e) => { if (e.key === "Enter") runShared(); });
 
       const field = (label, node) => el("div", { class: "field" }, [el("span", { text: label }), node]);
@@ -1170,21 +1195,28 @@
 
       root.append(
         el("div", { class: "form-grid" }, [
-          field("Host", newHost),
-          field("Port", newPort),
-          field("User", newUser),
-          field("Password", newPass),
+          field("Host", newHost), field("Port", newPort), field("User", newUser), field("Password", newPass),
           el("button", { class: "btn primary", text: "+ Open session", onclick: openSession }),
         ]),
         el("div", { class: "toolbar" }, [
-          el("span", { class: "pane-label", text: "Broadcast" }),
+          el("span", { class: "pane-label", text: "Broadcast typing" }),
           sharedInput,
-          el("button", { class: "btn", text: "Run on all 📡", onclick: runShared }),
+          el("button", { class: "btn", text: "Send to all 📡", onclick: runShared }),
         ]),
         status,
         panelsArea
       );
       renderPanels();
+
+      if (!reg.resizeWired) {
+        reg.resizeWired = true;
+        window.addEventListener("resize", () => {
+          for (const s of d.sessions) {
+            const r = rt[s.id];
+            if (r && r.fit && !s.minimized) { try { r.fit.fit(); } catch (e) {} }
+          }
+        });
+      }
     },
   });
 
