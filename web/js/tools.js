@@ -752,11 +752,10 @@
     type: "kube",
     icon: "☸️",
     name: "Kube Console",
-    desc: "Find pods, then open a terminal panel per container — tail logs live, run any command, search whole folders. Local kubectl or over SSH.",
+    desc: "Connect to the kubemaster over SSH (password), find pods, then open a terminal panel per container — tail logs, run commands, search folders.",
     defaults: () => ({
-      context: "", sshHost: "", sshPort: "", sshKey: "", sshPassword: "",
-      server: "", token: "", insecureTLS: false,
-      namespace: "", podQuery: "", panels: [],
+      sshHost: "", sshPort: "", sshPassword: "",
+      context: "", namespace: "", podQuery: "", panels: [],
     }),
     render(root, tab, ctx) {
       const d = tab.data;
@@ -773,27 +772,19 @@
 
       const ctxSel = el("select", { style: "min-width:160px" });
       const nsSel = el("select", { style: "min-width:160px" });
-      const sshHost = bindField(el("input", { type: "text", placeholder: "user@kubemaster", style: "min-width:180px" }), d, "sshHost", ctx);
+      const sshHost = bindField(el("input", { type: "text", placeholder: "user@kubemaster", style: "min-width:200px" }), d, "sshHost", ctx);
       const sshPort = bindField(el("input", { type: "text", placeholder: "22", style: "width:70px" }), d, "sshPort", ctx);
-      const sshKey = bindField(el("input", { type: "text", placeholder: "~/.ssh/id_ed25519 (optional)", style: "min-width:170px" }), d, "sshKey", ctx);
-      const sshPassword = bindField(el("input", { type: "password", placeholder: "ssh password (optional)", style: "min-width:150px" }), d, "sshPassword", ctx);
-      const server = bindField(el("input", { type: "text", placeholder: "https://<apiserver>:6443 (optional)", style: "min-width:200px" }), d, "server", ctx);
-      const token = bindField(el("input", { type: "password", placeholder: "bearer token (optional)", style: "min-width:160px" }), d, "token", ctx);
-      const insecureTLS = bindField(el("input", { type: "checkbox" }), d, "insecureTLS", ctx);
+      const sshPassword = bindField(el("input", { type: "password", placeholder: "ssh password", style: "min-width:170px" }), d, "sshPassword", ctx);
       const podQuery = bindField(el("input", { type: "text", placeholder: "service / pod name filter" }), d, "podQuery", ctx);
 
       const connQS = () =>
         "context=" + encodeURIComponent(d.context || "") +
-        "&server=" + encodeURIComponent(d.server || "") +
-        "&token=" + encodeURIComponent(d.token || "") +
-        "&insecure=" + (d.insecureTLS ? "true" : "false") +
         "&sshHost=" + encodeURIComponent(d.sshHost || "") +
         "&sshPort=" + encodeURIComponent(d.sshPort || "") +
-        "&sshKey=" + encodeURIComponent(d.sshKey || "") +
         "&sshPassword=" + encodeURIComponent(d.sshPassword || "");
       const connBody = () => ({
-        context: d.context, server: d.server, token: d.token, insecure: d.insecureTLS,
-        sshHost: d.sshHost, sshPort: d.sshPort, sshKey: d.sshKey, sshPassword: d.sshPassword,
+        context: d.context,
+        sshHost: d.sshHost, sshPort: d.sshPort, sshPassword: d.sshPassword,
       });
       const shq = (s) => "'" + String(s).replace(/'/g, "'\\''") + "'";
 
@@ -986,7 +977,7 @@
           d.context = ctxSel.value || "";
           ctx.save();
         } catch (e) {
-          if (!d.server) return setStatus(status, "✗ " + e.message, "err");
+          return setStatus(status, "✗ " + e.message, "err");
         }
         await loadNamespaces();
       }
@@ -1023,16 +1014,12 @@
 
       root.append(
         el("div", { class: "form-grid" }, [
-          field("SSH host — kubectl runs here (optional)", sshHost),
+          field("SSH host — kubectl runs here", sshHost),
           field("SSH port", sshPort),
-          field("SSH password (or use key/agent)", sshPassword),
-          field("SSH key", sshKey),
-          field("API server (optional)", server),
-          field("Token", token),
-          el("label", { class: "inline", style: "padding-bottom:8px" }, [insecureTLS, "skip TLS verify"]),
+          field("SSH password", sshPassword),
+          el("button", { class: "btn", text: "⟳ Connect", title: "Load contexts & namespaces", onclick: loadContexts }),
         ]),
         el("div", { class: "form-grid" }, [
-          el("button", { class: "btn", text: "⟳ Connect", title: "Load contexts & namespaces", onclick: loadContexts }),
           field("Context", ctxSel),
           field("Namespace", nsSel),
           field("Service / pod filter", podQuery),
@@ -1045,6 +1032,159 @@
       renderPanels();
       if (d.context) fillSelect(ctxSel, [d.context], d.context);
       if (d.namespace) fillSelect(nsSel, [d.namespace], d.namespace);
+    },
+  });
+
+  // ======================================================================
+  // SSH / PuTTY — multiple SSH terminal sessions in one tab, with a shared
+  // command bar that broadcasts to all sessions (MobaXterm-style multi-exec)
+  // ======================================================================
+  registerTool({
+    type: "putty",
+    icon: "🖥️",
+    name: "SSH / PuTTY",
+    desc: "Open multiple SSH sessions (password auth) as terminal panels; run commands per session or broadcast one command to all. Minimize/maximize/close each.",
+    defaults: () => ({ sessions: [], newHost: "", newPort: "22", newUser: "", newPass: "", shared: "" }),
+    render(root, tab, ctx) {
+      const d = tab.data;
+      if (!Array.isArray(d.sessions)) d.sessions = [];
+      const status = el("div", { class: "status-line dim" });
+      const panelsArea = el("div", { class: "kube-panels" });
+      const preMap = {}; // runtime: session id → live output <pre>
+      let maximizedId = null;
+
+      const connOf = (s) => ({ host: s.host, port: s.port, username: s.username, password: s.password });
+
+      const appendTo = (s, text) => {
+        let buf = (s.output || "") + text;
+        if (buf.length > 120000) buf = buf.slice(buf.length - 120000);
+        s.output = buf;
+        const pre = preMap[s.id];
+        if (pre && pre.isConnected) { pre.textContent = buf; pre.scrollTop = pre.scrollHeight; }
+        ctx.save();
+      };
+
+      const execOn = async (s, command) => {
+        command = (command || "").trim();
+        if (!command) return;
+        appendTo(s, "$ " + command + "\n");
+        try {
+          const r = await api("POST", "/api/ssh/exec", { conn: connOf(s), command });
+          appendTo(s, (r.output || "") + ((r.output || "").endsWith("\n") ? "" : "\n"));
+        } catch (e) {
+          appendTo(s, "✗ " + e.message + "\n");
+        }
+      };
+
+      function openSession() {
+        if (!(d.newHost || "").trim()) return setStatus(status, "✗ Enter a host (or user@host)", "err");
+        d.sessions.push({
+          id: uid(), host: d.newHost.trim(), port: (d.newPort || "22").trim() || "22",
+          username: (d.newUser || "").trim(), password: d.newPass || "",
+          output: "", cmd: "", minimized: false, broadcast: true,
+        });
+        maximizedId = null;
+        ctx.save();
+        renderPanels();
+        setStatus(status, "", "dim");
+      }
+
+      function renderPanels() {
+        panelsArea.replaceChildren();
+        if (!d.sessions.length) {
+          panelsArea.append(el("div", { class: "status-line dim", text: "No sessions. Add a host above and click “Open session”." }));
+          return;
+        }
+        const list = maximizedId ? d.sessions.filter((s) => s.id === maximizedId) : d.sessions;
+        for (const s of list) panelsArea.append(buildPanel(s));
+      }
+
+      function buildPanel(s) {
+        const outPre = el("pre", { class: "kube-panel-out" });
+        outPre.textContent = s.output || "";
+        preMap[s.id] = outPre;
+
+        const cmdInput = el("input", { type: "text", class: "kube-cmd", placeholder: "command for this session, e.g. tail -f /var/log/syslog", value: s.cmd || "" });
+        cmdInput.addEventListener("input", () => { s.cmd = cmdInput.value; ctx.save(); });
+        const runHere = () => { execOn(s, cmdInput.value); cmdInput.value = ""; s.cmd = ""; ctx.save(); };
+        cmdInput.addEventListener("keydown", (e) => { if (e.key === "Enter") runHere(); });
+
+        const castBtn = el("button", {
+          class: "icon-btn cast" + (s.broadcast ? " on" : ""),
+          text: s.broadcast ? "📡 on" : "📡 off",
+          title: "Include this session when broadcasting a shared command",
+          onclick: () => {
+            s.broadcast = !s.broadcast;
+            castBtn.className = "icon-btn cast" + (s.broadcast ? " on" : "");
+            castBtn.textContent = s.broadcast ? "📡 on" : "📡 off";
+            ctx.save();
+          },
+        });
+        const headBtn = (txt, title, fn) => el("button", { class: "icon-btn", text: txt, title, onclick: fn });
+        const head = el("div", { class: "kube-panel-head" }, [
+          el("span", { class: "kube-panel-title", text: (s.username ? s.username + "@" : "") + s.host + ":" + s.port }),
+          castBtn,
+          headBtn(s.minimized ? "▸" : "▾", "Minimize / expand", () => { s.minimized = !s.minimized; ctx.save(); renderPanels(); }),
+          headBtn(maximizedId === s.id ? "🗗" : "🗖", "Maximize / restore", () => { maximizedId = maximizedId === s.id ? null : s.id; renderPanels(); }),
+          headBtn("×", "Close session", () => { delete preMap[s.id]; d.sessions = d.sessions.filter((x) => x.id !== s.id); if (maximizedId === s.id) maximizedId = null; ctx.save(); renderPanels(); }),
+        ]);
+
+        const bodyEl = el("div", { class: "kube-panel-body" }, [
+          el("div", { class: "toolbar" }, [
+            el("button", { class: "btn", text: "Clear", onclick: () => { s.output = ""; outPre.textContent = ""; ctx.save(); } }),
+            copyBtn(() => s.output || "", "Copy"),
+          ]),
+          outPre,
+          el("div", { class: "kube-cmd-bar" }, [
+            cmdInput,
+            el("button", { class: "btn primary", text: "Run", onclick: runHere }),
+          ]),
+        ]);
+        bodyEl.style.display = s.minimized ? "none" : "";
+
+        const cls = "kube-panel" + (maximizedId === s.id ? " max" : "") + (s.minimized ? " min" : "");
+        const node = el("div", { class: cls }, [head, bodyEl]);
+        outPre.scrollTop = outPre.scrollHeight;
+        return node;
+      }
+
+      // shared broadcast command bar
+      const sharedInput = bindField(el("input", { type: "text", class: "kube-cmd", placeholder: "shared command — runs on every session with 📡 on" }), d, "shared", ctx);
+      const runShared = async () => {
+        const cmd = (d.shared || "").trim();
+        if (!cmd) return;
+        const targets = d.sessions.filter((s) => s.broadcast);
+        if (!targets.length) return setStatus(status, "✗ No sessions have broadcast (📡) enabled", "err");
+        setStatus(status, `Broadcasting to ${targets.length} session(s)…`, "dim");
+        await Promise.all(targets.map((s) => execOn(s, cmd)));
+        setStatus(status, `✓ Ran on ${targets.length} session(s)`, "ok");
+      };
+      sharedInput.addEventListener("keydown", (e) => { if (e.key === "Enter") runShared(); });
+
+      const field = (label, node) => el("div", { class: "field" }, [el("span", { text: label }), node]);
+      const newHost = bindField(el("input", { type: "text", placeholder: "user@host", style: "min-width:180px" }), d, "newHost", ctx);
+      const newPort = bindField(el("input", { type: "text", placeholder: "22", style: "width:70px" }), d, "newPort", ctx);
+      const newUser = bindField(el("input", { type: "text", placeholder: "(or set in host)", style: "width:130px" }), d, "newUser", ctx);
+      const newPass = bindField(el("input", { type: "password", placeholder: "password", style: "min-width:150px" }), d, "newPass", ctx);
+      newPass.addEventListener("keydown", (e) => { if (e.key === "Enter") openSession(); });
+
+      root.append(
+        el("div", { class: "form-grid" }, [
+          field("Host", newHost),
+          field("Port", newPort),
+          field("User", newUser),
+          field("Password", newPass),
+          el("button", { class: "btn primary", text: "+ Open session", onclick: openSession }),
+        ]),
+        el("div", { class: "toolbar" }, [
+          el("span", { class: "pane-label", text: "Broadcast" }),
+          sharedInput,
+          el("button", { class: "btn", text: "Run on all 📡", onclick: runShared }),
+        ]),
+        status,
+        panelsArea
+      );
+      renderPanels();
     },
   });
 

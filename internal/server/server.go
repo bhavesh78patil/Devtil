@@ -17,6 +17,7 @@ import (
 	"github.com/bhavesh78patil/devtil/internal/kube"
 	"github.com/bhavesh78patil/devtil/internal/logging"
 	"github.com/bhavesh78patil/devtil/internal/proxy"
+	"github.com/bhavesh78patil/devtil/internal/sshx"
 	"github.com/bhavesh78patil/devtil/internal/store"
 )
 
@@ -46,6 +47,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/kafka/consume", s.kafkaConsume)
 	mux.HandleFunc("POST /api/kafka/produce", s.kafkaProduce)
 	mux.HandleFunc("POST /api/db/query", s.dbQuery)
+	mux.HandleFunc("POST /api/ssh/exec", s.sshExec)
 
 	mux.HandleFunc("GET /api/kube/contexts", s.kubeContexts)
 	mux.HandleFunc("GET /api/kube/namespaces", s.kubeNamespaces)
@@ -296,6 +298,24 @@ func (s *Server) dbQuery(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, errString("unknown db type "+req.Type))
 		return
 	}
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err)
+		return
+	}
+	writeJSON(w, res)
+}
+
+func (s *Server) sshExec(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Conn      sshx.Conn `json:"conn"`
+		Command   string    `json:"command"`
+		TimeoutMs int       `json:"timeoutMs"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	res, err := sshx.Exec(req.Conn, req.Command, req.TimeoutMs)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, err)
 		return

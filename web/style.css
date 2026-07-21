@@ -515,6 +515,8 @@ details.section[open] summary { margin-bottom: 8px; }
 .kube-panel.max .kube-panel-out { height: 60vh; }
 .kube-cmd-bar { display: flex; gap: 6px; }
 .kube-cmd { flex: 1; }
+.icon-btn.cast { font-size: 11px; padding: 3px 6px; border: 1px solid var(--border); border-radius: 5px; color: var(--text-dim); }
+.icon-btn.cast.on { color: var(--green); border-color: var(--green); }
 
 .form-grid { display: flex; flex-wrap: wrap; gap: 8px; align-items: end; }
 .form-grid .field { display: flex; flex-direction: column; gap: 4px; }
