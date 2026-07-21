@@ -1577,14 +1577,24 @@
     // connection payload with numeric timeout (form fields store strings)
     const kconn = () => ({ ...conn, timeoutMs: Number(conn.timeoutMs) || 1000 });
 
-    // topic dropdown: populated by "List topics", still lets you type a custom one
-    const topicList = el("datalist", { id: "kafka-topics-" + c.id });
-    const topic = el("input", { type: "text", placeholder: "topic — type or pick ▾", list: topicList.id, style: "min-width:220px" });
+    // topic picker: a real dropdown populated by "List topics", plus a text
+    // field for typing a custom topic. Either keeps c.topic in sync.
+    const topic = el("input", { type: "text", placeholder: "topic name", style: "min-width:160px" });
     topic.value = c.topic || "";
-    topic.addEventListener("input", () => { c.topic = topic.value.trim(); ctx.save(); });
+    topic.addEventListener("input", () => { c.topic = topic.value.trim(); topicSel.value = topic.value.trim(); ctx.save(); });
+    const topicSel = el("select", { style: "min-width:200px" });
+    topicSel.addEventListener("change", () => {
+      if (!topicSel.value) return;
+      c.topic = topicSel.value;
+      topic.value = topicSel.value;
+      ctx.save();
+    });
     const fillTopics = () => {
-      topicList.replaceChildren(...(c.topics || []).map((t) =>
-        el("option", { value: t.name, text: `${t.name} (${t.partitions}p)` })));
+      const opts = [el("option", { value: "", text: (c.topics && c.topics.length) ? `— pick a topic (${c.topics.length}) —` : "— List topics first —" })];
+      for (const t of (c.topics || [])) opts.push(el("option", { value: t.name, text: `${t.name} (${t.partitions}p)` }));
+      topicSel.replaceChildren(...opts);
+      // reflect the current topic in the dropdown if it's one of the listed ones
+      if (c.topic && (c.topics || []).some((t) => t.name === c.topic)) topicSel.value = c.topic;
     };
     const max = el("input", { type: "number", min: "1", max: "500", style: "width:80px" });
     max.value = c.max || "50";
@@ -1640,10 +1650,12 @@
       setStatus(status, "Listing topics…", "dim");
       try {
         const r = await api("POST", "/api/kafka/topics", { conn: kconn() });
-        c.topics = r.topics;
+        c.topics = r.topics || [];
         ctx.save();
         fillTopics();
-        setStatus(status, `✓ ${r.topics.length} topic(s) — open the Topic dropdown to pick one`, "ok");
+        setStatus(status, c.topics.length
+          ? `✓ ${c.topics.length} topic(s) — pick one from the dropdown`
+          : "✓ Connected, but no (non-internal) topics were returned", c.topics.length ? "ok" : "dim");
       } catch (e) {
         setStatus(status, "✗ " + e.message, "err");
       }
@@ -1695,10 +1707,10 @@
     };
 
     body.append(
-      topicList,
       el("div", { class: "toolbar" }, [
         el("button", { class: "btn", text: "List topics", onclick: listTopics }),
-        topic,
+        topicSel,
+        el("label", { class: "inline" }, ["or", topic]),
         el("label", { class: "inline" }, ["Read", fromSel]),
         startWrap,
         endWrap,
