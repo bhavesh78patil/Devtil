@@ -20,8 +20,24 @@ telemetry**, and keeps all your data on your machine. See
 [latest release](../../releases/latest) — a standalone binary
 (`devtil-darwin-arm64`, `devtil-darwin-amd64`, `devtil-windows-amd64.exe`,
 `devtil-linux-amd64`) or the native `.dmg` / `.exe` installer. Verify against
-`SHA256SUMS`. Binaries are unsigned, so macOS Gatekeeper (right-click → Open)
-and Windows SmartScreen may prompt on first run.
+`SHA256SUMS`.
+
+### Opening on macOS (unsigned app)
+
+Devtil isn't notarized by Apple (that needs a paid developer account), so on
+first launch macOS may say **"Devtil.app is damaged and can't be opened"** or
+**"cannot be opened because Apple cannot check it for malicious software"**.
+The app is fine — this is just Gatekeeper blocking an un-notarized download.
+Clear the quarantine flag once, then open normally:
+
+```sh
+# for the app:
+xattr -dr com.apple.quarantine /Applications/Devtil.app
+# or for the standalone binary:
+xattr -d com.apple.quarantine ~/Downloads/devtil-darwin-arm64 && chmod +x ~/Downloads/devtil-darwin-arm64
+```
+
+(On Windows, SmartScreen may warn — choose **More info → Run anyway**.)
 
 **Build it yourself for Windows & Mac** (needs Go 1.25):
 

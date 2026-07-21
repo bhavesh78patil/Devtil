@@ -45,10 +45,8 @@ jobs:
       matrix:
         include:
           - os: macos-latest
-            binary: devtil
             artifact: "desktop/dist/*.dmg"
           - os: windows-latest
-            binary: devtil.exe
             artifact: "desktop/dist/*.exe"
     runs-on: ${{ matrix.os }}
     steps:
@@ -59,14 +57,25 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-      - name: Build backend
+      - name: Build backend (mac universal — runs on both Apple Silicon & Intel)
+        if: runner.os == 'macOS'
         shell: bash
-        run: go build -o bin/${{ matrix.binary }} .
+        run: |
+          GOARCH=arm64 go build -o bin/devtil-arm64 .
+          GOARCH=amd64 go build -o bin/devtil-amd64 .
+          lipo -create -output bin/devtil bin/devtil-arm64 bin/devtil-amd64
+          rm bin/devtil-arm64 bin/devtil-amd64
+          file bin/devtil
+      - name: Build backend (windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: go build -o bin/devtil.exe .
       - name: Build installer
         shell: bash
         working-directory: desktop
         env:
-          # unsigned builds; set signing secrets later to ship signed apps
+          # no paid Apple/Windows cert: builds are ad-hoc signed (mac) and
+          # unsigned (win). Users clear the download quarantine on first run.
           CSC_IDENTITY_AUTO_DISCOVERY: "false"
         run: |
           npm install

@@ -58,9 +58,22 @@ Pick one:
 
 Verify a download against `SHA256SUMS` if provided.
 
-> Note: release binaries and installers are **unsigned**. macOS Gatekeeper
-> will ask you to right-click → Open the first time; Windows SmartScreen may
-> warn on first run.
+### Opening on macOS
+
+The `.dmg` / `.app` is **not notarized** (that needs a paid Apple account), so
+macOS may say **"Devtil.app is damaged and can't be opened."** It isn't damaged
+— that's just Gatekeeper blocking an un-notarized download. Clear the
+quarantine flag once and open normally:
+
+```sh
+xattr -dr com.apple.quarantine /Applications/Devtil.app
+# standalone binary instead:
+xattr -d com.apple.quarantine devtil-darwin-arm64 && chmod +x devtil-darwin-arm64
+```
+
+The Mac app is ad-hoc signed and universal (runs on Apple Silicon and Intel).
+On Windows, SmartScreen may warn on first run — choose **More info → Run
+anyway**.
 
 ## Privacy
 
