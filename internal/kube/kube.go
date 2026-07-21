@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"os/exec"
@@ -91,13 +92,22 @@ func redactArgs(args []string) string {
 	return strings.Join(out, " ")
 }
 
+// run executes kubectl and fails on any nonzero exit.
 func run(ctx context.Context, conn Conn, args ...string) ([]byte, error) {
+	return runOpt(ctx, conn, false, args...)
+}
+
+// runOpt executes kubectl over the configured transport. When tolerate is
+// true a nonzero exit code is not treated as an error and the combined
+// stdout+stderr is returned instead — for the interactive terminal, where
+// commands like `grep` legitimately exit nonzero.
+func runOpt(ctx context.Context, conn Conn, tolerate bool, args ...string) ([]byte, error) {
 	args = append(conn.flags(), args...)
 
 	// password auth can't be piped into the system ssh client from a
 	// background process, so it uses the built-in Go SSH client instead
 	if conn.SSH() && conn.SSHPassword != "" {
-		return runSSHPassword(ctx, conn, args)
+		return runSSHPassword(ctx, conn, tolerate, args)
 	}
 
 	var cmd *exec.Cmd
@@ -134,6 +144,10 @@ func run(ctx context.Context, conn Conn, args ...string) ([]byte, error) {
 	logging.Logf("kube: done in %dms, stdout=%dB, stderr=%q, err=%v",
 		time.Since(start).Milliseconds(), stdout.Len(), logging.Snippet(stderr.String(), 400), err)
 	if err != nil {
+		var exitErr *exec.ExitError
+		if tolerate && errors.As(err, &exitErr) {
+			return append(stdout.Bytes(), stderr.Bytes()...), nil
+		}
 		msg := strings.TrimSpace(stderr.String())
 		if msg == "" {
 			msg = err.Error()
@@ -268,6 +282,7 @@ type LogsRequest struct {
 	Container    string   `json:"container"`
 	Tail         int      `json:"tail"`
 	SinceMinutes int      `json:"sinceMinutes"`
+	SinceSeconds int      `json:"sinceSeconds"` // finer window, used by follow/tail polling
 	Previous     bool     `json:"previous"`
 	Grep         string   `json:"grep"`
 	GrepRegex    bool     `json:"grepRegex"`
@@ -278,6 +293,53 @@ type LogsRequest struct {
 	FilePath string `json:"filePath"`
 }
 
+// ExecRequest runs an arbitrary command inside a container via
+// `kubectl exec … -- sh -c '<command>'`.
+type ExecRequest struct {
+	Conn
+	Namespace string `json:"namespace"`
+	Pod       string `json:"pod"`
+	Container string `json:"container"`
+	Command   string `json:"command"`
+	TimeoutMs int    `json:"timeoutMs"`
+}
+
+type ExecResponse struct {
+	Output     string `json:"output"`
+	DurationMs int64  `json:"durationMs"`
+}
+
+// Exec runs a command inside a pod's container and returns the combined
+// stdout+stderr, tolerating nonzero exit codes (so a grep with no matches,
+// or a program that writes to stderr, still shows its output).
+func Exec(req ExecRequest) (*ExecResponse, error) {
+	if req.Namespace == "" || req.Pod == "" || strings.TrimSpace(req.Command) == "" {
+		return nil, fmt.Errorf("namespace, pod and a command are required")
+	}
+	timeout := 60 * time.Second
+	if req.TimeoutMs > 0 {
+		timeout = time.Duration(req.TimeoutMs) * time.Millisecond
+		if timeout > 10*time.Minute {
+			timeout = 10 * time.Minute
+		}
+	}
+	args := []string{"exec", req.Pod, "-n", req.Namespace}
+	if req.Container != "" {
+		args = append(args, "-c", req.Container)
+	}
+	args = append(args, "--", "sh", "-c", req.Command)
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	start := time.Now()
+	out, err := runOpt(ctx, req.Conn, true, args...)
+	if err != nil {
+		return nil, err
+	}
+	return &ExecResponse{Output: string(out), DurationMs: time.Since(start).Milliseconds()}, nil
+}
+
 // shellQuote makes s safe to embed in the `sh -c` command run inside the pod.
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
@@ -285,7 +347,7 @@ func shellQuote(s string) string {
 
 // runSSHPassword runs kubectl on the remote host over the built-in SSH
 // client using username/password auth (user taken from the user@host form).
-func runSSHPassword(ctx context.Context, conn Conn, args []string) ([]byte, error) {
+func runSSHPassword(ctx context.Context, conn Conn, tolerate bool, args []string) ([]byte, error) {
 	host := strings.TrimSpace(conn.SSHHost)
 	user := ""
 	if i := strings.Index(host, "@"); i >= 0 {
@@ -348,6 +410,10 @@ func runSSHPassword(ctx context.Context, conn Conn, args []string) ([]byte, erro
 	logging.Logf("kube: done in %dms, stdout=%dB, stderr=%q, err=%v",
 		time.Since(start).Milliseconds(), stdout.Len(), logging.Snippet(stderr.String(), 400), err)
 	if err != nil {
+		var exitErr *ssh.ExitError
+		if tolerate && errors.As(err, &exitErr) {
+			return append(stdout.Bytes(), stderr.Bytes()...), nil
+		}
 		msg := strings.TrimSpace(stderr.String())
 		if msg == "" {
 			msg = err.Error()
@@ -417,7 +483,9 @@ func Logs(req LogsRequest) (*LogsResponse, error) {
 				args = append(args, "-c", req.Container)
 			}
 			args = append(args, fmt.Sprintf("--tail=%d", tail))
-			if req.SinceMinutes > 0 {
+			if req.SinceSeconds > 0 {
+				args = append(args, fmt.Sprintf("--since=%ds", req.SinceSeconds))
+			} else if req.SinceMinutes > 0 {
 				args = append(args, fmt.Sprintf("--since=%dm", req.SinceMinutes))
 			}
 			if req.Previous {

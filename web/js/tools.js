@@ -751,93 +751,215 @@
   registerTool({
     type: "kube",
     icon: "☸️",
-    name: "Kube Logs",
-    desc: "Find pods for a service and search their logs — local kubectl, or kubectl over SSH on the kubemaster; stdout or files inside the pod.",
+    name: "Kube Console",
+    desc: "Connect to the kubemaster over SSH (password), find pods, then open a terminal panel per container — tail logs, run commands, search folders.",
     defaults: () => ({
-      context: "", sshHost: "", sshPort: "", sshKey: "", sshPassword: "",
-      server: "", token: "", insecureTLS: false,
-      namespace: "", podQuery: "", selected: [], container: "",
-      source: "stdout", filePath: "",
-      tail: "2000", sinceMinutes: "", grep: "", grepRegex: false, output: [],
+      sshHost: "", sshPort: "", sshPassword: "",
+      context: "", namespace: "", podQuery: "", panels: [],
     }),
     render(root, tab, ctx) {
       const d = tab.data;
-      if (!Array.isArray(d.selected)) d.selected = [];
+      if (!Array.isArray(d.panels)) d.panels = [];
       const status = el("div", { class: "status-line dim" });
       const podBox = el("div");
-      const logPre = el("pre", { class: "output", style: "min-height:180px" });
+      const panelsArea = el("div", { class: "kube-panels" });
+
+      // runtime-only state (not persisted): live tail timers, dedup sets,
+      // and which panel is maximized
+      const timers = {};
+      const tailSeen = {};
+      let maximizedId = null;
 
       const ctxSel = el("select", { style: "min-width:160px" });
       const nsSel = el("select", { style: "min-width:160px" });
-      const sshHost = bindField(el("input", { type: "text", placeholder: "user@kubemaster", style: "min-width:180px" }), d, "sshHost", ctx);
+      const sshHost = bindField(el("input", { type: "text", placeholder: "user@kubemaster", style: "min-width:200px" }), d, "sshHost", ctx);
       const sshPort = bindField(el("input", { type: "text", placeholder: "22", style: "width:70px" }), d, "sshPort", ctx);
-      const sshKey = bindField(el("input", { type: "text", placeholder: "~/.ssh/id_ed25519 (optional)", style: "min-width:170px" }), d, "sshKey", ctx);
-      const sshPassword = bindField(el("input", { type: "password", placeholder: "ssh password (optional)", style: "min-width:150px" }), d, "sshPassword", ctx);
-      const server = bindField(el("input", { type: "text", placeholder: "https://<apiserver>:6443 (optional)", style: "min-width:200px" }), d, "server", ctx);
-      const token = bindField(el("input", { type: "password", placeholder: "bearer token (optional)", style: "min-width:160px" }), d, "token", ctx);
-      const insecureTLS = bindField(el("input", { type: "checkbox" }), d, "insecureTLS", ctx);
+      const sshPassword = bindField(el("input", { type: "password", placeholder: "ssh password", style: "min-width:170px" }), d, "sshPassword", ctx);
       const podQuery = bindField(el("input", { type: "text", placeholder: "service / pod name filter" }), d, "podQuery", ctx);
-      const container = bindField(el("input", { type: "text", placeholder: "(default)", style: "width:120px" }), d, "container", ctx);
-      const sourceSel = bindField(
-        el("select", {}, [
-          el("option", { value: "stdout", text: "Container stdout" }),
-          el("option", { value: "file", text: "File inside pod (exec)" }),
-        ]),
-        d, "source", ctx, () => syncSource()
-      );
-      const filePath = bindField(el("input", { type: "text", placeholder: "/var/log/app.log", style: "min-width:180px" }), d, "filePath", ctx);
-      const tail = bindField(el("input", { type: "number", min: "1", style: "width:90px" }), d, "tail", ctx);
-      const since = bindField(el("input", { type: "number", min: "0", placeholder: "all", style: "width:90px" }), d, "sinceMinutes", ctx);
-      const grep = bindField(el("input", { type: "text", placeholder: "filter lines (grep)", style: "flex:1;min-width:180px" }), d, "grep", ctx);
-      const grepRegex = bindField(el("input", { type: "checkbox" }), d, "grepRegex", ctx);
 
       const connQS = () =>
         "context=" + encodeURIComponent(d.context || "") +
-        "&server=" + encodeURIComponent(d.server || "") +
-        "&token=" + encodeURIComponent(d.token || "") +
-        "&insecure=" + (d.insecureTLS ? "true" : "false") +
         "&sshHost=" + encodeURIComponent(d.sshHost || "") +
         "&sshPort=" + encodeURIComponent(d.sshPort || "") +
-        "&sshKey=" + encodeURIComponent(d.sshKey || "") +
         "&sshPassword=" + encodeURIComponent(d.sshPassword || "");
+      const connBody = () => ({
+        context: d.context,
+        sshHost: d.sshHost, sshPort: d.sshPort, sshPassword: d.sshPassword,
+      });
+      const shq = (s) => "'" + String(s).replace(/'/g, "'\\''") + "'";
 
-      const renderLogs = () => {
-        const lines = d.output || [];
-        if (!lines.length) { logPre.textContent = "No log lines loaded."; return; }
-        const q = (d.grep || "").trim();
-        if (q && !d.grepRegex) {
-          const safe = q.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-          const re = new RegExp("(" + safe + ")", "gi");
-          logPre.innerHTML = lines.map((l) => escapeHtml(l).replace(re, "<mark>$1</mark>")).join("\n");
+      // ---------- container terminal panels ----------
+
+      function openPanel(pod, container) {
+        let p = d.panels.find((x) => x.pod === pod && x.container === container);
+        if (!p) {
+          p = { id: uid(), pod, container, output: "", cmd: "", dir: "/var/log", term: "", tailN: "500", minimized: false };
+          d.panels.push(p);
         } else {
-          logPre.textContent = lines.join("\n");
+          p.minimized = false;
         }
-      };
+        maximizedId = null;
+        ctx.save();
+        renderPanels();
+      }
+
+      function stopAllTails() {
+        for (const id in timers) { clearInterval(timers[id]); delete timers[id]; }
+      }
+
+      function renderPanels() {
+        stopAllTails(); // DOM is about to be rebuilt; drop stale intervals
+        panelsArea.replaceChildren();
+        if (!d.panels.length) {
+          panelsArea.append(el("div", { class: "status-line dim", text: "No panels open. Click a container above to open a terminal for it." }));
+          return;
+        }
+        const list = maximizedId ? d.panels.filter((p) => p.id === maximizedId) : d.panels;
+        for (const panel of list) panelsArea.append(buildPanel(panel));
+      }
+
+      function buildPanel(panel) {
+        const outPre = el("pre", { class: "kube-panel-out" });
+        outPre.textContent = panel.output || "";
+
+        const append = (text) => {
+          let buf = (panel.output || "") + text;
+          if (buf.length > 120000) buf = buf.slice(buf.length - 120000);
+          panel.output = buf;
+          outPre.textContent = buf;
+          outPre.scrollTop = outPre.scrollHeight;
+          ctx.save();
+        };
+
+        // command bar
+        const cmdInput = el("input", { type: "text", class: "kube-cmd", placeholder: "run a command in this container, e.g. ls -la /var/log", value: panel.cmd || "" });
+        cmdInput.addEventListener("input", () => { panel.cmd = cmdInput.value; ctx.save(); });
+        const runCmd = async (command) => {
+          command = (command != null ? command : cmdInput.value).trim();
+          if (!command) return;
+          append("$ " + command + "\n");
+          try {
+            const r = await api("POST", "/api/kube/exec", {
+              ...connBody(), namespace: d.namespace, pod: panel.pod, container: panel.container, command,
+            });
+            append((r.output || "") + ((r.output || "").endsWith("\n") ? "" : "\n"));
+          } catch (e) {
+            append("✗ " + e.message + "\n");
+          }
+        };
+        cmdInput.addEventListener("keydown", (e) => { if (e.key === "Enter") { runCmd(); cmdInput.value = ""; panel.cmd = ""; ctx.save(); } });
+
+        // tail / logs
+        const tailN = el("input", { type: "number", min: "1", max: "5000", style: "width:70px", value: panel.tailN || "500" });
+        tailN.addEventListener("input", () => { panel.tailN = tailN.value; ctx.save(); });
+        const tailBtn = el("button", { class: "btn", text: timers[panel.id] ? "⏸ Stop" : "▶ Tail" });
+        const stopTail = () => {
+          if (timers[panel.id]) { clearInterval(timers[panel.id]); delete timers[panel.id]; }
+          tailBtn.textContent = "▶ Tail";
+        };
+        const startTail = () => {
+          if (timers[panel.id]) return;
+          tailSeen[panel.id] = new Set();
+          append("── tailing " + panel.container + " (stdout) ──\n");
+          tailBtn.textContent = "⏸ Stop";
+          const poll = async () => {
+            if (!outPre.isConnected) { stopTail(); return; } // panel was rebuilt/closed
+            try {
+              const r = await api("POST", "/api/kube/logs", {
+                ...connBody(), namespace: d.namespace, pods: [panel.pod], container: panel.container,
+                tail: 500, sinceSeconds: 8, source: "stdout",
+              });
+              const seen = tailSeen[panel.id];
+              let add = "";
+              for (const line of (r.lines || [])) {
+                if (!seen.has(line)) { seen.add(line); add += line + "\n"; }
+              }
+              if (seen.size > 8000) tailSeen[panel.id] = new Set();
+              if (add) append(add);
+            } catch (e) { /* transient; keep polling */ }
+          };
+          poll();
+          timers[panel.id] = setInterval(poll, 2500);
+        };
+        const toggleTail = () => (timers[panel.id] ? stopTail() : startTail());
+        tailBtn.addEventListener("click", toggleTail);
+        const logsOnce = async () => {
+          try {
+            const r = await api("POST", "/api/kube/logs", {
+              ...connBody(), namespace: d.namespace, pods: [panel.pod], container: panel.container,
+              tail: Number(panel.tailN) || 500, source: "stdout",
+            });
+            append((r.lines || []).join("\n") + "\n");
+          } catch (e) {
+            append("✗ " + e.message + "\n");
+          }
+        };
+
+        // folder search
+        const dirIn = el("input", { type: "text", placeholder: "/var/log", style: "width:150px", value: panel.dir || "" });
+        dirIn.addEventListener("input", () => { panel.dir = dirIn.value; ctx.save(); });
+        const termIn = el("input", { type: "text", placeholder: "text to find (blank = list files)", style: "flex:1;min-width:120px", value: panel.term || "" });
+        termIn.addEventListener("input", () => { panel.term = termIn.value; ctx.save(); });
+        const searchFolder = () => {
+          const dir = (panel.dir || "").trim() || "/var/log";
+          const term = (panel.term || "").trim();
+          const cmd = term
+            ? `grep -rIn ${shq(term)} ${shq(dir)} 2>/dev/null | head -n 500`
+            : `ls -la ${shq(dir)}`;
+          runCmd(cmd);
+        };
+
+        // header controls
+        const headBtn = (txt, title, fn) => el("button", { class: "icon-btn", text: txt, title, onclick: fn });
+        const head = el("div", { class: "kube-panel-head" }, [
+          el("span", { class: "kube-panel-title", text: panel.pod + " › " + panel.container }),
+          headBtn(panel.minimized ? "▸" : "▾", "Minimize / expand", () => { panel.minimized = !panel.minimized; ctx.save(); renderPanels(); }),
+          headBtn(maximizedId === panel.id ? "🗗" : "🗖", "Maximize / restore", () => { maximizedId = maximizedId === panel.id ? null : panel.id; renderPanels(); }),
+          headBtn("×", "Close panel", () => { stopTail(); d.panels = d.panels.filter((x) => x.id !== panel.id); if (maximizedId === panel.id) maximizedId = null; ctx.save(); renderPanels(); }),
+        ]);
+
+        const bodyEl = el("div", { class: "kube-panel-body" }, [
+          el("div", { class: "toolbar" }, [
+            el("button", { class: "btn", text: "Logs", title: "Fetch the last N log lines", onclick: logsOnce }),
+            tailBtn, el("label", { class: "inline" }, ["last", tailN]),
+            el("button", { class: "btn", text: "Clear", onclick: () => { panel.output = ""; outPre.textContent = ""; ctx.save(); } }),
+            copyBtn(() => panel.output || "", "Copy"),
+          ]),
+          el("div", { class: "toolbar" }, [
+            el("span", { class: "pane-label", text: "Search folder" }), dirIn, termIn,
+            el("button", { class: "btn", text: "Search", onclick: searchFolder }),
+          ]),
+          outPre,
+          el("div", { class: "kube-cmd-bar" }, [
+            cmdInput,
+            el("button", { class: "btn primary", text: "Run", onclick: () => { runCmd(); cmdInput.value = ""; panel.cmd = ""; ctx.save(); } }),
+          ]),
+        ]);
+        bodyEl.style.display = panel.minimized ? "none" : "";
+
+        const cls = "kube-panel" + (maximizedId === panel.id ? " max" : "") + (panel.minimized ? " min" : "");
+        const node = el("div", { class: cls }, [head, bodyEl]);
+        outPre.scrollTop = outPre.scrollHeight;
+        return node;
+      }
+
+      // ---------- pods & connection ----------
 
       const renderPods = (pods) => {
         podBox.replaceChildren();
         if (!pods.length) return podBox.append(el("div", { class: "status-line dim", text: "No pods matched." }));
         const table = el("table", { class: "kv" }, [
-          el("tr", {}, [el("th", { text: "" }), el("th", { text: "Pod" }), el("th", { text: "Status" }), el("th", { text: "Containers" })]),
+          el("tr", {}, [el("th", { text: "Pod" }), el("th", { text: "Status" }), el("th", { text: "Containers — click to open a terminal" })]),
         ]);
         for (const p of pods) {
-          const check = el("input", { type: "checkbox" });
-          check.checked = d.selected.includes(p.name);
-          const toggle = () => {
-            if (d.selected.includes(p.name)) d.selected = d.selected.filter((n) => n !== p.name);
-            else d.selected.push(p.name);
-            check.checked = d.selected.includes(p.name);
-            row.classList.toggle("selected", check.checked);
-            ctx.save();
-          };
-          check.addEventListener("click", (e) => { e.stopPropagation(); toggle(); });
-          const row = el("tr", { class: "pod-row" + (check.checked ? " selected" : ""), onclick: toggle }, [
-            el("td", {}, [check]),
+          const containers = (p.containers || []).length ? p.containers : [""];
+          table.append(el("tr", {}, [
             el("td", { text: p.name }),
             el("td", { text: p.status }),
-            el("td", { text: (p.containers || []).join(", ") }),
-          ]);
-          table.append(row);
+            el("td", {}, containers.map((cn) =>
+              el("button", { class: "btn chip", text: cn || "(default)", title: "Open a terminal panel for this container", onclick: () => openPanel(p.name, cn) })
+            )),
+          ]));
         }
         podBox.append(table);
       };
@@ -855,8 +977,7 @@
           d.context = ctxSel.value || "";
           ctx.save();
         } catch (e) {
-          // no kubeconfig contexts is fine when a direct API server is set
-          if (!d.server) return setStatus(status, "✗ " + e.message, "err");
+          return setStatus(status, "✗ " + e.message, "err");
         }
         await loadNamespaces();
       }
@@ -879,86 +1000,223 @@
           const r = await api("GET", "/api/kube/pods?" + connQS() +
             "&namespace=" + encodeURIComponent(d.namespace) + "&query=" + encodeURIComponent(d.podQuery || ""));
           renderPods(r.pods || []);
-          setStatus(status, `✓ ${r.pods.length} pod(s)`, "ok");
-        } catch (e) {
-          setStatus(status, "✗ " + e.message, "err");
-        }
-      }
-      async function fetchLogs() {
-        if (!d.selected.length) return setStatus(status, "✗ Select at least one pod", "err");
-        if (d.source === "file" && !(d.filePath || "").trim()) {
-          return setStatus(status, "✗ Enter the log file path inside the pod", "err");
-        }
-        setStatus(status, "Fetching logs…", "dim");
-        try {
-          const r = await api("POST", "/api/kube/logs", {
-            context: d.context, server: d.server, token: d.token, insecure: d.insecureTLS,
-            sshHost: d.sshHost, sshPort: d.sshPort, sshKey: d.sshKey, sshPassword: d.sshPassword,
-            namespace: d.namespace, pods: d.selected,
-            container: d.container, tail: Number(d.tail) || 2000,
-            sinceMinutes: Number(d.sinceMinutes) || 0,
-            grep: d.grep, grepRegex: d.grepRegex,
-            source: d.source || "stdout", filePath: d.filePath,
-          });
-          d.output = r.lines;
-          ctx.save();
-          renderLogs();
-          const errs = (r.errors || []).length ? ` · errors: ${r.errors.join("; ")}` : "";
-          setStatus(status, `✓ ${r.matched}/${r.total} lines${r.truncated ? " (truncated)" : ""}${errs}`, errs ? "err" : "ok");
+          setStatus(status, `✓ ${r.pods.length} pod(s) — click a container to open a terminal`, "ok");
         } catch (e) {
           setStatus(status, "✗ " + e.message, "err");
         }
       }
 
       ctxSel.addEventListener("change", () => { d.context = ctxSel.value; ctx.save(); loadNamespaces(); });
-      nsSel.addEventListener("change", () => { d.namespace = nsSel.value; d.selected = []; ctx.save(); });
+      nsSel.addEventListener("change", () => { d.namespace = nsSel.value; ctx.save(); });
       podQuery.addEventListener("keydown", (e) => { if (e.key === "Enter") loadPods(); });
 
       const field = (label, node) => el("div", { class: "field" }, [el("span", { text: label }), node]);
-      const filePathField = field("Log file path", filePath);
-      const sinceField = field("Since (min)", since);
-      const syncSource = () => {
-        const fileMode = d.source === "file";
-        filePathField.style.display = fileMode ? "" : "none";
-        sinceField.style.display = fileMode ? "none" : "";
-      };
 
       root.append(
         el("div", { class: "form-grid" }, [
-          field("SSH host — kubectl runs here (optional)", sshHost),
+          field("SSH host — kubectl runs here", sshHost),
           field("SSH port", sshPort),
-          field("SSH password (or use key/agent)", sshPassword),
-          field("SSH key", sshKey),
-          field("API server (optional)", server),
-          field("Token", token),
-          el("label", { class: "inline", style: "padding-bottom:8px" }, [insecureTLS, "skip TLS verify"]),
+          field("SSH password", sshPassword),
+          el("button", { class: "btn", text: "⟳ Connect", title: "Load contexts & namespaces", onclick: loadContexts }),
         ]),
         el("div", { class: "form-grid" }, [
-          el("button", { class: "btn", text: "⟳ Connect", title: "Load contexts & namespaces", onclick: loadContexts }),
           field("Context", ctxSel),
           field("Namespace", nsSel),
           field("Service / pod filter", podQuery),
           el("button", { class: "btn primary", text: "Find pods", onclick: loadPods }),
         ]),
         podBox,
-        el("div", { class: "form-grid" }, [
-          field("Log source", sourceSel),
-          filePathField,
-          field("Container", container),
-          field("Tail lines", tail),
-          sinceField,
-          field("Search in logs", grep),
-          el("label", { class: "inline", style: "padding-bottom:8px" }, [grepRegex, "regex"]),
-          el("button", { class: "btn primary", text: "Fetch logs", onclick: fetchLogs }),
-          copyBtn(() => (d.output || []).join("\n"), "Copy logs"),
-        ]),
         status,
-        logPre
+        panelsArea
       );
-      syncSource();
-      renderLogs();
+      renderPanels();
       if (d.context) fillSelect(ctxSel, [d.context], d.context);
       if (d.namespace) fillSelect(nsSel, [d.namespace], d.namespace);
+    },
+  });
+
+  // ======================================================================
+  // SSH / PuTTY — multiple SSH terminal sessions in one tab, with a shared
+  // command bar that broadcasts to all sessions (MobaXterm-style multi-exec)
+  // ======================================================================
+  // Live terminals must survive the tool being re-rendered on every tab
+  // switch, so their xterm instances, WebSockets and panel DOM nodes live in
+  // a module-level registry keyed by tab id (never serialized).
+  const puttyReg = {};
+
+  registerTool({
+    type: "putty",
+    icon: "🖥️",
+    name: "SSH / PuTTY",
+    desc: "Interactive SSH terminals (real PTY over WebSocket): multiple sessions in one tab, broadcast typing to all, minimize/maximize/close each.",
+    defaults: () => ({ sessions: [], newHost: "", newPort: "22", newUser: "", newPass: "", shared: "" }),
+    render(root, tab, ctx) {
+      const d = tab.data;
+      if (!Array.isArray(d.sessions)) d.sessions = [];
+      if (!puttyReg[tab.id]) puttyReg[tab.id] = { rt: {}, nodes: {}, maximizedId: null, resizeWired: false };
+      const reg = puttyReg[tab.id];
+      const rt = reg.rt;      // session id → { term, fit, ws, wired }
+      const nodes = reg.nodes; // session id → persistent panel DOM node
+
+      const status = el("div", { class: "status-line dim" });
+      const panelsArea = el("div", { class: "kube-panels" });
+      const hasXterm = typeof window.Terminal === "function" && window.FitAddon;
+
+      const themeColors = () => {
+        const dark = document.documentElement.getAttribute("data-theme") === "dark";
+        return dark
+          ? { background: "#0f1117", foreground: "#d8dce8", cursor: "#5b8cff" }
+          : { background: "#ffffff", foreground: "#1f2430", cursor: "#3b6fdb" };
+      };
+
+      function connect(s) {
+        const r = rt[s.id];
+        if (!r || !r.term) return;
+        const proto = location.protocol === "https:" ? "wss" : "ws";
+        const ws = new WebSocket(proto + "://" + location.host + "/api/ssh/pty");
+        ws.binaryType = "arraybuffer";
+        r.ws = ws;
+        ws.onopen = () => {
+          try { r.fit.fit(); } catch (e) { /* not laid out yet */ }
+          ws.send(JSON.stringify({ type: "start", host: s.host, port: s.port, username: s.username, password: s.password, cols: r.term.cols, rows: r.term.rows }));
+          r.term.focus();
+        };
+        ws.onmessage = (ev) => {
+          if (typeof ev.data === "string") r.term.write(ev.data);
+          else r.term.write(new Uint8Array(ev.data));
+        };
+        ws.onclose = () => { try { r.term.write("\r\n\x1b[33m[disconnected — use ⟳ to reconnect]\x1b[0m\r\n"); } catch (e) {} };
+        ws.onerror = () => {};
+      }
+
+      function ensureTerm(s, hostEl) {
+        let r = rt[s.id];
+        if (r && r.wired) {
+          try {
+            r.fit.fit();
+            if (r.ws && r.ws.readyState === 1) r.ws.send(JSON.stringify({ type: "resize", cols: r.term.cols, rows: r.term.rows }));
+          } catch (e) { /* ignore */ }
+          return;
+        }
+        const term = new Terminal({ fontFamily: "ui-monospace, Menlo, Consolas, monospace", fontSize: 12, cursorBlink: true, scrollback: 5000, theme: themeColors() });
+        const fit = new FitAddon.FitAddon();
+        term.loadAddon(fit);
+        term.open(hostEl);
+        try { fit.fit(); } catch (e) { /* ignore */ }
+        term.onData((data) => { const w = rt[s.id] && rt[s.id].ws; if (w && w.readyState === 1) w.send(JSON.stringify({ type: "input", data })); });
+        term.onResize(({ cols, rows }) => { const w = rt[s.id] && rt[s.id].ws; if (w && w.readyState === 1) w.send(JSON.stringify({ type: "resize", cols, rows })); });
+        rt[s.id] = { term, fit, ws: null, wired: true };
+        connect(s);
+      }
+
+      function reconnect(s) {
+        const r = rt[s.id];
+        if (r && r.ws) { try { r.ws.close(); } catch (e) {} }
+        if (r && r.term) r.term.write("\r\n\x1b[36m[reconnecting…]\x1b[0m\r\n");
+        connect(s);
+      }
+
+      function disposeSession(s) {
+        const r = rt[s.id];
+        if (r) {
+          try { r.ws && r.ws.close(); } catch (e) {}
+          try { r.term && r.term.dispose(); } catch (e) {}
+          delete rt[s.id];
+        }
+        delete nodes[s.id];
+      }
+
+      function buildNode(s) {
+        const hostEl = el("div", { class: "term-host" });
+        const headBtn = (txt, title, fn) => el("button", { class: "icon-btn", text: txt, title, onclick: fn });
+        const castBtn = el("button", {
+          class: "icon-btn cast" + (s.broadcast ? " on" : ""),
+          text: s.broadcast ? "📡 on" : "📡 off",
+          title: "Include this session when broadcasting a shared command",
+          onclick: () => { s.broadcast = !s.broadcast; castBtn.className = "icon-btn cast" + (s.broadcast ? " on" : ""); castBtn.textContent = s.broadcast ? "📡 on" : "📡 off"; ctx.save(); },
+        });
+        const body = el("div", { class: "kube-panel-body term-body" }, [hostEl]);
+        const head = el("div", { class: "kube-panel-head" }, [
+          el("span", { class: "kube-panel-title", text: (s.username ? s.username + "@" : "") + s.host + ":" + s.port }),
+          castBtn,
+          headBtn("⟳", "Reconnect", () => reconnect(s)),
+          headBtn("▾", "Minimize / expand", () => { s.minimized = !s.minimized; ctx.save(); renderPanels(); }),
+          headBtn("🗖", "Maximize / restore", () => { reg.maximizedId = reg.maximizedId === s.id ? null : s.id; renderPanels(); }),
+          headBtn("×", "Close session", () => { disposeSession(s); d.sessions = d.sessions.filter((x) => x.id !== s.id); if (reg.maximizedId === s.id) reg.maximizedId = null; ctx.save(); renderPanels(); }),
+        ]);
+        const node = el("div", { class: "kube-panel term-panel" }, [head, body]);
+        node._hostEl = hostEl;
+        node._body = body;
+        return node;
+      }
+
+      function renderPanels() {
+        panelsArea.replaceChildren();
+        if (!hasXterm) { panelsArea.append(el("div", { class: "status-line err", text: "Terminal component failed to load." })); return; }
+        if (!d.sessions.length) { panelsArea.append(el("div", { class: "status-line dim", text: "No sessions. Add a host above and click “Open session”." })); return; }
+        const list = reg.maximizedId ? d.sessions.filter((s) => s.id === reg.maximizedId) : d.sessions;
+        for (const s of list) {
+          if (!nodes[s.id]) nodes[s.id] = buildNode(s);
+          const node = nodes[s.id];
+          node.className = "kube-panel term-panel" + (reg.maximizedId === s.id ? " max" : "") + (s.minimized ? " min" : "");
+          node._body.style.display = s.minimized ? "none" : "";
+          panelsArea.append(node);
+          if (!s.minimized) requestAnimationFrame(() => ensureTerm(s, node._hostEl));
+        }
+      }
+
+      function openSession() {
+        if (!(d.newHost || "").trim()) return setStatus(status, "✗ Enter a host (or user@host)", "err");
+        d.sessions.push({ id: uid(), host: d.newHost.trim(), port: (d.newPort || "22").trim() || "22", username: (d.newUser || "").trim(), password: d.newPass || "", minimized: false, broadcast: true });
+        reg.maximizedId = null;
+        ctx.save();
+        renderPanels();
+        setStatus(status, "", "dim");
+      }
+
+      const runShared = () => {
+        const cmd = (d.shared || "").trim();
+        if (!cmd) return;
+        const targets = d.sessions.filter((s) => s.broadcast && rt[s.id] && rt[s.id].ws && rt[s.id].ws.readyState === 1);
+        if (!targets.length) return setStatus(status, "✗ No connected sessions have broadcast (📡) enabled", "err");
+        for (const s of targets) rt[s.id].ws.send(JSON.stringify({ type: "input", data: cmd + "\n" }));
+        setStatus(status, `✓ Sent to ${targets.length} session(s)`, "ok");
+      };
+
+      const sharedInput = bindField(el("input", { type: "text", class: "kube-cmd", placeholder: "shared command — typed into every session with 📡 on" }), d, "shared", ctx);
+      sharedInput.addEventListener("keydown", (e) => { if (e.key === "Enter") runShared(); });
+
+      const field = (label, node) => el("div", { class: "field" }, [el("span", { text: label }), node]);
+      const newHost = bindField(el("input", { type: "text", placeholder: "user@host", style: "min-width:180px" }), d, "newHost", ctx);
+      const newPort = bindField(el("input", { type: "text", placeholder: "22", style: "width:70px" }), d, "newPort", ctx);
+      const newUser = bindField(el("input", { type: "text", placeholder: "(or set in host)", style: "width:130px" }), d, "newUser", ctx);
+      const newPass = bindField(el("input", { type: "password", placeholder: "password", style: "min-width:150px" }), d, "newPass", ctx);
+      newPass.addEventListener("keydown", (e) => { if (e.key === "Enter") openSession(); });
+
+      root.append(
+        el("div", { class: "form-grid" }, [
+          field("Host", newHost), field("Port", newPort), field("User", newUser), field("Password", newPass),
+          el("button", { class: "btn primary", text: "+ Open session", onclick: openSession }),
+        ]),
+        el("div", { class: "toolbar" }, [
+          el("span", { class: "pane-label", text: "Broadcast typing" }),
+          sharedInput,
+          el("button", { class: "btn", text: "Send to all 📡", onclick: runShared }),
+        ]),
+        status,
+        panelsArea
+      );
+      renderPanels();
+
+      if (!reg.resizeWired) {
+        reg.resizeWired = true;
+        window.addEventListener("resize", () => {
+          for (const s of d.sessions) {
+            const r = rt[s.id];
+            if (r && r.fit && !s.minimized) { try { r.fit.fit(); } catch (e) {} }
+          }
+        });
+      }
     },
   });
 
@@ -1319,9 +1577,15 @@
     // connection payload with numeric timeout (form fields store strings)
     const kconn = () => ({ ...conn, timeoutMs: Number(conn.timeoutMs) || 1000 });
 
-    const topic = el("input", { type: "text", placeholder: "topic", style: "min-width:200px" });
+    // topic dropdown: populated by "List topics", still lets you type a custom one
+    const topicList = el("datalist", { id: "kafka-topics-" + c.id });
+    const topic = el("input", { type: "text", placeholder: "topic — type or pick ▾", list: topicList.id, style: "min-width:220px" });
     topic.value = c.topic || "";
     topic.addEventListener("input", () => { c.topic = topic.value.trim(); ctx.save(); });
+    const fillTopics = () => {
+      topicList.replaceChildren(...(c.topics || []).map((t) =>
+        el("option", { value: t.name, text: `${t.name} (${t.partitions}p)` })));
+    };
     const max = el("input", { type: "number", min: "1", max: "500", style: "width:80px" });
     max.value = c.max || "50";
     max.addEventListener("input", () => { c.max = max.value; ctx.save(); });
@@ -1356,18 +1620,6 @@
 
     const draw = () => {
       out.replaceChildren();
-      if (Array.isArray(c.topics)) {
-        out.append(
-          el("span", { class: "pane-label", text: `Topics (${c.topics.length}) — click to select` }),
-          el("table", { class: "kv" }, [
-            el("tr", {}, [el("th", { text: "Topic" }), el("th", { text: "Partitions" })]),
-            ...c.topics.map((t) => el("tr", {
-              class: "pod-row",
-              onclick: () => { c.topic = t.name; topic.value = t.name; ctx.save(); },
-            }, [el("td", { text: t.name }), el("td", { text: String(t.partitions) })])),
-          ])
-        );
-      }
       if (Array.isArray(c.messages)) {
         out.append(
           el("span", { class: "pane-label", text: `Messages (${c.messages.length}, oldest first)` }),
@@ -1390,8 +1642,8 @@
         const r = await api("POST", "/api/kafka/topics", { conn: kconn() });
         c.topics = r.topics;
         ctx.save();
-        draw();
-        setStatus(status, `✓ ${r.topics.length} topic(s)`, "ok");
+        fillTopics();
+        setStatus(status, `✓ ${r.topics.length} topic(s) — open the Topic dropdown to pick one`, "ok");
       } catch (e) {
         setStatus(status, "✗ " + e.message, "err");
       }
@@ -1443,6 +1695,7 @@
     };
 
     body.append(
+      topicList,
       el("div", { class: "toolbar" }, [
         el("button", { class: "btn", text: "List topics", onclick: listTopics }),
         topic,
@@ -1465,6 +1718,7 @@
       out
     );
     syncFrom();
+    fillTopics();
     draw();
   }
 
