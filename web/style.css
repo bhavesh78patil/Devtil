@@ -536,8 +536,10 @@ a.sftp-dir:hover, a.sftp-file:hover { color: var(--accent); text-decoration: und
 
 /* Kafka message value cells */
 .btn.xs { padding: 1px 8px; font-size: 11px; }
-table.kafka-msgs { table-layout: fixed; }
-table.kafka-msgs td.nowrap { white-space: nowrap; width: 1%; word-break: normal; }
+/* keep P/Offset, Time (and the Key header) as narrow as their content */
+table.kafka-msgs td.nowrap, table.kafka-msgs th.nowrap { white-space: nowrap; width: 1%; word-break: normal; }
+/* cap the Key column so a long key can't steal width from Value (full key on hover) */
+table.kafka-msgs td.kafka-key { max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; word-break: normal; }
 .kafka-val-cell { vertical-align: top; }
 .kafka-val-tools { display: flex; gap: 4px; margin-bottom: 4px; flex-wrap: wrap; }
 .kafka-val-pre {
