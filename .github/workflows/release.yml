@@ -25,6 +25,8 @@ jobs:
           go-version: "1.25"
       - name: Cross-compile
         run: make cross
+      - name: Checksums
+        run: cd dist && sha256sum * > SHA256SUMS && cat SHA256SUMS
       - uses: actions/upload-artifact@v4
         with:
           name: devtil-binaries
@@ -33,6 +35,7 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
+          body_path: RELEASE_NOTES.md
           files: dist/*
 
   desktop:
@@ -76,4 +79,5 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
+          body_path: RELEASE_NOTES.md
           files: ${{ matrix.artifact }}
