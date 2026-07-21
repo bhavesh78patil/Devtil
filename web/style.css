@@ -534,6 +534,48 @@ a.sftp-dir:hover, a.sftp-file:hover { color: var(--accent); text-decoration: und
 .es-conds { display: flex; flex-direction: column; gap: 6px; margin: 4px 0; }
 .es-conds .header-row { align-items: center; }
 
+/* Kafka message value cells */
+.btn.xs { padding: 1px 8px; font-size: 11px; }
+table.kafka-msgs { table-layout: fixed; }
+table.kafka-msgs td.nowrap { white-space: nowrap; width: 1%; word-break: normal; }
+.kafka-val-cell { vertical-align: top; }
+.kafka-val-tools { display: flex; gap: 4px; margin-bottom: 4px; flex-wrap: wrap; }
+.kafka-val-pre {
+  margin: 0;
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow: auto;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 6px 8px;
+}
+.kafka-val-pre.collapsed { max-height: 4.6em; }
+
+/* full-screen JSON viewer modal */
+.json-modal-overlay {
+  position: fixed; inset: 0;
+  background: var(--overlay);
+  display: flex; align-items: center; justify-content: center;
+  z-index: 200;
+}
+.json-modal {
+  width: min(1000px, 92vw);
+  height: min(80vh, 900px);
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  display: flex;
+  flex-direction: column;
+  padding: 12px;
+  gap: 10px;
+}
+.json-modal-head { display: flex; align-items: center; gap: 10px; }
+.json-modal-title { flex: 1; font-weight: 600; font-family: var(--mono); font-size: 13px; }
+
 .form-grid { display: flex; flex-wrap: wrap; gap: 8px; align-items: end; }
 .form-grid .field { display: flex; flex-direction: column; gap: 4px; }
 .form-grid .field > span { font-size: 11px; color: var(--text-dim); }
