@@ -1,6 +1,6 @@
 :root {
   /* Claude / Anthropic warm-cream light theme (default) */
-  --bg: #faf9f5;          /* canvas */
+  --bg: #f5f0e8;          /* surface-soft canvas */
   --bg2: #fffdf7;         /* panels / inputs / cards — a hair above canvas */
   --bg3: #efe9de;         /* surface-card — hovers, chips, active */
   --border: #e6dfd8;      /* hairline */
