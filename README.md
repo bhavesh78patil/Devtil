@@ -150,6 +150,27 @@ npm run dist                # package a .dmg / .exe installer (electron-builder)
 The Electron shell spawns the Go binary, waits for it to become healthy, and
 opens the UI in an app window; quitting the app stops the backend.
 
+### Auto-update
+
+The desktop app checks GitHub Releases for a newer version on launch (and every
+6 hours) and nudges the user — implemented with
+[`electron-updater`](https://www.electron.build/auto-update) in
+`desktop/updater.js`:
+
+- **Windows** — the update downloads silently in the background and installs on
+  the next restart. A true auto-update; works even for the unsigned build.
+- **macOS** — Squirrel.Mac can only *install* an update when the app is signed
+  with a paid Apple Developer ID (this build is only ad-hoc signed), so the app
+  nudges the user and opens the release download page instead. Once real
+  signing + notarization is wired up, set `MAC_CAN_SELFINSTALL = true` in
+  `desktop/updater.js` and mac auto-installs too.
+
+For the updater to work, each release must carry the update metadata
+(`latest.yml` / `latest-mac.yml`, the `.blockmap`s, and the mac `.zip`) — the
+release workflow attaches these automatically. **Bump `desktop/package.json`
+`version` to match the release tag** (tag `v1.2.0` → version `1.2.0`) so the
+running app compares versions correctly.
+
 ## Cross-compiling the backend
 
 ```sh
@@ -165,7 +186,9 @@ devtil:
   download, `chmod +x`, run; the UI opens in the browser.
 - **Native desktop installers** — a macOS `.dmg` and a Windows setup `.exe`
   built with Electron on real mac/windows runners (unsigned by default; add
-  signing secrets to ship signed builds).
+  signing secrets to ship signed builds). Each release also carries the
+  `electron-updater` metadata so installed apps auto-update (see
+  [Auto-update](#auto-update)).
 
 Push a tag like `v1.0.0` and all artifacts are attached to the GitHub
 Release automatically; the workflow can also be run manually from the

@@ -54,7 +54,10 @@ Pick one:
   - macOS Intel: `devtil-darwin-amd64`
   - Windows: `devtil-windows-amd64.exe`
   - Linux: `devtil-linux-amd64`
-- **Native desktop app** — the macOS `.dmg` or Windows setup `.exe`.
+- **Native desktop app** — the macOS `.dmg` or Windows setup `.exe`. The
+  desktop app **auto-updates**: it checks for new releases on launch and, on
+  Windows, downloads and installs them in the background (restart to finish);
+  on macOS it nudges you to download the new version.
 
 Verify a download against `SHA256SUMS` if provided.
 
