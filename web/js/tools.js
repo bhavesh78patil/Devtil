@@ -1115,8 +1115,8 @@
       const themeColors = () => {
         const dark = document.documentElement.getAttribute("data-theme") === "dark";
         return dark
-          ? { background: "#282c34", foreground: "#dce0e8", cursor: "#6c9dff" }
-          : { background: "#ffffff", foreground: "#1f2430", cursor: "#3b6fdb" };
+          ? { background: "#201e1b", foreground: "#faf9f5", cursor: "#e0906f" }
+          : { background: "#faf9f5", foreground: "#141413", cursor: "#cc785c" };
       };
 
       function connect(s) {
