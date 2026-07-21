@@ -525,6 +525,15 @@ details.section[open] summary { margin-bottom: 8px; }
 .term-host .xterm { height: 100%; padding: 4px; }
 .term-host .xterm-viewport::-webkit-scrollbar { width: 8px; }
 
+/* SFTP file browser */
+a.sftp-dir, a.sftp-file { color: var(--text); text-decoration: none; cursor: pointer; }
+a.sftp-dir { font-weight: 600; }
+a.sftp-dir:hover, a.sftp-file:hover { color: var(--accent); text-decoration: underline; }
+
+/* Elastic query builder conditions */
+.es-conds { display: flex; flex-direction: column; gap: 6px; margin: 4px 0; }
+.es-conds .header-row { align-items: center; }
+
 .form-grid { display: flex; flex-wrap: wrap; gap: 8px; align-items: end; }
 .form-grid .field { display: flex; flex-direction: column; gap: 4px; }
 .form-grid .field > span { font-size: 11px; color: var(--text-dim); }

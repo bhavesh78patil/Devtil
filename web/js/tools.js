@@ -1098,11 +1098,34 @@
           } catch (e) { /* ignore */ }
           return;
         }
-        const term = new Terminal({ fontFamily: "ui-monospace, Menlo, Consolas, monospace", fontSize: 12, cursorBlink: true, scrollback: 5000, theme: themeColors() });
+        const term = new Terminal({ fontFamily: "ui-monospace, Menlo, Consolas, monospace", fontSize: 12, cursorBlink: true, scrollback: 5000, rightClickSelectsWord: true, theme: themeColors() });
         const fit = new FitAddon.FitAddon();
         term.loadAddon(fit);
         term.open(hostEl);
         try { fit.fit(); } catch (e) { /* ignore */ }
+        // clipboard: Ctrl+Shift+C copies the selection, Ctrl+Shift+V pastes.
+        // (plain Ctrl+C must stay as SIGINT for the shell.)
+        term.attachCustomKeyEventHandler((e) => {
+          if (e.type !== "keydown") return true;
+          if (e.ctrlKey && e.shiftKey && (e.key === "C" || e.key === "c")) {
+            const sel = term.getSelection();
+            if (sel) navigator.clipboard.writeText(sel).catch(() => {});
+            return false;
+          }
+          if (e.ctrlKey && e.shiftKey && (e.key === "V" || e.key === "v")) {
+            navigator.clipboard.readText().then((t) => {
+              const w = rt[s.id] && rt[s.id].ws;
+              if (t && w && w.readyState === 1) w.send(JSON.stringify({ type: "input", data: t }));
+            }).catch(() => {});
+            return false;
+          }
+          return true;
+        });
+        // copy the selection to the clipboard as soon as it's made (xterm/Linux style)
+        term.onSelectionChange(() => {
+          const sel = term.getSelection();
+          if (sel) navigator.clipboard.writeText(sel).catch(() => {});
+        });
         term.onData((data) => { const w = rt[s.id] && rt[s.id].ws; if (w && w.readyState === 1) w.send(JSON.stringify({ type: "input", data })); });
         term.onResize(({ cols, rows }) => { const w = rt[s.id] && rt[s.id].ws; if (w && w.readyState === 1) w.send(JSON.stringify({ type: "resize", cols, rows })); });
         rt[s.id] = { term, fit, ws: null, wired: true };
@@ -1136,9 +1159,22 @@
           onclick: () => { s.broadcast = !s.broadcast; castBtn.className = "icon-btn cast" + (s.broadcast ? " on" : ""); castBtn.textContent = s.broadcast ? "📡 on" : "📡 off"; ctx.save(); },
         });
         const body = el("div", { class: "kube-panel-body term-body" }, [hostEl]);
+        const copySel = () => {
+          const r = rt[s.id];
+          const sel = r && r.term ? r.term.getSelection() : "";
+          if (sel) navigator.clipboard.writeText(sel).catch(() => {});
+        };
+        const pasteClip = () => {
+          navigator.clipboard.readText().then((t) => {
+            const w = rt[s.id] && rt[s.id].ws;
+            if (t && w && w.readyState === 1) w.send(JSON.stringify({ type: "input", data: t }));
+          }).catch(() => {});
+        };
         const head = el("div", { class: "kube-panel-head" }, [
           el("span", { class: "kube-panel-title", text: (s.username ? s.username + "@" : "") + s.host + ":" + s.port }),
           castBtn,
+          headBtn("⧉", "Copy selection (Ctrl+Shift+C, or auto-copies on select)", copySel),
+          headBtn("📋", "Paste (Ctrl+Shift+V)", pasteClip),
           headBtn("⟳", "Reconnect", () => reconnect(s)),
           headBtn("▾", "Minimize / expand", () => { s.minimized = !s.minimized; ctx.save(); renderPanels(); }),
           headBtn("🗖", "Maximize / restore", () => { reg.maximizedId = reg.maximizedId === s.id ? null : s.id; renderPanels(); }),
@@ -1217,6 +1253,122 @@
           }
         });
       }
+    },
+  });
+
+  // ======================================================================
+  // SFTP / Files — WinSCP-style remote file browser: list directories,
+  // navigate, and download files to your machine (password SSH)
+  // ======================================================================
+  registerTool({
+    type: "sftp",
+    icon: "📁",
+    name: "SFTP / Files",
+    desc: "Browse a remote host's files over SFTP (password auth) and download them to your machine — WinSCP-style listing and download.",
+    defaults: () => ({ host: "", port: "22", username: "", password: "", path: "", entries: [] }),
+    render(root, tab, ctx) {
+      const d = tab.data;
+      if (!Array.isArray(d.entries)) d.entries = [];
+      const status = el("div", { class: "status-line dim" });
+      const tableBox = el("div", { style: "flex:1;overflow:auto" });
+      const connOf = () => ({ host: d.host, port: d.port, username: d.username, password: d.password });
+
+      const parentOf = (p) => {
+        if (!p || p === "/") return "/";
+        const t = p.replace(/\/+$/, "");
+        const i = t.lastIndexOf("/");
+        return i <= 0 ? "/" : t.slice(0, i);
+      };
+      const joinPath = (dir, name) => (dir === "/" ? "" : dir.replace(/\/+$/, "")) + "/" + name;
+
+      const pathInput = el("input", { type: "text", placeholder: "/home/user (blank = home)", style: "flex:1;min-width:200px" });
+      pathInput.value = d.path || "";
+      pathInput.addEventListener("keydown", (e) => { if (e.key === "Enter") list(pathInput.value.trim()); });
+
+      async function list(p) {
+        if (!(d.host || "").trim()) return setStatus(status, "✗ Enter a host first", "err");
+        setStatus(status, "Listing…", "dim");
+        try {
+          const r = await api("POST", "/api/sftp/list", { conn: connOf(), path: p || "" });
+          d.path = r.path;
+          d.entries = r.entries || [];
+          pathInput.value = r.path;
+          ctx.save();
+          renderTable();
+          setStatus(status, `✓ ${d.entries.length} item(s) in ${r.path}`, "ok");
+        } catch (e) {
+          setStatus(status, "✗ " + e.message, "err");
+        }
+      }
+
+      async function download(entry) {
+        const full = joinPath(d.path || "/", entry.name);
+        setStatus(status, "Downloading " + entry.name + "…", "dim");
+        try {
+          const res = await fetch("/api/sftp/download", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ conn: connOf(), path: full }),
+          });
+          if (!res.ok) {
+            const err = await res.json().catch(() => ({}));
+            throw new Error(err.error || res.status + " " + res.statusText);
+          }
+          const blob = await res.blob();
+          const url = URL.createObjectURL(blob);
+          const a = el("a", { href: url, download: entry.name });
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+          setTimeout(() => URL.revokeObjectURL(url), 15000);
+          setStatus(status, `✓ Downloaded ${entry.name} (${fmtBytes(blob.size)})`, "ok");
+        } catch (e) {
+          setStatus(status, "✗ " + e.message, "err");
+        }
+      }
+
+      function renderTable() {
+        tableBox.replaceChildren();
+        if (!d.entries.length) { tableBox.append(el("div", { class: "status-line dim", text: "Empty directory." })); return; }
+        const table = el("table", { class: "kv" }, [
+          el("tr", {}, [el("th", { text: "Name" }), el("th", { text: "Size" }), el("th", { text: "Modified" }), el("th", { text: "" })]),
+        ]);
+        for (const e of d.entries) {
+          const nameCell = e.isDir
+            ? el("td", {}, [el("a", { href: "#", class: "sftp-dir", text: "📂 " + e.name, onclick: (ev) => { ev.preventDefault(); list(joinPath(d.path || "/", e.name)); } })])
+            : el("td", {}, [el("a", { href: "#", class: "sftp-file", text: "📄 " + e.name, title: "Download", onclick: (ev) => { ev.preventDefault(); download(e); } })]);
+          table.append(el("tr", {}, [
+            nameCell,
+            el("td", { text: e.isDir ? "—" : fmtBytes(e.size) }),
+            el("td", { text: (e.modTime || "").replace("T", " ").replace("Z", "") }),
+            el("td", {}, e.isDir ? [] : [el("button", { class: "btn", text: "Download", onclick: () => download(e) })]),
+          ]));
+        }
+        tableBox.append(table);
+      }
+
+      const field = (label, node) => el("div", { class: "field" }, [el("span", { text: label }), node]);
+      const hostIn = bindField(el("input", { type: "text", placeholder: "user@host", style: "min-width:180px" }), d, "host", ctx);
+      const portIn = bindField(el("input", { type: "text", placeholder: "22", style: "width:70px" }), d, "port", ctx);
+      const userIn = bindField(el("input", { type: "text", placeholder: "(or set in host)", style: "width:130px" }), d, "username", ctx);
+      const passIn = bindField(el("input", { type: "password", placeholder: "password", style: "min-width:150px" }), d, "password", ctx);
+      passIn.addEventListener("keydown", (e) => { if (e.key === "Enter") list(""); });
+
+      root.append(
+        el("div", { class: "form-grid" }, [
+          field("Host", hostIn), field("Port", portIn), field("User", userIn), field("Password", passIn),
+          el("button", { class: "btn primary", text: "Connect", onclick: () => list("") }),
+        ]),
+        el("div", { class: "toolbar" }, [
+          el("button", { class: "btn", text: "⬆ Up", title: "Parent directory", onclick: () => list(parentOf(d.path || "/")) }),
+          el("button", { class: "btn", text: "⟳", title: "Refresh", onclick: () => list(d.path || "") }),
+          el("span", { class: "pane-label", text: "Path" }),
+          pathInput,
+          el("button", { class: "btn", text: "Go", onclick: () => list(pathInput.value.trim()) }),
+        ]),
+        status,
+        tableBox
+      );
+      renderTable();
     },
   });
 
@@ -1577,14 +1729,24 @@
     // connection payload with numeric timeout (form fields store strings)
     const kconn = () => ({ ...conn, timeoutMs: Number(conn.timeoutMs) || 1000 });
 
-    // topic dropdown: populated by "List topics", still lets you type a custom one
-    const topicList = el("datalist", { id: "kafka-topics-" + c.id });
-    const topic = el("input", { type: "text", placeholder: "topic — type or pick ▾", list: topicList.id, style: "min-width:220px" });
+    // topic picker: a real dropdown populated by "List topics", plus a text
+    // field for typing a custom topic. Either keeps c.topic in sync.
+    const topic = el("input", { type: "text", placeholder: "topic name", style: "min-width:160px" });
     topic.value = c.topic || "";
-    topic.addEventListener("input", () => { c.topic = topic.value.trim(); ctx.save(); });
+    topic.addEventListener("input", () => { c.topic = topic.value.trim(); topicSel.value = topic.value.trim(); ctx.save(); });
+    const topicSel = el("select", { style: "min-width:200px" });
+    topicSel.addEventListener("change", () => {
+      if (!topicSel.value) return;
+      c.topic = topicSel.value;
+      topic.value = topicSel.value;
+      ctx.save();
+    });
     const fillTopics = () => {
-      topicList.replaceChildren(...(c.topics || []).map((t) =>
-        el("option", { value: t.name, text: `${t.name} (${t.partitions}p)` })));
+      const opts = [el("option", { value: "", text: (c.topics && c.topics.length) ? `— pick a topic (${c.topics.length}) —` : "— List topics first —" })];
+      for (const t of (c.topics || [])) opts.push(el("option", { value: t.name, text: `${t.name} (${t.partitions}p)` }));
+      topicSel.replaceChildren(...opts);
+      // reflect the current topic in the dropdown if it's one of the listed ones
+      if (c.topic && (c.topics || []).some((t) => t.name === c.topic)) topicSel.value = c.topic;
     };
     const max = el("input", { type: "number", min: "1", max: "500", style: "width:80px" });
     max.value = c.max || "50";
@@ -1640,10 +1802,12 @@
       setStatus(status, "Listing topics…", "dim");
       try {
         const r = await api("POST", "/api/kafka/topics", { conn: kconn() });
-        c.topics = r.topics;
+        c.topics = r.topics || [];
         ctx.save();
         fillTopics();
-        setStatus(status, `✓ ${r.topics.length} topic(s) — open the Topic dropdown to pick one`, "ok");
+        setStatus(status, c.topics.length
+          ? `✓ ${c.topics.length} topic(s) — pick one from the dropdown`
+          : "✓ Connected, but no (non-internal) topics were returned", c.topics.length ? "ok" : "dim");
       } catch (e) {
         setStatus(status, "✗ " + e.message, "err");
       }
@@ -1695,10 +1859,10 @@
     };
 
     body.append(
-      topicList,
       el("div", { class: "toolbar" }, [
         el("button", { class: "btn", text: "List topics", onclick: listTopics }),
-        topic,
+        topicSel,
+        el("label", { class: "inline" }, ["or", topic]),
         el("label", { class: "inline" }, ["Read", fromSel]),
         startWrap,
         endWrap,
@@ -1722,13 +1886,18 @@
     draw();
   }
 
-  /** Flatten an ES mapping's properties into dotted field paths. */
-  function flattenProps(props, prefix = "") {
+  /** Flatten an ES mapping's properties into dotted field paths, recording
+      the nearest `nested`-typed ancestor path so nested queries can be built. */
+  function flattenProps(props, prefix = "", nestedPath = "") {
     let out = [];
     for (const [k, v] of Object.entries(props || {})) {
       const path = prefix ? prefix + "." + k : k;
-      if (v && v.properties) out = out.concat(flattenProps(v.properties, path));
-      else out.push({ name: path, type: (v && v.type) || "object" });
+      if (v && v.properties) {
+        const np = v.type === "nested" ? path : nestedPath;
+        out = out.concat(flattenProps(v.properties, path, np));
+      } else {
+        out.push({ name: path, type: (v && v.type) || "object", nestedPath: nestedPath || undefined });
+      }
     }
     return out;
   }
@@ -1813,8 +1982,8 @@
       if (!c.index || !Array.isArray(c.fields) || !c.fields.length) return;
       if (!Array.isArray(c.selectedFields)) c.selectedFields = c.fields.map((f) => f.name);
       fieldsBox.append(
-        el("span", { class: "pane-label", text: `Fields of ${c.index} — pick which columns to return (_source)` }),
-        colsPicker(c.fields, c.selectedFields, (next) => { c.selectedFields = next; ctx.save(); })
+        el("span", { class: "pane-label", text: `Return fields (_source) — pick which columns come back` }),
+        colsPicker(c.fields, c.selectedFields, (next) => { c.selectedFields = next; syncBody(); })
       );
     };
 
@@ -1831,7 +2000,7 @@
       }
     };
     const loadFields = async () => {
-      if (!c.index) { c.fields = []; drawFields(); return; }
+      if (!c.index) { c.fields = []; drawFields(); renderConds(); return; }
       setStatus(status, "Loading mapping…", "dim");
       try {
         const m = await esFetch("GET", encodeURIComponent(c.index) + "/_mapping");
@@ -1840,46 +2009,169 @@
         c.selectedFields = c.fields.map((f) => f.name);
         ctx.save();
         drawFields();
+        renderConds();
         setStatus(status, `✓ ${c.fields.length} field(s)`, "ok");
       } catch (e) {
         setStatus(status, "✗ " + e.message, "err");
       }
     };
-    idxSel.addEventListener("change", () => { c.index = idxSel.value; ctx.save(); loadFields(); });
+    idxSel.addEventListener("change", () => { c.index = idxSel.value; c.conds = []; ctx.save(); loadFields(); });
 
-    const buildSearch = () => {
-      if (!c.index) { setStatus(status, "✗ Pick an index first (Load indices)", "err"); return false; }
-      const q = {
-        query: (c.qText || "").trim() ? { query_string: { query: c.qText.trim() } } : { match_all: {} },
-        size: Number(c.size) || 10,
-      };
+    // ---- per-field condition builder: the clause is auto-chosen by type ----
+    const NUMERIC = ["long", "integer", "short", "byte", "double", "float", "half_float", "scaled_float", "unsigned_long"];
+    const opsFor = (type) => {
+      if (type === "text" || type === "match_only_text") return ["match", "match_phrase", "exists"];
+      if (type === "keyword" || type === "ip" || type === "constant_keyword") return ["term", "terms", "prefix", "wildcard", "exists"];
+      if (NUMERIC.includes(type)) return ["term", "gt", "gte", "lt", "lte", "between", "exists"];
+      if (type === "date") return ["gte", "lte", "between", "term", "exists"];
+      if (type === "boolean") return ["true", "false", "exists"];
+      return ["match", "term", "exists"];
+    };
+    const OP_LABEL = { match: "matches", match_phrase: "phrase", term: "= (term)", terms: "in (a,b,c)", prefix: "prefix", wildcard: "wildcard *?", gt: ">", gte: "≥", lt: "<", lte: "≤", between: "between", "true": "is true", "false": "is false", exists: "exists" };
+    const noValueOp = (op) => op === "exists" || op === "true" || op === "false";
+    const coerce = (type, v) => {
+      if (NUMERIC.includes(type)) { const n = Number(v); return v !== "" && !isNaN(n) ? n : v; }
+      if (type === "boolean") return v === "true";
+      return v;
+    };
+    const fieldByName = (name) => (c.fields || []).find((f) => f.name === name);
+
+    const clauseFor = (cond) => {
+      const f = cond.field, v = (cond.value || "").trim(), v2 = (cond.value2 || "").trim(), t = cond.type;
+      let clause;
+      switch (cond.op) {
+        case "match": clause = { match: { [f]: v } }; break;
+        case "match_phrase": clause = { match_phrase: { [f]: v } }; break;
+        case "term": clause = { term: { [f]: coerce(t, v) } }; break;
+        case "terms": clause = { terms: { [f]: v.split(",").map((s) => coerce(t, s.trim())).filter((x) => x !== "") } }; break;
+        case "prefix": clause = { prefix: { [f]: v } }; break;
+        case "wildcard": clause = { wildcard: { [f]: v } }; break;
+        case "gt": case "gte": case "lt": case "lte": clause = { range: { [f]: { [cond.op]: coerce(t, v) } } }; break;
+        case "between": clause = { range: { [f]: { gte: coerce(t, v), lte: coerce(t, v2) } } }; break;
+        case "true": clause = { term: { [f]: true } }; break;
+        case "false": clause = { term: { [f]: false } }; break;
+        case "exists": clause = { exists: { field: f } }; break;
+        default: clause = { match: { [f]: v } };
+      }
+      if (cond.nestedPath) clause = { nested: { path: cond.nestedPath, query: clause } };
+      return clause;
+    };
+
+    const condsBox = el("div", { class: "es-conds" });
+    const renderConds = () => {
+      condsBox.replaceChildren();
+      if (!c.index || !Array.isArray(c.fields) || !c.fields.length) {
+        condsBox.append(el("div", { class: "status-line dim", text: "Load an index to add field conditions." }));
+        return;
+      }
+      if (!Array.isArray(c.conds)) c.conds = [];
+      const combineSel = el("select", {}, [el("option", { value: "must", text: "ALL (AND)" }), el("option", { value: "should", text: "ANY (OR)" })]);
+      combineSel.value = c.combine || "must";
+      combineSel.addEventListener("change", () => { c.combine = combineSel.value; syncBody(); });
+      condsBox.append(el("div", { class: "toolbar" }, [
+        el("span", { class: "pane-label", text: "Where — match" }),
+        combineSel,
+        el("span", { class: "pane-label", text: "of:" }),
+        el("button", {
+          class: "btn", text: "+ Add field condition",
+          onclick: () => {
+            const f = c.fields[0];
+            c.conds.push({ field: f.name, type: f.type, nestedPath: f.nestedPath, op: opsFor(f.type)[0], value: "", value2: "" });
+            syncBody();
+            renderConds();
+          },
+        }),
+      ]));
+
+      c.conds.forEach((cond, i) => {
+        const fieldSel = el("select", { style: "min-width:200px" }, c.fields.map((f) => el("option", { value: f.name, text: `${f.name} (${f.type})${f.nestedPath ? " ⓝ" : ""}` })));
+        fieldSel.value = cond.field;
+        const opSel = el("select", {}, opsFor(cond.type).map((o) => el("option", { value: o, text: OP_LABEL[o] || o })));
+        if (!opsFor(cond.type).includes(cond.op)) cond.op = opsFor(cond.type)[0];
+        opSel.value = cond.op;
+
+        const valWrap = el("span", { style: "display:inline-flex;gap:4px;flex:1;align-items:center" });
+        const buildVals = () => {
+          valWrap.replaceChildren();
+          if (noValueOp(cond.op)) return;
+          const ph = cond.type === "date" ? "2026-01-01 or now-7d" : "value";
+          const v1 = el("input", { type: "text", placeholder: ph, style: "flex:1;min-width:90px", value: cond.value || "" });
+          v1.addEventListener("input", () => { cond.value = v1.value; syncBody(); });
+          valWrap.append(v1);
+          if (cond.op === "between") {
+            const v2 = el("input", { type: "text", placeholder: "to", style: "flex:1;min-width:90px", value: cond.value2 || "" });
+            v2.addEventListener("input", () => { cond.value2 = v2.value; syncBody(); });
+            valWrap.append(el("span", { class: "pane-label", text: "…" }), v2);
+          }
+        };
+        buildVals();
+
+        fieldSel.addEventListener("change", () => {
+          const f = fieldByName(fieldSel.value);
+          cond.field = f.name; cond.type = f.type; cond.nestedPath = f.nestedPath;
+          cond.op = opsFor(f.type)[0];
+          syncBody();
+          renderConds();
+        });
+        opSel.addEventListener("change", () => { cond.op = opSel.value; syncBody(); buildVals(); });
+
+        condsBox.append(el("div", { class: "header-row" }, [
+          fieldSel, opSel, valWrap,
+          el("button", { class: "icon-btn", text: "×", title: "Remove condition", onclick: () => { c.conds.splice(i, 1); syncBody(); renderConds(); } }),
+        ]));
+      });
+    };
+
+    const buildQueryObj = () => {
+      const clauses = (c.conds || []).filter((cond) => noValueOp(cond.op) || (cond.value || "").trim() !== "").map(clauseFor);
+      if ((c.qText || "").trim()) clauses.push({ query_string: { query: c.qText.trim() } });
+      let query;
+      if (!clauses.length) query = { match_all: {} };
+      else if (clauses.length === 1 && (c.combine || "must") === "must") query = clauses[0];
+      else {
+        const combine = c.combine || "must";
+        query = { bool: { [combine]: clauses } };
+        if (combine === "should") query.bool.minimum_should_match = 1;
+      }
+      const q = { query, size: Number(c.size) || 10 };
       const sel = c.selectedFields || [];
       if (sel.length && sel.length !== (c.fields || []).length) q._source = sel;
+      return q;
+    };
+
+    const syncBody = () => {
+      ctx.save();
+      if (!c.index) return;
       c.method = "POST";
       c.path = c.index + "/_search";
-      c.body = JSON.stringify(q, null, 2);
+      c.body = JSON.stringify(buildQueryObj(), null, 2);
       methodSel.value = c.method;
       path.value = c.path;
       reqBody.value = c.body;
-      ctx.save();
+    };
+    const buildSearch = () => {
+      if (!c.index) { setStatus(status, "✗ Pick an index first (Load indices)", "err"); return false; }
+      syncBody();
       return true;
     };
 
     const builder = el("details", { class: "section" }, [
-      el("summary", { text: "Query helper — pick an index, choose fields, build the search" }),
+      el("summary", { text: "Query builder — pick an index & fields; the query is generated from each field's schema type" }),
       el("div", { class: "toolbar" }, [
         el("button", { class: "btn", text: "Load indices", onclick: loadIndices }),
         idxSel,
-        qText,
         el("label", { class: "inline" }, ["Size", size]),
         el("button", { class: "btn", text: "Build query", onclick: buildSearch }),
         el("button", { class: "btn primary", text: "Build & search", onclick: () => { if (buildSearch()) send(c.method, c.path, c.body); } }),
       ]),
+      condsBox,
+      el("div", { class: "toolbar" }, [el("span", { class: "pane-label", text: "Extra query_string (optional)" }), qText]),
       fieldsBox,
     ]);
     if (c.index) builder.open = true;
     fillIndices();
     drawFields();
+    renderConds();
 
     body.append(
       builder,
