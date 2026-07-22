@@ -477,6 +477,11 @@ details.section[open] summary { margin-bottom: 8px; }
 .btn.chip { padding: 3px 10px; margin: 2px 4px 2px 0; font-size: 12px; }
 
 /* container terminal panels (MobaXterm-like) */
+/* Elastic console: which cluster this tab talks to */
+.es-target { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; }
+.es-target-name { font-weight: 600; color: var(--accent); font-family: var(--mono); font-size: 13px; }
+.es-target-url { color: var(--text-dim); font-family: var(--mono); font-size: 12px; word-break: break-all; }
+
 .kube-panels { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 6px; }
 .kube-panel {
   flex: 1 1 460px;

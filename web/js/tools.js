@@ -1733,6 +1733,11 @@
           }
           d.activeConnId = consoleData.connId;
           const conn = d.connections.find((c) => c.id === consoleData.connId) || null;
+          // Resolve the connection *live* from this console's own connId at call
+          // time. Request handlers must use this rather than closing over `conn`,
+          // so a console always talks to the cluster it is bound to — never a
+          // stale one captured at an earlier render.
+          const getConn = () => d.connections.find((x) => x.id === consoleData.connId) || conn;
           const body = el("div", { class: "tool", style: "flex:1" });
           mainBox.append(body);
           if (!conn) {
@@ -1742,7 +1747,7 @@
             ]));
             return;
           }
-          cfg.renderConsole(body, conn, consoleData, ctx);
+          cfg.renderConsole(body, conn, consoleData, ctx, getConn);
         }
 
         renderSide();
@@ -2188,9 +2193,24 @@
 
   /** Elasticsearch / OpenSearch console: REST requests through the proxy,
       with an index/field browser that builds _search queries. */
-  function esConsole(body, conn, c, ctx) {
+  function esConsole(body, conn, c, ctx, getConn) {
+    // Always resolve the cluster live so requests hit whatever this console tab
+    // is bound to right now, not a connection captured when the tab was drawn.
+    const cluster = () => (getConn && getConn()) || conn;
     const status = el("div", { class: "status-line dim" });
     const out = el("pre", { class: "output", style: "flex:1;min-height:160px" });
+
+    // Visible target so it's unambiguous which cluster this console talks to.
+    const target = el("div", { class: "es-target" });
+    const refreshTarget = () => {
+      const k = cluster();
+      target.replaceChildren(
+        el("span", { class: "pane-label", text: "Target cluster" }),
+        el("span", { class: "es-target-name", text: (k && k.name) || "—" }),
+        el("span", { class: "es-target-url", text: k && k.baseUrl ? "→ " + k.baseUrl : "" }),
+      );
+    };
+    refreshTarget();
 
     const methodSel = el("select", {}, ["GET", "POST", "PUT", "DELETE", "HEAD"].map((m) => el("option", { value: m, text: m })));
     methodSel.value = c.method || "GET";
@@ -2203,18 +2223,19 @@
     reqBody.addEventListener("input", () => { c.body = reqBody.value; ctx.save(); });
 
     const send = async (method, p, bodyText) => {
-      if (!conn.baseUrl) return setStatus(status, "✗ The active cluster has no base URL", "err");
+      const k = cluster();
+      if (!k || !k.baseUrl) return setStatus(status, "✗ The active cluster has no base URL", "err");
       setStatus(status, "Sending…", "dim");
       const headers = {};
       if (bodyText) headers["Content-Type"] = "application/json";
-      if (conn.username) headers["Authorization"] = "Basic " + btoa(conn.username + ":" + (conn.password || ""));
+      if (k.username) headers["Authorization"] = "Basic " + btoa(k.username + ":" + (k.password || ""));
       try {
         const r = await api("POST", "/api/proxy", {
           method,
-          url: conn.baseUrl.replace(/\/+$/, "") + "/" + String(p || "").replace(/^\/+/, ""),
+          url: k.baseUrl.replace(/\/+$/, "") + "/" + String(p || "").replace(/^\/+/, ""),
           headers,
           body: bodyText || "",
-          insecure: !!conn.insecure,
+          insecure: !!k.insecure,
         });
         let text = r.body;
         try { text = JSON.stringify(JSON.parse(r.body), null, 2); } catch { /* not JSON */ }
@@ -2235,11 +2256,12 @@
 
     // ---- query builder: index picker → field picker → generated _search ----
     const esFetch = async (method, p) => {
-      if (!conn.baseUrl) throw new Error("the active cluster has no base URL");
+      const k = cluster();
+      if (!k || !k.baseUrl) throw new Error("the active cluster has no base URL");
       const headers = {};
-      if (conn.username) headers["Authorization"] = "Basic " + btoa(conn.username + ":" + (conn.password || ""));
+      if (k.username) headers["Authorization"] = "Basic " + btoa(k.username + ":" + (k.password || ""));
       const r = await api("POST", "/api/proxy", {
-        method, url: conn.baseUrl.replace(/\/+$/, "") + "/" + p, headers, body: "", insecure: !!conn.insecure,
+        method, url: k.baseUrl.replace(/\/+$/, "") + "/" + p, headers, body: "", insecure: !!k.insecure,
       });
       if (r.status >= 400) throw new Error(r.status + " " + r.body.slice(0, 160));
       return JSON.parse(r.body);
@@ -2458,6 +2480,7 @@
     renderConds();
 
     body.append(
+      target,
       builder,
       el("div", { class: "toolbar" }, [
         quick("Cluster health", "GET", "_cluster/health"),
