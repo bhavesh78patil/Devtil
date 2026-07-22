@@ -3,7 +3,7 @@
 "use strict";
 
 (() => {
-  const { registerTool, el, escapeHtml, debounce, uid, fmtBytes, copyBtn, setStatus, api } = Devtil;
+  const { registerTool, el, escapeHtml, debounce, uid, fmtBytes, copyBtn, setStatus, api, confirmDialog } = Devtil;
 
   /** Full-screen overlay showing text JSON pretty-printed (falls back to raw). */
   function showJsonModal(title, raw) {
@@ -1572,9 +1572,9 @@
               el("button", { class: "icon-btn", text: "✎", title: "Edit", onclick: (e) => { e.stopPropagation(); editingId = c.id; adding = false; renderSide(); } }),
               el("button", {
                 class: "icon-btn", text: "×", title: "Delete " + cfg.connSingular,
-                onclick: (e) => {
+                onclick: async (e) => {
                   e.stopPropagation();
-                  if (!confirm(`Delete ${cfg.connSingular} "${c.name || cfg.connName(c)}"?`)) return;
+                  if (!(await confirmDialog(`Delete ${cfg.connSingular} "${c.name || cfg.connName(c)}"?`, { okLabel: "Delete", danger: true }))) return;
                   d.connections.splice(i, 1);
                   if (d.activeConnId === c.id) d.activeConnId = d.connections[0]?.id ?? null;
                   ctx.save();
@@ -2598,9 +2598,9 @@
               el("span", { text: padLabel(pad) }),
               el("button", {
                 class: "tab-close", text: "×", title: "Delete pad",
-                onclick: (e) => {
+                onclick: async (e) => {
                   e.stopPropagation();
-                  if ((pad.text || "").trim() && !confirm(`Delete pad "${padLabel(pad)}" and its contents?`)) return;
+                  if ((pad.text || "").trim() && !(await confirmDialog(`Delete pad "${padLabel(pad)}" and its contents?`, { okLabel: "Delete", danger: true }))) return;
                   const idx = d.pads.findIndex((x) => x.id === pad.id);
                   d.pads.splice(idx, 1);
                   if (!d.pads.length) d.pads.push(newPad());
