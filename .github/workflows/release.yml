@@ -44,10 +44,20 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Attach the installer AND the electron-updater metadata
+          # (latest*.yml + .blockmap, plus the mac .zip the mac updater reads)
+          # so the auto-updater in the app can detect and fetch new versions.
           - os: macos-latest
-            artifact: "desktop/dist/*.dmg"
+            assets: |
+              desktop/dist/*.dmg
+              desktop/dist/*.zip
+              desktop/dist/*.blockmap
+              desktop/dist/latest-mac.yml
           - os: windows-latest
-            artifact: "desktop/dist/*.exe"
+            assets: |
+              desktop/dist/*.exe
+              desktop/dist/*.blockmap
+              desktop/dist/latest.yml
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -83,10 +93,10 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: devtil-desktop-${{ matrix.os }}
-          path: ${{ matrix.artifact }}
+          path: desktop/dist/**
       - name: Attach to release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           body_path: RELEASE_NOTES.md
-          files: ${{ matrix.artifact }}
+          files: ${{ matrix.assets }}

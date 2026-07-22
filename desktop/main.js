@@ -8,6 +8,7 @@ const { spawn } = require("child_process");
 const http = require("http");
 const path = require("path");
 const fs = require("fs");
+const { initAutoUpdate } = require("./updater");
 
 const PORT = 8347;
 let backend = null;
@@ -57,6 +58,9 @@ async function createWindow() {
     shell.openExternal(target);
     return { action: "deny" };
   });
+
+  // Check GitHub Releases for a newer version and nudge / auto-install per OS.
+  initAutoUpdate();
 }
 
 app.whenReady().then(createWindow).catch((err) => {

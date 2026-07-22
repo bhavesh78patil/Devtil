@@ -9,6 +9,9 @@
     "start": "electron .",
     "dist": "electron-builder --publish never"
   },
+  "dependencies": {
+    "electron-updater": "^6.3.9"
+  },
   "devDependencies": {
     "electron": "^33.0.0",
     "electron-builder": "^25.0.0"
@@ -16,13 +19,19 @@
   "build": {
     "appId": "dev.devtil.app",
     "productName": "Devtil",
-    "files": ["main.js"],
+    "files": ["main.js", "updater.js", "package.json", "node_modules/**/*"],
     "extraResources": [{ "from": "../bin", "to": "bin" }],
     "afterPack": "build/afterPack.js",
+    "publish": [
+      { "provider": "github", "owner": "bhavesh78patil", "repo": "Devtil" }
+    ],
     "mac": {
       "category": "public.app-category.developer-tools",
       "identity": null,
-      "target": [{ "target": "dmg", "arch": ["arm64", "x64"] }]
+      "target": [
+        { "target": "dmg", "arch": ["arm64", "x64"] },
+        { "target": "zip", "arch": ["arm64", "x64"] }
+      ]
     },
     "win": { "target": "nsis" }
   }
