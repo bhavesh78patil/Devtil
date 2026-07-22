@@ -312,8 +312,8 @@ func (s *Server) dbQuery(w http.ResponseWriter, r *http.Request) {
 	switch req.Type {
 	case "cassandra":
 		res, err = clients.CassandraQuery(req.Conn, req.Query, req.MaxRows)
-	case "oracle":
-		res, err = clients.OracleQuery(req.Conn, req.Query, req.MaxRows)
+	case "oracle", "mysql", "postgres", "postgresql":
+		res, err = clients.RelationalQuery(req.Type, req.Conn, req.Query, req.MaxRows)
 	default:
 		writeError(w, http.StatusBadRequest, errString("unknown db type "+req.Type))
 		return
