@@ -4,26 +4,33 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
 
+	_ "github.com/go-sql-driver/mysql"
 	"github.com/gocql/gocql"
+	_ "github.com/lib/pq"
 	go_ora "github.com/sijms/go-ora/v2"
 
 	"github.com/bhavesh78patil/devtil/internal/logging"
 )
 
-// DBConn covers both Cassandra and Oracle connections; unused fields are
-// simply left empty by the respective tool.
+// DBConn covers Cassandra and the relational engines (Oracle, MySQL,
+// PostgreSQL); unused fields are simply left empty by the respective tool.
 type DBConn struct {
-	Hosts    string `json:"hosts"` // comma-separated; Oracle uses the first
+	Engine   string `json:"engine"`   // relational engine: oracle | mysql | postgres
+	Hosts    string `json:"hosts"`    // comma-separated; relational engines use the first
 	Port     int    `json:"port"`
 	Keyspace string `json:"keyspace"` // Cassandra
 	Service  string `json:"service"`  // Oracle service name
-	URL      string `json:"url"`      // Oracle JDBC/Easy-Connect URL (overrides host/port/service)
+	Database string `json:"database"` // MySQL / PostgreSQL database name
+	Schema   string `json:"schema"`   // Oracle owner / PostgreSQL schema (search_path)
+	URL      string `json:"url"`      // JDBC / connect URL (overrides the separate host/port fields)
 	Username string `json:"username"`
 	Password string `json:"password"`
+	Insecure bool   `json:"insecure"` // MySQL/PostgreSQL: skip TLS (sslmode=disable / tls=false)
 }
 
 // parseOracleURL extracts host/port/service from an Oracle connect string —
@@ -213,69 +220,229 @@ func CassandraQuery(conn DBConn, query string, maxRows int) (*QueryResult, error
 	return res, nil
 }
 
-// ------------------------------------------------------------------- Oracle
+// ---------------------------------------------- Relational engines (SQL)
+//
+// One code path for Oracle, MySQL and PostgreSQL over database/sql. Each
+// engine differs only in its driver name and how the connection string is
+// built (from separate host/port fields or a single URL) and in how the
+// browsing schema is applied.
 
-func OracleQuery(conn DBConn, query string, maxRows int) (*QueryResult, error) {
+// normalizeEngine maps a few common aliases to the canonical engine id.
+func normalizeEngine(e string) string {
+	switch strings.ToLower(strings.TrimSpace(e)) {
+	case "mysql", "mariadb":
+		return "mysql"
+	case "postgres", "postgresql", "pg":
+		return "postgres"
+	case "", "oracle":
+		return "oracle"
+	}
+	return strings.ToLower(strings.TrimSpace(e))
+}
+
+// buildDSN returns the database/sql driver name and connection string for the
+// given engine, honouring a full URL when one is supplied.
+func buildDSN(engine string, conn DBConn) (driver, dsn string, err error) {
+	switch engine {
+	case "oracle":
+		host, service := "", conn.Service
+		port := conn.Port
+		if port <= 0 {
+			port = 1521
+		}
+		if strings.TrimSpace(conn.URL) != "" {
+			h, p, svc, e := parseOracleURL(conn.URL)
+			if e != nil {
+				return "", "", e
+			}
+			host, port, service = h, p, svc
+		} else {
+			hosts := conn.hostList()
+			if len(hosts) == 0 || service == "" {
+				return "", "", fmt.Errorf("host and service name (or a connect URL) are required")
+			}
+			host = hosts[0]
+		}
+		return "oracle", go_ora.BuildUrl(host, port, service, conn.Username, conn.Password, nil), nil
+
+	case "mysql":
+		d, e := buildMySQLDSN(conn)
+		return "mysql", d, e
+
+	case "postgres":
+		d, e := buildPostgresDSN(conn)
+		return "postgres", d, e
+	}
+	return "", "", fmt.Errorf("unsupported engine %q", engine)
+}
+
+// buildMySQLDSN produces a go-sql-driver/mysql DSN
+// (user:pass@tcp(host:port)/db?params). It accepts a native DSN, a
+// mysql:// URL, or a jdbc:mysql:// URL in conn.URL.
+func buildMySQLDSN(conn DBConn) (string, error) {
+	params := "parseTime=true&timeout=10s"
+	if !conn.Insecure {
+		params += "&tls=preferred"
+	}
+	if u := strings.TrimSpace(conn.URL); u != "" {
+		if strings.Contains(u, "@tcp(") || strings.Contains(u, "@unix(") {
+			return u, nil // already a native Go DSN
+		}
+		u = strings.TrimPrefix(u, "jdbc:")
+		pu, err := url.Parse(u)
+		if err != nil {
+			return "", fmt.Errorf("could not parse MySQL URL %q: %v", conn.URL, err)
+		}
+		user, pass := conn.Username, conn.Password
+		if pu.User != nil {
+			if user == "" {
+				user = pu.User.Username()
+			}
+			if pass == "" {
+				if p, ok := pu.User.Password(); ok {
+					pass = p
+				}
+			}
+		}
+		if q := pu.Query(); user == "" && q.Get("user") != "" {
+			user, pass = q.Get("user"), q.Get("password")
+		}
+		host := pu.Host
+		if host == "" {
+			host = "127.0.0.1:3306"
+		}
+		db := strings.TrimPrefix(pu.Path, "/")
+		return fmt.Sprintf("%s:%s@tcp(%s)/%s?%s", user, pass, host, db, params), nil
+	}
+	hosts := conn.hostList()
+	if len(hosts) == 0 {
+		return "", fmt.Errorf("host (or a connect URL) is required")
+	}
+	port := conn.Port
+	if port <= 0 {
+		port = 3306
+	}
+	return fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?%s", conn.Username, conn.Password, hosts[0], port, conn.Database, params), nil
+}
+
+// buildPostgresDSN produces a lib/pq connection URL. It accepts a
+// postgres://, postgresql:// or jdbc:postgresql:// URL in conn.URL.
+func buildPostgresDSN(conn DBConn) (string, error) {
+	sslmode := "require"
+	if conn.Insecure {
+		sslmode = "disable"
+	}
+	if u := strings.TrimSpace(conn.URL); u != "" {
+		u = strings.TrimPrefix(u, "jdbc:")
+		u = strings.Replace(u, "postgresql://", "postgres://", 1)
+		pu, err := url.Parse(u)
+		if err != nil {
+			return "", fmt.Errorf("could not parse PostgreSQL URL %q: %v", conn.URL, err)
+		}
+		q := pu.Query()
+		if q.Get("sslmode") == "" {
+			q.Set("sslmode", sslmode)
+		}
+		if conn.Username != "" && pu.User == nil {
+			pu.User = url.UserPassword(conn.Username, conn.Password)
+		}
+		pu.RawQuery = q.Encode()
+		return pu.String(), nil
+	}
+	hosts := conn.hostList()
+	if len(hosts) == 0 {
+		return "", fmt.Errorf("host (or a connect URL) is required")
+	}
+	port := conn.Port
+	if port <= 0 {
+		port = 5432
+	}
+	pu := &url.URL{
+		Scheme:   "postgres",
+		User:     url.UserPassword(conn.Username, conn.Password),
+		Host:     fmt.Sprintf("%s:%d", hosts[0], port),
+		Path:     "/" + conn.Database,
+		RawQuery: "sslmode=" + sslmode + "&connect_timeout=10",
+	}
+	return pu.String(), nil
+}
+
+// applySchema points a fresh session at the requested schema so the user's
+// own unqualified queries resolve there. Best-effort — a failure is ignored.
+func applySchema(ctx context.Context, db *sql.DB, engine, schema string) {
+	schema = strings.TrimSpace(schema)
+	if schema == "" {
+		return
+	}
+	switch engine {
+	case "oracle":
+		db.ExecContext(ctx, `ALTER SESSION SET CURRENT_SCHEMA = `+quoteIdent(schema))
+	case "postgres":
+		db.ExecContext(ctx, `SET search_path TO `+quoteIdent(schema))
+	}
+}
+
+// quoteIdent conservatively quotes an identifier used in a SET statement.
+func quoteIdent(s string) string {
+	if strings.IndexFunc(s, func(r rune) bool {
+		return !(r == '_' || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9')
+	}) >= 0 {
+		return `"` + strings.ReplaceAll(s, `"`, `""`) + `"`
+	}
+	return s
+}
+
+// RelationalQuery runs SQL against Oracle, MySQL or PostgreSQL.
+func RelationalQuery(engine string, conn DBConn, query string, maxRows int) (*QueryResult, error) {
+	engine = normalizeEngine(engine)
 	if strings.TrimSpace(query) == "" {
 		return nil, fmt.Errorf("query is empty")
 	}
 	maxRows = clampRows(maxRows)
 
-	var host, service string
-	port := conn.Port
-	if port <= 0 {
-		port = 1521
-	}
-	if strings.TrimSpace(conn.URL) != "" { // a JDBC/Easy-Connect URL wins over the separate fields
-		h, p, svc, err := parseOracleURL(conn.URL)
-		if err != nil {
-			return nil, fmt.Errorf("oracle: %v", err)
-		}
-		host, port, service = h, p, svc
-	} else {
-		hosts := conn.hostList()
-		if len(hosts) == 0 || conn.Service == "" {
-			return nil, fmt.Errorf("host and service name (or a JDBC URL) are required")
-		}
-		host, service = hosts[0], conn.Service
-	}
-
-	url := go_ora.BuildUrl(host, port, service, conn.Username, conn.Password, nil)
-	db, err := sql.Open("oracle", url)
+	driver, dsn, err := buildDSN(engine, conn)
 	if err != nil {
-		return nil, fmt.Errorf("oracle: %v", err)
+		return nil, fmt.Errorf("%s: %v", engine, err)
+	}
+	db, err := sql.Open(driver, dsn)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %v", engine, err)
 	}
 	defer db.Close()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	logging.Logf("oracle: connect %s:%d/%s, query %q", host, port, service, logging.Snippet(query, 200))
+	logging.Logf("%s: connect (schema %q), query %q", engine, conn.Schema, logging.Snippet(query, 200))
 	if err := db.PingContext(ctx); err != nil {
-		logging.Logf("oracle: connect failed: %v", err)
-		return nil, fmt.Errorf("oracle: %v", err)
+		logging.Logf("%s: connect failed: %v", engine, err)
+		return nil, fmt.Errorf("%s: %v", engine, err)
 	}
+	applySchema(ctx, db, engine, conn.Schema)
 
 	start := time.Now()
-	stmt := strings.TrimSuffix(strings.TrimSpace(query), ";") // go-ora rejects trailing semicolons
+	stmt := strings.TrimSpace(query)
+	if engine == "oracle" {
+		stmt = strings.TrimSuffix(stmt, ";") // go-ora rejects a trailing semicolon
+	}
 
 	if !isReadQuery(stmt) {
-		res, err := db.ExecContext(ctx, stmt)
+		r, err := db.ExecContext(ctx, stmt)
 		if err != nil {
-			return nil, fmt.Errorf("oracle: %v", err)
+			return nil, fmt.Errorf("%s: %v", engine, err)
 		}
-		affected, _ := res.RowsAffected()
+		affected, _ := r.RowsAffected()
 		return &QueryResult{Columns: []string{}, Rows: [][]string{}, RowsAffected: affected, DurationMs: time.Since(start).Milliseconds()}, nil
 	}
 
 	rows, err := db.QueryContext(ctx, stmt)
 	if err != nil {
-		return nil, fmt.Errorf("oracle: %v", err)
+		return nil, fmt.Errorf("%s: %v", engine, err)
 	}
 	defer rows.Close()
 
 	names, err := rows.Columns()
 	if err != nil {
-		return nil, fmt.Errorf("oracle: %v", err)
+		return nil, fmt.Errorf("%s: %v", engine, err)
 	}
 	res := &QueryResult{Columns: names, Rows: [][]string{}}
 	vals := make([]any, len(names))
@@ -289,7 +456,7 @@ func OracleQuery(conn DBConn, query string, maxRows int) (*QueryResult, error) {
 			break
 		}
 		if err := rows.Scan(ptrs...); err != nil {
-			return nil, fmt.Errorf("oracle: %v", err)
+			return nil, fmt.Errorf("%s: %v", engine, err)
 		}
 		out := make([]string, len(names))
 		for i, v := range vals {
@@ -298,7 +465,7 @@ func OracleQuery(conn DBConn, query string, maxRows int) (*QueryResult, error) {
 		res.Rows = append(res.Rows, out)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("oracle: %v", err)
+		return nil, fmt.Errorf("%s: %v", engine, err)
 	}
 	res.DurationMs = time.Since(start).Milliseconds()
 	return res, nil

@@ -1592,12 +1592,15 @@
           const form = el("div", { class: "conn-form" });
           const values = {};
           cfg.fields.forEach((f) => {
-            const input = f.type === "checkbox"
-              ? el("input", { type: "checkbox" })
-              : el("input", { type: f.type || "text", placeholder: f.placeholder || "", style: "width:100%" });
+            let input;
+            if (f.type === "checkbox") input = el("input", { type: "checkbox" });
+            else if (f.type === "select") input = el("select", { style: "width:100%" }, (f.options || []).map((o) => el("option", { value: o.value, text: o.label })));
+            else input = el("input", { type: f.type || "text", placeholder: f.placeholder || "", style: "width:100%" });
             if (existing) {
               if (f.type === "checkbox") input.checked = !!existing[f.key];
-              else input.value = existing[f.key] || "";
+              else input.value = existing[f.key] || (f.type === "select" && f.options && f.options.length ? f.options[0].value : "");
+            } else if (f.type === "select" && f.default) {
+              input.value = f.default;
             }
             values[f.key] = input;
             form.append(f.type === "checkbox"
@@ -1806,11 +1809,72 @@
 
   /** Query console shared by Cassandra and Oracle, with a table/column
       browser that builds SELECTs for you. */
-  const sqlConsole = (dbType, placeholder, browser) => (body, conn, c, ctx) => {
+  // engine helpers for the relational tool (Oracle / MySQL / PostgreSQL)
+  const sqlEsc = (s) => String(s).replace(/'/g, "''");
+  const rdbEngine = (e) => ({ mysql: "mysql", mariadb: "mysql", postgres: "postgres", postgresql: "postgres", pg: "postgres" }[String(e || "").toLowerCase()] || "oracle");
+  const rdbPlaceholder = (e) => e === "oracle" ? "SELECT * FROM employees FETCH FIRST 50 ROWS ONLY" : "SELECT * FROM employees LIMIT 50";
+  const rdbBrowser = (engine, conn) => {
+    const schema = (conn.schema || "").trim();
+    if (engine === "mysql") {
+      const db = schema || (conn.database || "").trim();
+      const whereDb = db ? `'${sqlEsc(db)}'` : "DATABASE()";
+      return {
+        tablesQuery: `SELECT table_name FROM information_schema.tables WHERE table_schema = ${whereDb} ORDER BY table_name`,
+        tableFromRow: (r) => r[0],
+        columnsQuery: (t) => `SELECT column_name, data_type FROM information_schema.columns WHERE table_schema = ${whereDb} AND table_name = '${sqlEsc(t)}' ORDER BY ordinal_position`,
+        buildSelect: (t, cols, n) => `SELECT ${cols} FROM \`${t}\` LIMIT ${n}`,
+      };
+    }
+    if (engine === "postgres") {
+      const sch = schema || "public";
+      return {
+        tablesQuery: `SELECT table_name FROM information_schema.tables WHERE table_schema = '${sqlEsc(sch)}' ORDER BY table_name`,
+        tableFromRow: (r) => r[0],
+        columnsQuery: (t) => `SELECT column_name, data_type FROM information_schema.columns WHERE table_schema = '${sqlEsc(sch)}' AND table_name = '${sqlEsc(t)}' ORDER BY ordinal_position`,
+        buildSelect: (t, cols, n) => `SELECT ${cols} FROM "${sch}"."${t}" LIMIT ${n}`,
+      };
+    }
+    // oracle
+    if (schema) {
+      const owner = schema.toUpperCase();
+      return {
+        tablesQuery: `SELECT table_name FROM all_tables WHERE owner = '${sqlEsc(owner)}' ORDER BY table_name`,
+        tableFromRow: (r) => r[0],
+        columnsQuery: (t) => `SELECT column_name, data_type FROM all_tab_columns WHERE owner = '${sqlEsc(owner)}' AND table_name = '${sqlEsc(t)}' ORDER BY column_id`,
+        buildSelect: (t, cols, n) => `SELECT ${cols} FROM ${owner}.${t} FETCH FIRST ${n} ROWS ONLY`,
+      };
+    }
+    return {
+      tablesQuery: "SELECT table_name FROM user_tables ORDER BY table_name",
+      tableFromRow: (r) => r[0],
+      columnsQuery: (t) => `SELECT column_name, data_type FROM user_tab_columns WHERE table_name = '${sqlEsc(t)}' ORDER BY column_id`,
+      buildSelect: (t, cols, n) => `SELECT ${cols} FROM ${t} FETCH FIRST ${n} ROWS ONLY`,
+    };
+  };
+
+  // resolve: (conn) => { type, placeholder, browser, label } — lets the same
+  // console serve a fixed engine (Cassandra) or a per-connection one (the
+  // relational tool, which picks Oracle/MySQL/PostgreSQL from conn.engine).
+  const sqlConsole = (resolve) => (body, conn, c, ctx, getConn) => {
+    const cluster = () => (getConn && getConn()) || conn;
+    const cfg0 = resolve(cluster());
     const status = el("div", { class: "status-line dim" });
     const out = el("div", { style: "flex:1;overflow:auto;display:flex;flex-direction:column" });
 
-    const query = el("textarea", { rows: "5", style: "width:100%", spellcheck: "false", placeholder });
+    // visible target so it's clear which engine/schema this tab queries
+    const target = el("div", { class: "es-target" });
+    const refreshTarget = () => {
+      const k = cluster();
+      const r = resolve(k);
+      target.replaceChildren(
+        el("span", { class: "pane-label", text: "Target" }),
+        el("span", { class: "es-target-name", text: r.label || r.type }),
+        el("span", { class: "es-target-url", text: r.where ? "→ " + r.where : "" }),
+      );
+    };
+    refreshTarget();
+
+    const query = el("textarea", { rows: "5", style: "width:100%", spellcheck: "false", placeholder: cfg0.placeholder });
     query.value = c.query || "";
     query.addEventListener("input", () => { c.query = query.value; ctx.save(); });
 
@@ -1820,11 +1884,12 @@
 
     const run = async () => {
       if (!(c.query || "").trim()) return setStatus(status, "✗ Enter a query", "err");
+      const k = cluster();
       setStatus(status, "Running…", "dim");
       try {
         const res = await api("POST", "/api/db/query", {
-          type: dbType,
-          conn: { ...conn, port: Number(conn.port) || 0 },
+          type: resolve(k).type,
+          conn: { ...k, port: Number(k.port) || 0 },
           query: c.query,
           maxRows: Number(c.maxRows) || 200,
         });
@@ -1841,9 +1906,10 @@
     query.addEventListener("keydown", (e) => { if ((e.ctrlKey || e.metaKey) && e.key === "Enter") run(); });
 
     // ---- query helper: table picker → column picker → generated SELECT ----
-    const dbq = (q) => api("POST", "/api/db/query", {
-      type: dbType, conn: { ...conn, port: Number(conn.port) || 0 }, query: q, maxRows: 5000,
-    });
+    const dbq = (q) => { const k = cluster(); return api("POST", "/api/db/query", {
+      type: resolve(k).type, conn: { ...k, port: Number(k.port) || 0 }, query: q, maxRows: 5000,
+    }); };
+    const browserCfg = () => resolve(cluster()).browser;
 
     const tableSel = el("select", { style: "min-width:220px" });
     const colsBox = el("div");
@@ -1869,6 +1935,7 @@
     };
 
     const loadTables = async () => {
+      const browser = browserCfg();
       setStatus(status, "Loading tables…", "dim");
       try {
         const res = await dbq(browser.tablesQuery);
@@ -1884,7 +1951,7 @@
       if (!c.table) { c.cols = []; drawCols(); return; }
       setStatus(status, "Loading columns…", "dim");
       try {
-        const res = await dbq(browser.columnsQuery(c.table));
+        const res = await dbq(browserCfg().columnsQuery(c.table));
         c.cols = res.rows.map((r) => ({ name: r[0], type: r[1] }));
         c.selectedCols = c.cols.map((f) => f.name);
         ctx.save();
@@ -1900,7 +1967,7 @@
       if (!c.table) { setStatus(status, "✗ Pick a table first (Load tables)", "err"); return false; }
       const sel = c.selectedCols || [];
       const colSql = !sel.length || sel.length === (c.cols || []).length ? "*" : sel.join(", ");
-      c.query = browser.buildSelect(c.table, colSql, Number(c.limit) || 50);
+      c.query = browserCfg().buildSelect(c.table, colSql, Number(c.limit) || 50);
       query.value = c.query;
       ctx.save();
       return true;
@@ -1922,6 +1989,7 @@
     drawCols();
 
     body.append(
+      target,
       helper,
       query,
       el("div", { class: "toolbar" }, [
@@ -2558,44 +2626,73 @@
     ],
     newConsole: () => ({ id: uid(), query: "", maxRows: "200" }),
     consoleLabel: (c) => c.name || "cql",
-    renderConsole: sqlConsole("cassandra", "SELECT * FROM keyspace.table LIMIT 50;", {
-      tablesQuery: "SELECT keyspace_name, table_name FROM system_schema.tables",
-      tableFromRow: (r) => {
-        const system = ["system", "system_schema", "system_auth", "system_distributed", "system_traces", "system_views", "system_virtual_schema"];
-        return system.includes(r[0]) ? null : r[0] + "." + r[1];
+    renderConsole: sqlConsole((conn) => ({
+      type: "cassandra",
+      label: "Cassandra",
+      where: conn.keyspace ? "keyspace: " + conn.keyspace : (conn.hosts || ""),
+      placeholder: "SELECT * FROM keyspace.table LIMIT 50;",
+      browser: {
+        tablesQuery: "SELECT keyspace_name, table_name FROM system_schema.tables",
+        tableFromRow: (r) => {
+          const system = ["system", "system_schema", "system_auth", "system_distributed", "system_traces", "system_views", "system_virtual_schema"];
+          return system.includes(r[0]) ? null : r[0] + "." + r[1];
+        },
+        columnsQuery: (t) => {
+          const [ks, tb] = t.split(".");
+          return `SELECT column_name, type FROM system_schema.columns WHERE keyspace_name='${ks}' AND table_name='${tb}'`;
+        },
+        buildSelect: (t, cols, n) => `SELECT ${cols} FROM ${t} LIMIT ${n};`,
       },
-      columnsQuery: (t) => {
-        const [ks, tb] = t.split(".");
-        return `SELECT column_name, type FROM system_schema.columns WHERE keyspace_name='${ks}' AND table_name='${tb}'`;
-      },
-      buildSelect: (t, cols, n) => `SELECT ${cols} FROM ${t} LIMIT ${n};`,
-    }),
+    })),
   });
 
   clientTool({
+    // type stays "oracle" so existing saved tabs keep working; the tool now
+    // covers Oracle, MySQL and PostgreSQL, chosen per connection.
     type: "oracle",
-    icon: "🏛",
-    name: "Oracle",
-    desc: "Run SQL against Oracle databases (no Oracle client install needed) — results grid, multiple connections.",
+    icon: "🗄",
+    name: "Relational Databases",
+    desc: "Run SQL against Oracle, MySQL and PostgreSQL (pure-Go drivers — no client install). Connect with host/port fields or a single URL; schema-aware query helper and results grid.",
     connLabel: "Connections",
     connSingular: "connection",
-    connName: (c) => c.url || (c.hosts ? c.hosts + (c.service ? "/" + c.service : "") : ""),
+    connName: (c) => {
+      const eng = { oracle: "Oracle", mysql: "MySQL", postgres: "PostgreSQL", postgresql: "PostgreSQL" }[String(c.engine || "oracle").toLowerCase()] || "Oracle";
+      const loc = c.url || (c.hosts ? c.hosts + (c.database ? "/" + c.database : c.service ? "/" + c.service : "") : "");
+      return eng + (loc ? " · " + loc : "");
+    },
     fields: [
       { key: "name", label: "Name", placeholder: "orders-db" },
-      { key: "url", label: "JDBC / connect URL (fills in the rest below)", placeholder: "jdbc:oracle:thin:@host:1521/service" },
-      { key: "hosts", label: "Host", placeholder: "oracle-host" },
-      { key: "port", label: "Port", placeholder: "1521" },
-      { key: "service", label: "Service name", placeholder: "ORCLPDB1" },
+      { key: "engine", label: "Engine", type: "select", default: "oracle", options: [
+        { value: "oracle", label: "Oracle" },
+        { value: "mysql", label: "MySQL / MariaDB" },
+        { value: "postgres", label: "PostgreSQL" },
+      ] },
+      { key: "url", label: "Connect URL (fills in the rest — overrides host/port below)", placeholder: "jdbc:oracle:thin:@host:1521/svc · mysql://u:p@host:3306/db · postgres://u:p@host:5432/db" },
+      { key: "hosts", label: "Host", placeholder: "db-host" },
+      { key: "port", label: "Port (blank = default: 1521 / 3306 / 5432)", placeholder: "1521" },
+      { key: "service", label: "Oracle service name", placeholder: "ORCLPDB1" },
+      { key: "database", label: "Database (MySQL / PostgreSQL)", placeholder: "sales" },
+      { key: "schema", label: "Schema (Oracle owner / PostgreSQL schema — where to query)", placeholder: "HR / public" },
       { key: "username", label: "Username" },
       { key: "password", label: "Password", type: "password" },
+      { key: "insecure", label: "Skip TLS (disable SSL)", type: "checkbox" },
     ],
     newConsole: () => ({ id: uid(), query: "", maxRows: "200" }),
     consoleLabel: (c) => c.name || "sql",
-    renderConsole: sqlConsole("oracle", "SELECT * FROM employees FETCH FIRST 50 ROWS ONLY", {
-      tablesQuery: "SELECT table_name FROM user_tables ORDER BY table_name",
-      tableFromRow: (r) => r[0],
-      columnsQuery: (t) => `SELECT column_name, data_type FROM user_tab_columns WHERE table_name = '${String(t).replace(/'/g, "''")}' ORDER BY column_id`,
-      buildSelect: (t, cols, n) => `SELECT ${cols} FROM ${t} FETCH FIRST ${n} ROWS ONLY`,
+    renderConsole: sqlConsole((conn) => {
+      const engine = rdbEngine(conn.engine);
+      const nameOf = { oracle: "Oracle", mysql: "MySQL", postgres: "PostgreSQL" }[engine];
+      const loc = engine === "oracle"
+        ? (conn.schema ? "schema: " + conn.schema : (conn.service ? "service: " + conn.service : ""))
+        : ((conn.database ? "db: " + conn.database : "") + (conn.schema ? (conn.database ? " · " : "") + "schema: " + conn.schema : ""));
+      const host = (conn.hosts || "").split(",")[0].trim();
+      return {
+        type: engine,
+        label: nameOf,
+        where: [loc, host].filter(Boolean).join("  ·  "),
+        placeholder: rdbPlaceholder(engine),
+        browser: rdbBrowser(engine, conn),
+      };
     }),
   });
 

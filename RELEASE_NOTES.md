@@ -27,8 +27,10 @@ single dependency-free binary (with an optional native desktop app).
   configurable timeout
 - **Elastic / OpenSearch**: REST console + a **visual query builder** that
   generates clauses from each field's schema type (term/match/range/nested)
-- **Cassandra** and **Oracle**: SQL/CQL consoles with a table+column query
-  helper. Oracle accepts a **JDBC/Easy-Connect URL** (no Oracle client needed)
+- **Cassandra** and **Relational Databases** (Oracle, MySQL, PostgreSQL):
+  SQL/CQL consoles with a schema-aware table+column query helper. Pure-Go
+  drivers (no DB client install); connect with host/port fields or a single
+  URL, and a **schema** field sets where to query
 
 **Kube & remote access**
 - **Kube Console**: connect over SSH (password) to the kubemaster, find pods,
