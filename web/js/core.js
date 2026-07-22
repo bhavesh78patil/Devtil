@@ -143,6 +143,20 @@ window.Devtil = (() => {
     });
   }
 
+  // ---- live-session sweeping ----
+  // Tools with long-lived resources (SSH PTYs, Kube tail loops) keep them in
+  // module-level registries keyed by tab id so they survive re-renders. When a
+  // tab is closed those resources must eventually be freed. Tools register a
+  // sweeper; the app calls sweepSessions() with the set of still-open tab ids
+  // after every render, and each sweeper tears down (after a grace period)
+  // anything whose tab is gone.
+  const _sweepers = [];
+  function onSessionSweep(fn) { _sweepers.push(fn); }
+  function sweepSessions(liveTabIds) {
+    const live = liveTabIds instanceof Set ? liveTabIds : new Set(liveTabIds);
+    for (const fn of _sweepers) { try { fn(live); } catch (e) { /* ignore */ } }
+  }
+
   // ---- backend API ----
 
   async function api(method, path, body) {
@@ -165,5 +179,5 @@ window.Devtil = (() => {
     return data;
   }
 
-  return { registerTool, getTool, tools, el, escapeHtml, debounce, uid, fmtBytes, copyText, copyBtn, setStatus, api, confirmDialog, promptDialog };
+  return { registerTool, getTool, tools, el, escapeHtml, debounce, uid, fmtBytes, copyText, copyBtn, setStatus, api, confirmDialog, promptDialog, onSessionSweep, sweepSessions };
 })();

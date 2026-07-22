@@ -3,7 +3,11 @@
 "use strict";
 
 (() => {
-  const { registerTool, el, escapeHtml, debounce, uid, fmtBytes, copyBtn, setStatus, api, confirmDialog } = Devtil;
+  const { registerTool, el, escapeHtml, debounce, uid, fmtBytes, copyBtn, setStatus, api, confirmDialog, onSessionSweep } = Devtil;
+
+  // How long a tool keeps a tab's live sessions (SSH PTYs, Kube tail loops)
+  // alive after that tab is closed, before tearing them down.
+  const SESSION_TTL_MS = 5 * 60 * 1000;
 
   /** Full-screen overlay showing text JSON pretty-printed (falls back to raw). */
   function showJsonModal(title, raw) {
@@ -798,6 +802,25 @@
   // ======================================================================
   // Kube Logs
   // ======================================================================
+  // Live tail timers, dedup sets, the set of panels currently tailing, and the
+  // maximized panel live in a module-level registry keyed by tab id so they
+  // survive the tool being re-rendered on every tab switch (otherwise switching
+  // away and back would silently stop live tails).
+  const kubeReg = {};
+  onSessionSweep((live) => {
+    for (const tabId of Object.keys(kubeReg)) {
+      const reg = kubeReg[tabId];
+      if (live.has(tabId)) {
+        if (reg._disposeTimer) { clearTimeout(reg._disposeTimer); reg._disposeTimer = null; }
+      } else if (!reg._disposeTimer) {
+        reg._disposeTimer = setTimeout(() => {
+          for (const id in reg.timers) clearInterval(reg.timers[id]);
+          delete kubeReg[tabId];
+        }, SESSION_TTL_MS);
+      }
+    }
+  });
+
   registerTool({
     type: "kube",
     icon: "☸️",
@@ -814,11 +837,12 @@
       const podBox = el("div");
       const panelsArea = el("div", { class: "kube-panels" });
 
-      // runtime-only state (not persisted): live tail timers, dedup sets,
-      // and which panel is maximized
-      const timers = {};
-      const tailSeen = {};
-      let maximizedId = null;
+      // runtime-only state (not persisted), kept per-tab so live tails survive
+      // tab switches — see kubeReg above.
+      if (!kubeReg[tab.id]) kubeReg[tab.id] = { timers: {}, tailSeen: {}, tailing: new Set(), maximizedId: null };
+      const reg = kubeReg[tab.id];
+      const timers = reg.timers;
+      const tailSeen = reg.tailSeen;
 
       const ctxSel = el("select", { style: "min-width:160px" });
       const nsSel = el("select", { style: "min-width:160px" });
@@ -848,7 +872,7 @@
         } else {
           p.minimized = false;
         }
-        maximizedId = null;
+        reg.maximizedId = null;
         ctx.save();
         renderPanels();
       }
@@ -864,8 +888,13 @@
           panelsArea.append(el("div", { class: "status-line dim", text: "No panels open. Click a container above to open a terminal for it." }));
           return;
         }
-        const list = maximizedId ? d.panels.filter((p) => p.id === maximizedId) : d.panels;
-        for (const panel of list) panelsArea.append(buildPanel(panel));
+        const list = reg.maximizedId ? d.panels.filter((p) => p.id === reg.maximizedId) : d.panels;
+        for (const panel of list) {
+          const node = buildPanel(panel);
+          panelsArea.append(node);
+          // resume a live tail that was running before this re-render / tab switch
+          if (reg.tailing.has(panel.id) && node._startTail) node._startTail();
+        }
       }
 
       function buildPanel(panel) {
@@ -905,10 +934,12 @@
         const tailBtn = el("button", { class: "btn", text: timers[panel.id] ? "⏸ Stop" : "▶ Tail" });
         const stopTail = () => {
           if (timers[panel.id]) { clearInterval(timers[panel.id]); delete timers[panel.id]; }
+          reg.tailing.delete(panel.id);
           tailBtn.textContent = "▶ Tail";
         };
         const startTail = () => {
           if (timers[panel.id]) return;
+          reg.tailing.add(panel.id); // remembered so the tail resumes after a tab switch
           tailSeen[panel.id] = new Set();
           append("── tailing " + panel.container + " (stdout) ──\n");
           tailBtn.textContent = "⏸ Stop";
@@ -964,8 +995,8 @@
         const head = el("div", { class: "kube-panel-head" }, [
           el("span", { class: "kube-panel-title", text: panel.pod + " › " + panel.container }),
           headBtn(panel.minimized ? "▸" : "▾", "Minimize / expand", () => { panel.minimized = !panel.minimized; ctx.save(); renderPanels(); }),
-          headBtn(maximizedId === panel.id ? "🗗" : "🗖", "Maximize / restore", () => { maximizedId = maximizedId === panel.id ? null : panel.id; renderPanels(); }),
-          headBtn("×", "Close panel", () => { stopTail(); d.panels = d.panels.filter((x) => x.id !== panel.id); if (maximizedId === panel.id) maximizedId = null; ctx.save(); renderPanels(); }),
+          headBtn(reg.maximizedId === panel.id ? "🗗" : "🗖", "Maximize / restore", () => { reg.maximizedId = reg.maximizedId === panel.id ? null : panel.id; renderPanels(); }),
+          headBtn("×", "Close panel", () => { stopTail(); d.panels = d.panels.filter((x) => x.id !== panel.id); if (reg.maximizedId === panel.id) reg.maximizedId = null; ctx.save(); renderPanels(); }),
         ]);
 
         const bodyEl = el("div", { class: "kube-panel-body" }, [
@@ -987,8 +1018,9 @@
         ]);
         bodyEl.style.display = panel.minimized ? "none" : "";
 
-        const cls = "kube-panel" + (maximizedId === panel.id ? " max" : "") + (panel.minimized ? " min" : "");
+        const cls = "kube-panel" + (reg.maximizedId === panel.id ? " max" : "") + (panel.minimized ? " min" : "");
         const node = el("div", { class: cls }, [head, bodyEl]);
+        node._startTail = startTail; // let renderPanels resume a live tail after a switch
         outPre.scrollTop = outPre.scrollHeight;
         return node;
       }
@@ -1094,6 +1126,28 @@
   // a module-level registry keyed by tab id (never serialized).
   const puttyReg = {};
 
+  // When a PuTTY tab is closed, keep its terminals connected for SESSION_TTL_MS
+  // (so briefly closing/reopening — or an accidental close — doesn't drop the
+  // shell), then dispose them. Re-opening the tab within the window cancels the
+  // teardown.
+  onSessionSweep((live) => {
+    for (const tabId of Object.keys(puttyReg)) {
+      const reg = puttyReg[tabId];
+      if (live.has(tabId)) {
+        if (reg._disposeTimer) { clearTimeout(reg._disposeTimer); reg._disposeTimer = null; }
+      } else if (!reg._disposeTimer) {
+        reg._disposeTimer = setTimeout(() => {
+          for (const id in reg.rt) {
+            try { reg.rt[id].ro && reg.rt[id].ro.disconnect(); } catch (e) {}
+            try { reg.rt[id].ws && reg.rt[id].ws.close(); } catch (e) {}
+            try { reg.rt[id].term && reg.rt[id].term.dispose(); } catch (e) {}
+          }
+          delete puttyReg[tabId];
+        }, SESSION_TTL_MS);
+      }
+    }
+  });
+
   registerTool({
     type: "putty",
     icon: "🖥️",
@@ -1142,10 +1196,16 @@
       function ensureTerm(s, hostEl) {
         let r = rt[s.id];
         if (r && r.wired) {
-          try {
-            r.fit.fit();
-            if (r.ws && r.ws.readyState === 1) r.ws.send(JSON.stringify({ type: "resize", cols: r.term.cols, rows: r.term.rows }));
-          } catch (e) { /* ignore */ }
+          // Panel node was re-shown (tab switch back, sibling closed). Re-fit on
+          // the next frame, once layout has settled, then repaint the buffer.
+          // (A per-terminal ResizeObserver handles later size changes.)
+          requestAnimationFrame(() => {
+            try {
+              r.fit.fit();
+              if (r.ws && r.ws.readyState === 1) r.ws.send(JSON.stringify({ type: "resize", cols: r.term.cols, rows: r.term.rows }));
+              r.term.refresh(0, r.term.rows - 1);
+            } catch (e) { /* ignore */ }
+          });
           return;
         }
         const term = new Terminal({ fontFamily: "ui-monospace, Menlo, Consolas, monospace", fontSize: 12, cursorBlink: true, scrollback: 5000, rightClickSelectsWord: true, theme: themeColors() });
@@ -1178,7 +1238,20 @@
         });
         term.onData((data) => { const w = rt[s.id] && rt[s.id].ws; if (w && w.readyState === 1) w.send(JSON.stringify({ type: "input", data })); });
         term.onResize(({ cols, rows }) => { const w = rt[s.id] && rt[s.id].ws; if (w && w.readyState === 1) w.send(JSON.stringify({ type: "resize", cols, rows })); });
-        rt[s.id] = { term, fit, ws: null, wired: true };
+        // Re-fit whenever the panel's box actually resizes — e.g. when a sibling
+        // panel is opened or closed and this one grows/shrinks. The observer
+        // fires after layout has settled, so fit() measures the correct size and
+        // xterm reflows + repaints; without it the terminal keeps its old buffer
+        // rendered blank until the next window resize.
+        let ro = null;
+        if (typeof ResizeObserver === "function") {
+          ro = new ResizeObserver(() => {
+            const rr = rt[s.id];
+            if (rr && rr.fit) { try { rr.fit.fit(); } catch (e) { /* not laid out */ } }
+          });
+          try { ro.observe(hostEl); } catch (e) { /* ignore */ }
+        }
+        rt[s.id] = { term, fit, ws: null, wired: true, ro };
         connect(s);
       }
 
@@ -1192,6 +1265,7 @@
       function disposeSession(s) {
         const r = rt[s.id];
         if (r) {
+          try { r.ro && r.ro.disconnect(); } catch (e) {}
           try { r.ws && r.ws.close(); } catch (e) {}
           try { r.term && r.term.dispose(); } catch (e) {}
           delete rt[s.id];
@@ -1237,17 +1311,30 @@
       }
 
       function renderPanels() {
-        panelsArea.replaceChildren();
-        if (!hasXterm) { panelsArea.append(el("div", { class: "status-line err", text: "Terminal component failed to load." })); return; }
-        if (!d.sessions.length) { panelsArea.append(el("div", { class: "status-line dim", text: "No sessions. Add a host above and click “Open session”." })); return; }
-        const list = reg.maximizedId ? d.sessions.filter((s) => s.id === reg.maximizedId) : d.sessions;
-        for (const s of list) {
+        if (!hasXterm) { panelsArea.replaceChildren(el("div", { class: "status-line err", text: "Terminal component failed to load." })); return; }
+        if (!d.sessions.length) { panelsArea.replaceChildren(el("div", { class: "status-line dim", text: "No sessions. Add a host above and click “Open session”." })); return; }
+        // Reconcile in place: keep each session's persistent panel node, drop the
+        // nodes of closed sessions, and hide (not remove) panels when another is
+        // maximized. Each terminal keeps its own id so nodes never collide, and a
+        // per-terminal ResizeObserver re-fits when a panel grows/shrinks (e.g. a
+        // sibling closes) so xterm reflows and repaints at the new size.
+        const alive = new Set(d.sessions.map((s) => s.id));
+        for (const child of Array.from(panelsArea.children)) {
+          if (!child._sid || !alive.has(child._sid)) child.remove();
+        }
+        let prev = null;
+        for (const s of d.sessions) {
           if (!nodes[s.id]) nodes[s.id] = buildNode(s);
           const node = nodes[s.id];
+          node._sid = s.id;
+          const hidden = reg.maximizedId && reg.maximizedId !== s.id;
           node.className = "kube-panel term-panel" + (reg.maximizedId === s.id ? " max" : "") + (s.minimized ? " min" : "");
+          node.style.display = hidden ? "none" : "";
           node._body.style.display = s.minimized ? "none" : "";
-          panelsArea.append(node);
-          if (!s.minimized) requestAnimationFrame(() => ensureTerm(s, node._hostEl));
+          const at = prev ? prev.nextSibling : panelsArea.firstChild;
+          if (at !== node) panelsArea.insertBefore(node, at);
+          prev = node;
+          if (!hidden && !s.minimized) requestAnimationFrame(() => ensureTerm(s, node._hostEl));
         }
       }
 
