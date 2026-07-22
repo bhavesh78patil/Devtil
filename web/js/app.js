@@ -2,7 +2,7 @@
 "use strict";
 
 (() => {
-  const { el, uid, debounce, api, getTool, tools } = Devtil;
+  const { el, uid, debounce, api, getTool, tools, confirmDialog, promptDialog } = Devtil;
 
   let state = null;
 
@@ -74,9 +74,9 @@
         nameSpan,
         el("button", {
           class: "icon-btn ws-del", text: "×", title: "Delete workspace",
-          onclick: (e) => {
+          onclick: async (e) => {
             e.stopPropagation();
-            if (!confirm(`Delete workspace "${ws.name}" and its ${ws.tabs.length} tab(s)?`)) return;
+            if (!(await confirmDialog(`Delete workspace "${ws.name}" and its ${ws.tabs.length} tab(s)?`, { okLabel: "Delete", danger: true }))) return;
             state.workspaces = state.workspaces.filter((w) => w.id !== ws.id);
             if (!state.workspaces.length) newWorkspace("Default");
             if (state.activeWorkspaceId === ws.id) state.activeWorkspaceId = state.workspaces[0].id;
@@ -219,8 +219,8 @@
   overlay.addEventListener("click", (e) => { if (e.target === overlay) overlay.classList.add("hidden"); });
   document.getElementById("picker-close").addEventListener("click", () => overlay.classList.add("hidden"));
   document.getElementById("add-tab").addEventListener("click", openPicker);
-  document.getElementById("add-workspace").addEventListener("click", () => {
-    const name = prompt("Workspace name:", "Workspace " + (state.workspaces.length + 1));
+  document.getElementById("add-workspace").addEventListener("click", async () => {
+    const name = await promptDialog("Workspace name:", "Workspace " + (state.workspaces.length + 1));
     if (name !== null) newWorkspace(name.trim() || undefined);
   });
 

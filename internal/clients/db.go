@@ -118,6 +118,25 @@ func stringify(v any) string {
 
 // ---------------------------------------------------------------- Cassandra
 
+// cassandraConnectHint appends actionable guidance to network-level connect
+// failures, which are almost always reachability problems rather than bad
+// credentials or CQL.
+func cassandraConnectHint(err error) string {
+	s := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(s, "i/o timeout"),
+		strings.Contains(s, "connection refused"),
+		strings.Contains(s, "no route to host"),
+		strings.Contains(s, "no such host"):
+		return " — the contact point isn't reachable from this machine. Check the host and port" +
+			" (Cassandra's native CQL port is usually 9042), plus any firewall or VPN. Note that" +
+			" Kubernetes pod IPs (10.x / 172.16–31.x / 192.168.x) are only reachable inside the cluster:" +
+			" expose Cassandra via a LoadBalancer/NodePort service, or run" +
+			" `kubectl port-forward svc/<cassandra> 9042:9042` and connect to 127.0.0.1:9042."
+	}
+	return ""
+}
+
 func CassandraQuery(conn DBConn, query string, maxRows int) (*QueryResult, error) {
 	hosts := conn.hostList()
 	if len(hosts) == 0 {
@@ -140,12 +159,18 @@ func CassandraQuery(conn DBConn, query string, maxRows int) (*QueryResult, error
 	}
 	cluster.ConnectTimeout = 10 * time.Second
 	cluster.Timeout = 20 * time.Second
+	// Only talk to the contact points we were given; don't auto-discover the
+	// rest of the ring from system.peers. Discovered peers are usually internal
+	// addresses (e.g. Kubernetes pod IPs like 10.x.x.x) that aren't reachable
+	// from outside the cluster, which would otherwise cause connect timeouts
+	// even after the control connection succeeds.
+	cluster.DisableInitialHostLookup = true
 
-	logging.Logf("cassandra: connect %v, query %q", hosts, logging.Snippet(query, 200))
+	logging.Logf("cassandra: connect %v (port %d), query %q", hosts, cluster.Port, logging.Snippet(query, 200))
 	session, err := cluster.CreateSession()
 	if err != nil {
 		logging.Logf("cassandra: connect failed: %v", err)
-		return nil, fmt.Errorf("cassandra: %v", err)
+		return nil, fmt.Errorf("cassandra: %v%s", err, cassandraConnectHint(err))
 	}
 	defer session.Close()
 

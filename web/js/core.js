@@ -83,6 +83,66 @@ window.Devtil = (() => {
     node.textContent = msg;
   }
 
+  // ---- in-app dialogs ----
+  // Native prompt()/confirm()/alert() are disabled inside the Electron shell,
+  // so we use small in-app modals that work in both browser and desktop modes.
+
+  function closeDialog(overlay, onEsc) {
+    overlay.remove();
+    document.removeEventListener("keydown", onEsc, true);
+  }
+
+  /** Promise<boolean>. Styled replacement for window.confirm. */
+  function confirmDialog(message, { okLabel = "OK", cancelLabel = "Cancel", danger = false } = {}) {
+    return new Promise((resolve) => {
+      const overlay = el("div", { class: "json-modal-overlay" });
+      const settle = (val) => { closeDialog(overlay, onEsc); resolve(val); };
+      const onEsc = (e) => {
+        if (e.key === "Escape") { e.preventDefault(); settle(false); }
+        if (e.key === "Enter") { e.preventDefault(); settle(true); }
+      };
+      const box = el("div", { class: "app-dialog" }, [
+        el("div", { class: "app-dialog-msg", text: message }),
+        el("div", { class: "app-dialog-actions" }, [
+          el("button", { class: "btn", text: cancelLabel, onclick: () => settle(false) }),
+          el("button", { class: "btn " + (danger ? "danger primary" : "primary"), text: okLabel, onclick: () => settle(true) }),
+        ]),
+      ]);
+      overlay.append(box);
+      overlay.addEventListener("click", (e) => { if (e.target === overlay) settle(false); });
+      document.addEventListener("keydown", onEsc, true);
+      document.body.append(overlay);
+      box.querySelector(".btn.primary").focus();
+    });
+  }
+
+  /** Promise<string|null> (null = cancelled). Styled replacement for window.prompt. */
+  function promptDialog(message, defaultValue = "", { okLabel = "OK", cancelLabel = "Cancel" } = {}) {
+    return new Promise((resolve) => {
+      const overlay = el("div", { class: "json-modal-overlay" });
+      const input = el("input", { type: "text", class: "app-dialog-input", value: defaultValue });
+      const settle = (val) => { closeDialog(overlay, onEsc); resolve(val); };
+      const onEsc = (e) => { if (e.key === "Escape") { e.preventDefault(); settle(null); } };
+      const box = el("div", { class: "app-dialog" }, [
+        el("div", { class: "app-dialog-msg", text: message }),
+        input,
+        el("div", { class: "app-dialog-actions" }, [
+          el("button", { class: "btn", text: cancelLabel, onclick: () => settle(null) }),
+          el("button", { class: "btn primary", text: okLabel, onclick: () => settle(input.value) }),
+        ]),
+      ]);
+      input.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") { e.preventDefault(); settle(input.value); }
+      });
+      overlay.append(box);
+      overlay.addEventListener("click", (e) => { if (e.target === overlay) settle(null); });
+      document.addEventListener("keydown", onEsc, true);
+      document.body.append(overlay);
+      input.focus();
+      input.select();
+    });
+  }
+
   // ---- backend API ----
 
   async function api(method, path, body) {
@@ -105,5 +165,5 @@ window.Devtil = (() => {
     return data;
   }
 
-  return { registerTool, getTool, tools, el, escapeHtml, debounce, uid, fmtBytes, copyText, copyBtn, setStatus, api };
+  return { registerTool, getTool, tools, el, escapeHtml, debounce, uid, fmtBytes, copyText, copyBtn, setStatus, api, confirmDialog, promptDialog };
 })();
