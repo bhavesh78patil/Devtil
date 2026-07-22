@@ -198,6 +198,10 @@
     renderSidebar();
     renderTabs();
     renderTool();
+    // let tools free the sessions of any tab that no longer exists
+    const liveTabIds = new Set();
+    for (const w of state.workspaces) for (const t of w.tabs) liveTabIds.add(t.id);
+    Devtil.sweepSessions(liveTabIds);
   }
 
   // ---- tool picker ----
