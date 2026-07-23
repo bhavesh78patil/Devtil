@@ -186,6 +186,142 @@
   });
 
   // ======================================================================
+  // XML ⇄ JSON
+  // ======================================================================
+  // Dependency-free conversion using the browser's DOMParser. Convention:
+  //   <a x="1">hi</a>            → { "a": { "@x": "1", "#text": "hi" } }
+  //   <a><b>1</b><b>2</b></a>    → { "a": { "b": ["1", "2"] } }
+  //   <a>hi</a>                  → { "a": "hi" }
+  // and the reverse: keys starting with "@" become attributes, "#text" the
+  // element's text, everything else a child element (arrays repeat the tag).
+  const xmlEsc = (s) => String(s).replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+  const xmlAttrEsc = (s) => xmlEsc(s).replaceAll('"', "&quot;");
+
+  function xmlElemToValue(node) {
+    const attrs = {};
+    for (const a of Array.from(node.attributes || [])) attrs["@" + a.name] = a.value;
+    const kids = {};
+    let text = "", elems = 0;
+    for (const ch of Array.from(node.childNodes)) {
+      if (ch.nodeType === 1) { // element
+        elems++;
+        const key = ch.nodeName, val = xmlElemToValue(ch);
+        if (kids[key] === undefined) kids[key] = val;
+        else { if (!Array.isArray(kids[key])) kids[key] = [kids[key]]; kids[key].push(val); }
+      } else if (ch.nodeType === 3 || ch.nodeType === 4) { // text / CDATA
+        text += ch.nodeValue;
+      }
+    }
+    const trimmed = text.trim();
+    if (elems === 0 && Object.keys(attrs).length === 0) return trimmed;
+    const obj = Object.assign({}, attrs, kids);
+    if (trimmed !== "") obj["#text"] = trimmed;
+    return obj;
+  }
+
+  function xmlToJson(xml, indent) {
+    const doc = new DOMParser().parseFromString(String(xml).trim(), "application/xml");
+    const perr = doc.querySelector("parsererror");
+    if (perr) throw new Error(perr.textContent.replace(/\s+/g, " ").trim());
+    const root = doc.documentElement;
+    if (!root) throw new Error("no root element found");
+    return JSON.stringify({ [root.nodeName]: xmlElemToValue(root) }, null, indent);
+  }
+
+  function valueToXml(key, val, pad, step) {
+    if (Array.isArray(val)) return val.map((v) => valueToXml(key, v, pad, step)).join("\n");
+    if (val === null || typeof val !== "object") {
+      const t = val === null ? "" : xmlEsc(String(val));
+      return t === "" ? `${pad}<${key}/>` : `${pad}<${key}>${t}</${key}>`;
+    }
+    const attrs = []; let text = ""; const children = [];
+    for (const [k, v] of Object.entries(val)) {
+      if (k[0] === "@") attrs.push(`${k.slice(1)}="${xmlAttrEsc(v)}"`);
+      else if (k === "#text") text = xmlEsc(String(v));
+      else children.push([k, v]);
+    }
+    const a = attrs.length ? " " + attrs.join(" ") : "";
+    if (!children.length) return text === "" ? `${pad}<${key}${a}/>` : `${pad}<${key}${a}>${text}</${key}>`;
+    const inner = children.map(([k, v]) => valueToXml(k, v, pad + step, step)).join("\n");
+    const textLine = text ? `\n${pad + step}${text}` : "";
+    return `${pad}<${key}${a}>${textLine}\n${inner}\n${pad}</${key}>`;
+  }
+
+  function jsonToXml(json, step) {
+    const obj = JSON.parse(json);
+    if (obj === null || typeof obj !== "object" || Array.isArray(obj)) {
+      throw new Error("JSON must be an object with a single root element");
+    }
+    const keys = Object.keys(obj).filter((k) => k[0] !== "@" && k !== "#text");
+    const body = keys.length === 1
+      ? valueToXml(keys[0], obj[keys[0]], "", step)
+      : valueToXml("root", obj, "", step); // wrap multiple roots in <root>
+    return '<?xml version="1.0" encoding="UTF-8"?>\n' + body;
+  }
+
+  registerTool({
+    type: "xmljson",
+    icon: "</>",
+    name: "XML ⇄ JSON",
+    desc: "Convert XML to JSON and back — attributes, nested elements, repeated tags and text nodes preserved. Runs entirely in the browser.",
+    defaults: () => ({ input: "", output: "", indent: "2" }),
+    render(root, tab, ctx) {
+      const d = tab.data;
+      const status = el("div", { class: "status-line dim" });
+      const output = el("textarea", { class: "grow", spellcheck: "false", readonly: "" });
+      output.value = d.output || "";
+      const input = boundArea(d, "input", ctx);
+
+      const indentSel = bindField(
+        el("select", {}, [
+          el("option", { value: "2", text: "2 spaces" }),
+          el("option", { value: "4", text: "4 spaces" }),
+          el("option", { value: "tab", text: "Tabs" }),
+        ]),
+        d, "indent", ctx
+      );
+      const jsonIndent = () => (d.indent === "tab" ? "\t" : Number(d.indent || 2));
+      const xmlStep = () => (d.indent === "tab" ? "\t" : " ".repeat(Number(d.indent || 2)));
+
+      const setOut = (text) => { output.value = text; d.output = text; ctx.save(); };
+
+      const toJson = () => {
+        if (!(d.input || "").trim()) return setStatus(status, "✗ Paste some XML first", "err");
+        try {
+          setOut(xmlToJson(d.input, jsonIndent()));
+          setStatus(status, "✓ Converted XML → JSON", "ok");
+        } catch (e) {
+          setStatus(status, "✗ Invalid XML: " + e.message, "err");
+        }
+      };
+      const toXml = () => {
+        if (!(d.input || "").trim()) return setStatus(status, "✗ Paste some JSON first", "err");
+        try {
+          setOut(jsonToXml(d.input, xmlStep()));
+          setStatus(status, "✓ Converted JSON → XML", "ok");
+        } catch (e) {
+          setStatus(status, "✗ Invalid JSON: " + e.message, "err");
+        }
+      };
+
+      root.append(
+        el("div", { class: "toolbar" }, [
+          el("button", { class: "btn primary", text: "XML → JSON", onclick: toJson }),
+          el("button", { class: "btn primary", text: "JSON → XML", onclick: toXml }),
+          indentSel,
+          copyBtn(() => output.value, "Copy output"),
+          el("button", { class: "btn", text: "Output → Input", onclick: () => { input.value = output.value; d.input = output.value; ctx.save(); } }),
+        ]),
+        status,
+        el("div", { class: "split" }, [
+          el("div", {}, [el("span", { class: "pane-label", text: "Input (XML or JSON)" }), input]),
+          el("div", {}, [el("span", { class: "pane-label", text: "Output" }), output]),
+        ])
+      );
+    },
+  });
+
+  // ======================================================================
   // Base64
   // ======================================================================
   const te = new TextEncoder(), td = new TextDecoder();

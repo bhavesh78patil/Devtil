@@ -75,6 +75,7 @@ built on macOS/Windows.
 | Tool | What it does |
 |---|---|
 | **JSON Tools** | Pretty-format, minify, validate (with line/col errors), sort keys, escape ⇄ unescape JSON strings |
+| **XML ⇄ JSON** | Convert XML to JSON and back — attributes (`@attr`), text nodes (`#text`), nested elements and repeated tags (arrays) preserved; round-trips cleanly. Pure-browser, no dependencies |
 | **Base64** | Encode/decode, unicode-safe, URL-safe variant, live conversion |
 | **URL Tools** | Encode/decode components or full URIs, plus a URL/query-param breakdown table |
 | **JWT Decoder** | Decode header & payload, human-readable `exp`/`iat`/`nbf`, expiry check |
