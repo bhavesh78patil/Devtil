@@ -9,6 +9,8 @@ single dependency-free binary (with an optional native desktop app).
 **Everyday tools**
 - **JSON Tools** — format, minify, validate (line/col errors), sort keys,
   escape ⇄ unescape
+- **XML ⇄ JSON** — convert either way, preserving attributes, nested
+  elements and repeated tags (round-trips cleanly)
 - **Base64**, **URL** encode/decode + breakdown, **JWT** decoder,
   **Timestamps**, **Regex tester**, **Text diff**, **Generators**
   (UUID / random / SHA)
