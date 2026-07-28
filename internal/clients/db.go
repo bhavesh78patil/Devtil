@@ -95,8 +95,8 @@ func clampRows(n int) int {
 	if n <= 0 {
 		return defaultMaxRows
 	}
-	if n > 5000 {
-		return 5000
+	if n > 10000 { // ceiling matches the UI's max export size
+		return 10000
 	}
 	return n
 }
