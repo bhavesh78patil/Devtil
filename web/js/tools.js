@@ -1943,6 +1943,47 @@
     return box;
   }
 
+  // ---- tabular export (CSV / Excel) ---------------------------------------
+  // Dependency-free: CSV with a UTF-8 BOM (so Excel opens unicode correctly)
+  // and an Excel 2003 SpreadsheetML .xls for a native-Excel download.
+  const EXPORT_DEFAULT = 1000, EXPORT_MAX = 10000;
+  const clampExport = (n) => Math.min(Math.max(Number(n) || EXPORT_DEFAULT, 1), EXPORT_MAX);
+  const csvCell = (v) => {
+    const s = String(v ?? "");
+    return /[",\n\r]/.test(s) ? '"' + s.replaceAll('"', '""') + '"' : s;
+  };
+  const toCsv = (cols, rows) => "\uFEFF" + [cols, ...rows].map((r) => r.map(csvCell).join(",")).join("\r\n");
+  const toXls = (cols, rows) => {
+    const cell = (v) => `<Cell><Data ss:Type="String">${escapeHtml(String(v ?? ""))}</Data></Cell>`;
+    const row = (r) => `<Row>${r.map(cell).join("")}</Row>`;
+    return `<?xml version="1.0"?>\n<Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet" xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet"><Worksheet ss:Name="Export"><Table>${row(cols)}${rows.map(row).join("")}</Table></Worksheet></Workbook>`;
+  };
+  function downloadFile(name, mime, content) {
+    const a = el("a", { href: URL.createObjectURL(new Blob([content], { type: mime })), download: name });
+    document.body.append(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+  }
+  function exportRows(fmt, baseName, cols, rows) {
+    const ts = new Date().toISOString().slice(0, 19).replaceAll(":", "-");
+    if (fmt === "xls") downloadFile(`${baseName}-${ts}.xls`, "application/vnd.ms-excel", toXls(cols, rows));
+    else downloadFile(`${baseName}-${ts}.csv`, "text/csv;charset=utf-8", toCsv(cols, rows));
+  }
+  // shared "Export [n] rows [CSV] [Excel]" toolbar row; doExport(fmt, n)
+  function exportBar(c, ctx, doExport) {
+    const n = el("input", { type: "number", min: "1", max: String(EXPORT_MAX), style: "width:90px", title: `Rows to export (max ${EXPORT_MAX})` });
+    n.value = c.exportN || String(EXPORT_DEFAULT);
+    n.addEventListener("input", () => { c.exportN = n.value; ctx.save(); });
+    return el("div", { class: "toolbar" }, [
+      el("span", { class: "pane-label", text: "Export" }),
+      n,
+      el("span", { class: "pane-label", text: "rows as" }),
+      el("button", { class: "btn", text: "CSV", onclick: () => doExport("csv", clampExport(c.exportN)) }),
+      el("button", { class: "btn", text: "Excel", onclick: () => doExport("xls", clampExport(c.exportN)) }),
+    ]);
+  }
+
   /** Query console shared by Cassandra and Oracle, with a table/column
       browser that builds SELECTs for you. */
   // engine helpers for the relational tool (Oracle / MySQL / PostgreSQL)
@@ -2042,10 +2083,24 @@
     query.addEventListener("keydown", (e) => { if ((e.ctrlKey || e.metaKey) && e.key === "Enter") run(); });
 
     // ---- query helper: table picker → column picker → generated SELECT ----
-    const dbq = (q) => { const k = cluster(); return api("POST", "/api/db/query", {
-      type: resolve(k).type, conn: { ...k, port: Number(k.port) || 0 }, query: q, maxRows: 5000,
+    const dbq = (q, mr) => { const k = cluster(); return api("POST", "/api/db/query", {
+      type: resolve(k).type, conn: { ...k, port: Number(k.port) || 0 }, query: q, maxRows: mr || 5000,
     }); };
     const browserCfg = () => resolve(cluster()).browser;
+
+    // ---- export: re-run the current query at the export size, download ----
+    const doExport = async (fmt, n) => {
+      if (!(c.query || "").trim()) return setStatus(status, "✗ Enter (or build) a query first", "err");
+      setStatus(status, `Exporting up to ${n} row(s)…`, "dim");
+      try {
+        const res = await dbq(c.query, n);
+        if (!res.columns || !res.columns.length) return setStatus(status, "✗ The query returned no result grid to export", "err");
+        exportRows(fmt, resolve(cluster()).type + "-export", res.columns, res.rows || []);
+        setStatus(status, `✓ Exported ${(res.rows || []).length} row(s)${res.truncated ? " (truncated)" : ""}`, "ok");
+      } catch (e) {
+        setStatus(status, "✗ " + e.message, "err");
+      }
+    };
 
     const tableSel = el("select", { style: "min-width:220px" });
     const colsBox = el("div");
@@ -2133,6 +2188,7 @@
         el("label", { class: "inline" }, ["Max rows", maxRows]),
         status,
       ]),
+      exportBar(c, ctx, doExport),
       out
     );
     out.replaceChildren(resultGrid(c.result));
@@ -2459,16 +2515,55 @@
     path.addEventListener("keydown", (e) => { if (e.key === "Enter") send(c.method || "GET", c.path, c.body); });
 
     // ---- query builder: index picker → field picker → generated _search ----
-    const esFetch = async (method, p) => {
+    const esFetch = async (method, p, bodyText) => {
       const k = cluster();
       if (!k || !k.baseUrl) throw new Error("the active cluster has no base URL");
       const headers = {};
+      if (bodyText) headers["Content-Type"] = "application/json";
       if (k.username) headers["Authorization"] = "Basic " + btoa(k.username + ":" + (k.password || ""));
       const r = await api("POST", "/api/proxy", {
-        method, url: k.baseUrl.replace(/\/+$/, "") + "/" + p, headers, body: "", insecure: !!k.insecure,
+        method, url: k.baseUrl.replace(/\/+$/, "") + "/" + p, headers, body: bodyText || "", insecure: !!k.insecure,
       });
       if (r.status >= 400) throw new Error(r.status + " " + r.body.slice(0, 160));
       return JSON.parse(r.body);
+    };
+
+    // ---- export: re-run the search at the export size, flatten hits ----
+    // Nested _source objects flatten to dot-notation columns; arrays are
+    // JSON-encoded so a cell never silently loses data.
+    const flatten = (obj, prefix, out) => {
+      for (const [k, v] of Object.entries(obj || {})) {
+        const key = prefix ? prefix + "." + k : k;
+        if (v && typeof v === "object" && !Array.isArray(v)) flatten(v, key, out);
+        else out[key] = Array.isArray(v) ? JSON.stringify(v) : v;
+      }
+      return out;
+    };
+    const doExport = async (fmt, n) => {
+      let p = (c.path || "").split("?")[0];
+      if (!/_search(\/|$)/.test(p)) {
+        if (c.index) p = encodeURIComponent(c.index) + "/_search";
+        else return setStatus(status, "✗ Point the request at a _search endpoint (or pick an index in the builder) first", "err");
+      }
+      let bodyObj = {};
+      if ((c.body || "").trim()) {
+        try { bodyObj = JSON.parse(c.body); } catch { return setStatus(status, "✗ Body is not valid JSON", "err"); }
+      }
+      if (!bodyObj.query) bodyObj.query = { match_all: {} };
+      bodyObj.size = n;
+      setStatus(status, `Exporting up to ${n} hit(s)…`, "dim");
+      try {
+        const data = await esFetch("POST", p, JSON.stringify(bodyObj));
+        const hits = data.hits && data.hits.hits;
+        if (!Array.isArray(hits)) return setStatus(status, "✗ Response has no hits — is this a _search?", "err");
+        const flat = hits.map((h) => flatten(h._source, "", { _id: h._id }));
+        const cols = [];
+        for (const row of flat) for (const k of Object.keys(row)) if (!cols.includes(k)) cols.push(k);
+        exportRows(fmt, "elastic-export", cols, flat.map((row) => cols.map((k) => row[k] ?? "")));
+        setStatus(status, `✓ Exported ${flat.length} hit(s)`, "ok");
+      } catch (e) {
+        setStatus(status, "✗ " + e.message, "err");
+      }
     };
 
     const idxSel = el("select", { style: "min-width:220px" });
@@ -2696,6 +2791,7 @@
         el("button", { class: "btn primary", text: "Send", onclick: () => send(c.method || "GET", c.path, c.body) }),
       ]),
       el("div", {}, [el("span", { class: "pane-label", text: "Body (JSON, for _search etc.)" }), reqBody]),
+      exportBar(c, ctx, doExport),
       status,
       out
     );

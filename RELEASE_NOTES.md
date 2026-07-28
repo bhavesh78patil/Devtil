@@ -33,6 +33,8 @@ single dependency-free binary (with an optional native desktop app).
   SQL/CQL consoles with a schema-aware table+column query helper. Pure-Go
   drivers (no DB client install); connect with host/port fields or a single
   URL, and a **schema** field sets where to query
+- **Export to CSV / Excel** from the Elastic, Cassandra and Relational-DB
+  consoles — pick the row count (default 1000, max 10 000)
 
 **Kube & remote access**
 - **Kube Console**: connect over SSH (password) to the kubemaster, find pods,

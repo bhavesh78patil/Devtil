@@ -186,20 +186,35 @@ func KafkaConsume(req KafkaConsumeRequest) (*KafkaConsumeResponse, error) {
 	}
 
 	dialer := conn.dialer()
-	ctx, cancel := context.WithTimeout(context.Background(), conn.opDeadline())
+	// A search (or forward read) scans up to scanCap messages, which takes far
+	// longer than a plain tail read — with the short default timeout the old
+	// deadline expired mid-scan and searches silently came back empty. Scale
+	// the operation deadline with the scan window instead.
+	opTimeout := conn.opDeadline()
+	if scanCap > max && opTimeout < 30*time.Second {
+		opTimeout = 30 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), opTimeout)
 	defer cancel()
 
-	logging.Logf("kafka: consume topic=%s from=%s max=%d scanCap=%d keyQ=%q valQ=%q startMs=%d endMs=%d timeout=%s",
-		req.Topic, req.From, max, scanCap, keyQ, valQ, req.StartMs, req.EndMs, conn.timeout())
+	logging.Logf("kafka: consume topic=%s from=%s max=%d scanCap=%d keyQ=%q valQ=%q startMs=%d endMs=%d timeout=%s opTimeout=%s",
+		req.Topic, req.From, max, scanCap, keyQ, valQ, req.StartMs, req.EndMs, conn.timeout(), opTimeout)
 
 	parts, err := dialer.LookupPartitions(ctx, "tcp", brokers[0], req.Topic)
 	if err != nil {
 		return nil, fmt.Errorf("kafka: %v", err)
 	}
 
+	// Split the scan budget across partitions so a search covers every
+	// partition instead of the first one exhausting the whole global cap.
+	perPart := scanCap
+	if len(parts) > 1 {
+		perPart = scanCap/len(parts) + 1
+	}
+
 	resp := &KafkaConsumeResponse{Messages: []KafkaMessage{}}
 	for _, p := range parts {
-		if resp.Scanned >= scanCap {
+		if resp.Scanned >= scanCap || ctx.Err() != nil {
 			resp.Truncated = true
 			break
 		}
@@ -224,7 +239,7 @@ func KafkaConsume(req KafkaConsumeRequest) (*KafkaConsumeResponse, error) {
 			}
 			start = off
 		default: // latest: window of the newest messages per partition
-			start = last - int64(scanCap)
+			start = last - int64(perPart)
 			if start < first {
 				start = first
 			}
@@ -241,39 +256,49 @@ func KafkaConsume(req KafkaConsumeRequest) (*KafkaConsumeResponse, error) {
 			c.SetReadDeadline(dl)
 		}
 
-		for off := start; off < last; off++ {
-			if resp.Scanned >= scanCap {
+		read := 0
+		for {
+			if read >= perPart || resp.Scanned >= scanCap {
 				resp.Truncated = true
 				break
 			}
 			m, err := c.ReadMessage(10 << 20)
 			if err != nil {
+				// a deadline mid-scan means the search didn't cover everything —
+				// surface that instead of silently returning a partial result
+				if ctx.Err() != nil {
+					resp.Truncated = true
+				}
 				break
 			}
+			read++
 			if req.EndMs > 0 && m.Time.UnixMilli() > req.EndMs {
 				break // partitions are time-ordered; past the range end
 			}
 			resp.Scanned++
 			key, value := string(m.Key), string(m.Value)
-			if keyQ != "" && !strings.Contains(strings.ToLower(key), keyQ) {
-				continue
+			match := (keyQ == "" || strings.Contains(strings.ToLower(key), keyQ)) &&
+				(valQ == "" || strings.Contains(strings.ToLower(value), valQ))
+			if match {
+				resp.Matched++
+				var hdrs []KafkaHeader
+				for _, h := range m.Headers {
+					hdrs = append(hdrs, KafkaHeader{Key: h.Key, Value: string(h.Value)})
+				}
+				resp.Messages = append(resp.Messages, KafkaMessage{
+					Partition: p.ID,
+					Offset:    m.Offset,
+					Time:      m.Time.UTC().Format(time.RFC3339),
+					Key:       key,
+					Value:     value,
+					Headers:   hdrs,
+				})
 			}
-			if valQ != "" && !strings.Contains(strings.ToLower(value), valQ) {
-				continue
+			// stop at the log end — offsets can be sparse (compacted topics),
+			// so waiting for `last-start` reads would block on the deadline
+			if m.Offset >= last-1 {
+				break
 			}
-			resp.Matched++
-			var hdrs []KafkaHeader
-			for _, h := range m.Headers {
-				hdrs = append(hdrs, KafkaHeader{Key: h.Key, Value: string(h.Value)})
-			}
-			resp.Messages = append(resp.Messages, KafkaMessage{
-				Partition: p.ID,
-				Offset:    m.Offset,
-				Time:      m.Time.UTC().Format(time.RFC3339),
-				Key:       key,
-				Value:     value,
-				Headers:   hdrs,
-			})
 		}
 		c.Close()
 	}
