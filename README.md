@@ -104,7 +104,11 @@ Two levels, consistent across the app:
 - **Tab-specific nav** inside the bigger tools: the API client has a
   Collection/History side panel with inner request tabs, and the
   Elastic/Cassandra/Relational-DB consoles can **export results to CSV or
-  Excel** (choose how many rows, default 1000, up to 10 000);
+  Excel** (choose how many rows, default 1000, up to 10 000); their result
+  grids have **resizable columns** (drag the header edge) and **expandable
+  cells** — double-click (or ⤢) opens the full value, pretty-printed when
+  it's JSON; the SQL editor holds **multiple queries** — select one, or just
+  put the cursor on it, and Run executes only that statement;
   Kafka/Elastic/Cassandra/Relational-DB tools have a **connections side panel**
   (add/edit/delete clusters, click one to make it active — green dot) with
   **inner console tabs** on the right, so one tool tab can hold many parallel

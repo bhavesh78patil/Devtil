@@ -505,6 +505,28 @@ details.section[open] summary { margin-bottom: 8px; }
 .btn.chip { padding: 3px 10px; margin: 2px 4px 2px 0; font-size: 12px; }
 
 /* container terminal panels (MobaXterm-like) */
+/* DB result grid: resizable columns + expandable cells */
+.kv.rg th { position: relative; padding-right: 16px; }
+.kv.rg th > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: block; }
+.col-grip {
+  position: absolute; top: 0; right: 0;
+  width: 9px; height: 100%;
+  cursor: col-resize;
+  user-select: none;
+  border-right: 2px solid transparent;
+}
+.col-grip:hover { border-right-color: var(--accent); }
+.kv.rg td.rg-cell { max-width: 420px; position: relative; padding-right: 22px; }
+.rg-cell-text { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rg-expand {
+  position: absolute; right: 2px; top: 50%;
+  transform: translateY(-50%);
+  visibility: hidden;
+  background: var(--bg2);
+  border-radius: 4px;
+}
+.kv.rg td:hover .rg-expand { visibility: visible; }
+
 /* Elastic console: which cluster this tab talks to */
 .es-target { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; }
 .es-target-name { font-weight: 600; color: var(--accent); font-family: var(--mono); font-size: 13px; }
