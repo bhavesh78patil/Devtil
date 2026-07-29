@@ -52,12 +52,39 @@
     renderAll();
   }
 
+  // Closing a tab only hides it — the tab (and everything in it) stays in the
+  // workspace and can be reopened from the sidebar's tab tree. Real deletion
+  // happens only from the tree, behind a confirmation.
   function closeTab(ws, tabId) {
     const idx = ws.tabs.findIndex((t) => t.id === tabId);
     if (idx === -1) return;
+    ws.tabs[idx].closed = true;
+    if (ws.activeTabId === tabId) {
+      const open = ws.tabs.filter((t) => !t.closed);
+      const after = open.find((t) => ws.tabs.indexOf(t) > idx);
+      ws.activeTabId = (after || open[open.length - 1])?.id ?? null;
+    }
+    save();
+    renderAll();
+  }
+
+  function openTab(ws, tabId) {
+    const tab = ws.tabs.find((t) => t.id === tabId);
+    if (!tab) return;
+    tab.closed = false;
+    ws.activeTabId = tab.id;
+    save();
+    renderAll();
+  }
+
+  async function deleteTab(ws, tabId) {
+    const idx = ws.tabs.findIndex((t) => t.id === tabId);
+    if (idx === -1) return;
+    const tab = ws.tabs[idx];
+    if (!(await Devtil.confirmDialog(`Delete tab "${tab.title}" and all its contents permanently?`, { okLabel: "Delete", danger: true }))) return;
     ws.tabs.splice(idx, 1);
     if (ws.activeTabId === tabId) {
-      ws.activeTabId = ws.tabs[Math.min(idx, ws.tabs.length - 1)]?.id ?? null;
+      ws.activeTabId = ws.tabs.find((t) => !t.closed)?.id ?? null;
     }
     save();
     renderAll();
@@ -115,15 +142,84 @@
         });
         input.addEventListener("click", (ev) => ev.stopPropagation());
       });
+      // tab tree: every tab (open and closed) with its sub-tabs, under the
+      // active workspace — open on click, rename, or delete permanently
+      if (ws.id === state.activeWorkspaceId && ws.tabs.length) item.append(buildTabTree(ws));
       list.append(item);
     }
+  }
+
+  function buildTabTree(ws) {
+    const tree = el("div", { class: "tab-tree" });
+    for (const tab of ws.tabs) {
+      const tool = getTool(tab.type);
+      const title = el("span", {
+        class: "tt-title",
+        text: (tool ? tool.icon + " " : "") + tab.title,
+        title: "Click to open · double-click to rename",
+      });
+      const startRename = () => {
+        const input = el("input", { type: "text", class: "tab-rename", value: tab.title });
+        title.replaceWith(input);
+        input.focus();
+        input.select();
+        let done = false;
+        const finish = (apply) => {
+          if (done) return;
+          done = true;
+          if (apply && input.value.trim()) {
+            tab.title = input.value.trim();
+            save();
+          }
+          renderAll();
+        };
+        input.addEventListener("blur", () => finish(true));
+        input.addEventListener("keydown", (ev) => {
+          ev.stopPropagation();
+          if (ev.key === "Enter") finish(true);
+          if (ev.key === "Escape") finish(false);
+        });
+        input.addEventListener("click", (ev) => ev.stopPropagation());
+      };
+      const row = el("div", {
+        class: "tt-row" + (tab.id === ws.activeTabId && !tab.closed ? " active" : "") + (tab.closed ? " closed" : ""),
+      }, [
+        title,
+        tab.closed ? el("span", { class: "tt-badge", text: "closed" }) : null,
+        el("button", { class: "icon-btn", text: "✎", title: "Rename tab", onclick: (e) => { e.stopPropagation(); startRename(); } }),
+        el("button", { class: "icon-btn", text: "×", title: "Delete tab permanently", onclick: (e) => { e.stopPropagation(); deleteTab(ws, tab.id); } }),
+      ]);
+      row.addEventListener("click", (e) => { e.stopPropagation(); openTab(ws, tab.id); });
+      title.addEventListener("dblclick", (e) => { e.stopPropagation(); startRename(); });
+      tree.append(row);
+
+      const subs = tool && tool.subTabs ? (tool.subTabs(tab.data || {}) || []) : [];
+      for (const s of subs) {
+        const srow = el("div", { class: "tt-row tt-sub" }, [
+          el("span", { class: "tt-title", text: s.label, title: "Click to open" }),
+          el("button", {
+            class: "icon-btn", text: "×", title: "Delete permanently",
+            onclick: async (e) => {
+              e.stopPropagation();
+              if (!(await confirmDialog(`Delete "${s.label}"?`, { okLabel: "Delete", danger: true }))) return;
+              s.remove();
+              save();
+              renderAll();
+            },
+          }),
+        ]);
+        srow.addEventListener("click", (e) => { e.stopPropagation(); s.select(); openTab(ws, tab.id); });
+        tree.append(srow);
+      }
+    }
+    return tree;
   }
 
   function renderTabs() {
     const ws = activeWorkspace();
     const tabsBox = document.getElementById("tabs");
     tabsBox.replaceChildren();
-    for (const tab of ws.tabs) {
+    for (const tab of ws.tabs.filter((t) => !t.closed)) {
       const tool = getTool(tab.type);
       const titleSpan = el("span", {
         text: (tool ? tool.icon + " " : "") + tab.title,
@@ -174,7 +270,7 @@
     const rootBox = document.getElementById("tool-root");
     rootBox.replaceChildren();
     const ws = activeWorkspace();
-    const tab = ws.tabs.find((t) => t.id === ws.activeTabId);
+    const tab = ws.tabs.find((t) => t.id === ws.activeTabId && !t.closed);
     if (!tab) {
       rootBox.append(el("div", { class: "empty-hint" }, [
         el("div", { class: "big", text: "🧰" }),
@@ -198,9 +294,11 @@
     renderSidebar();
     renderTabs();
     renderTool();
-    // let tools free the sessions of any tab that no longer exists
+    // let tools free the sessions of any tab that is closed or deleted
+    // (closed tabs keep their data, but live resources — PTYs, tail loops —
+    // are released after the grace period; reopening reconnects)
     const liveTabIds = new Set();
-    for (const w of state.workspaces) for (const t of w.tabs) liveTabIds.add(t.id);
+    for (const w of state.workspaces) for (const t of w.tabs) if (!t.closed) liveTabIds.add(t.id);
     Devtil.sweepSessions(liveTabIds);
   }
 

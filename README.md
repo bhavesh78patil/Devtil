@@ -112,6 +112,15 @@ Two levels, consistent across the app:
 
 ## Workspaces, tabs & autosave
 
+**Closing a tab never deletes it.** The × on a tab only hides it — the tab
+and everything inside it stay in the workspace. The sidebar shows a **tab
+tree** under the active workspace: every tab (open or closed, closed ones
+marked) with its **sub-tabs** — request tabs, console tabs, notepad pads,
+terminal sessions, container panels — nested beneath it. From the tree you
+can click to (re)open a tab or jump straight to a sub-tab, **rename** a tab
+(✎ or double-click), and **delete** a tab or sub-tab permanently (with a
+confirmation) — deletion only ever happens from the tree.
+
 - Create as many **workspaces** as you like (per project, per task…). Rename
   with a double-click, delete with confirmation.
 - Inside a workspace, open **tabs** — each tab is one tool instance with its

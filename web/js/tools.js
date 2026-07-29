@@ -562,6 +562,16 @@
       collection: { baseUrl: "", headers: [{ k: "", v: "" }], requests: [] },
       history: [], swaggerUrl: "", reqTabs: [], activeReqId: null,
     }),
+    subTabs: (d) => (d.reqTabs || []).map((r) => ({
+      id: r.id,
+      label: r.name || ((r.method || "GET") + " " + (r.url || "request")),
+      select: () => { d.activeReqId = r.id; },
+      remove: () => {
+        const i = d.reqTabs.findIndex((x) => x.id === r.id);
+        if (i >= 0) d.reqTabs.splice(i, 1);
+        if (d.activeReqId === r.id) d.activeReqId = d.reqTabs[0]?.id ?? null;
+      },
+    })),
     render(root, tab, ctx) {
       const d = tab.data;
 
@@ -966,6 +976,15 @@
       sshHost: "", sshPort: "", sshPassword: "",
       context: "", namespace: "", podQuery: "", panels: [],
     }),
+    subTabs: (d) => (d.panels || []).map((p) => ({
+      id: p.id,
+      label: p.pod + " › " + p.container,
+      select: () => { p.minimized = false; },
+      remove: () => {
+        const i = d.panels.findIndex((x) => x.id === p.id);
+        if (i >= 0) d.panels.splice(i, 1);
+      },
+    })),
     render(root, tab, ctx) {
       const d = tab.data;
       if (!Array.isArray(d.panels)) d.panels = [];
@@ -1290,6 +1309,15 @@
     name: "SSH / PuTTY",
     desc: "Interactive SSH terminals (real PTY over WebSocket): multiple sessions in one tab, broadcast typing to all, minimize/maximize/close each.",
     defaults: () => ({ sessions: [], savedHosts: [], newHost: "", newPort: "22", newUser: "", newPass: "", shared: "" }),
+    subTabs: (d) => (d.sessions || []).map((s) => ({
+      id: s.id,
+      label: (s.username ? s.username + "@" : "") + s.host + ":" + (s.port || "22"),
+      select: () => { s.minimized = false; },
+      remove: () => {
+        const i = d.sessions.findIndex((x) => x.id === s.id);
+        if (i >= 0) d.sessions.splice(i, 1);
+      },
+    })),
     render(root, tab, ctx) {
       const d = tab.data;
       if (!Array.isArray(d.sessions)) d.sessions = [];
@@ -1448,6 +1476,17 @@
 
       function renderPanels() {
         if (!hasXterm) { panelsArea.replaceChildren(el("div", { class: "status-line err", text: "Terminal component failed to load." })); return; }
+        // dispose live terminals whose session was removed elsewhere (e.g. the
+        // workspace tab tree) so the shell doesn't linger unseen
+        for (const id of Object.keys(rt)) {
+          if (!d.sessions.some((s) => s.id === id)) {
+            try { rt[id].ro && rt[id].ro.disconnect(); } catch (e) {}
+            try { rt[id].ws && rt[id].ws.close(); } catch (e) {}
+            try { rt[id].term && rt[id].term.dispose(); } catch (e) {}
+            delete rt[id];
+            delete nodes[id];
+          }
+        }
         if (!d.sessions.length) { panelsArea.replaceChildren(el("div", { class: "status-line dim", text: "No sessions. Add a host above and click “Open session”." })); return; }
         // Reconcile in place: keep each session's persistent panel node, drop the
         // nodes of closed sessions, and hide (not remove) panels when another is
@@ -1709,6 +1748,21 @@
       name: cfg.name,
       desc: cfg.desc,
       defaults: () => ({ connections: [], activeConnId: null, consoles: [], activeConsoleId: null }),
+      // inner console tabs, for the workspace tab tree in the sidebar
+      subTabs: (d) => (d.consoles || []).map((c) => {
+        const conn = (d.connections || []).find((x) => x.id === c.connId);
+        const where = conn ? (conn.name || cfg.connName(conn) || "") : "";
+        return {
+          id: c.id,
+          label: cfg.consoleLabel(c) + (where ? " · " + where : ""),
+          select: () => { d.activeConsoleId = c.id; if (c.connId) d.activeConnId = c.connId; },
+          remove: () => {
+            const i = d.consoles.findIndex((x) => x.id === c.id);
+            if (i >= 0) d.consoles.splice(i, 1);
+            if (d.activeConsoleId === c.id) d.activeConsoleId = d.consoles[0]?.id ?? null;
+          },
+        };
+      }),
       render(root, tab, ctx) {
         const d = tab.data;
         if (!Array.isArray(d.connections)) d.connections = [];
@@ -3000,6 +3054,16 @@
     name: "Notepad",
     desc: "Scratch pads that autosave as you type — multiple pads as inner tabs, named after their first line.",
     defaults: () => ({ pads: [], activePadId: null }),
+    subTabs: (d) => (d.pads || []).map((p) => ({
+      id: p.id,
+      label: ((p.text || "").split("\n")[0].trim().slice(0, 32)) || "pad",
+      select: () => { d.activePadId = p.id; },
+      remove: () => {
+        const i = d.pads.findIndex((x) => x.id === p.id);
+        if (i >= 0) d.pads.splice(i, 1);
+        if (d.activePadId === p.id) d.activePadId = d.pads[0]?.id ?? null;
+      },
+    })),
     render(root, tab, ctx) {
       const d = tab.data;
       const newPad = () => ({ id: uid(), text: "", mono: true });
