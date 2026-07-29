@@ -193,7 +193,7 @@
       title.addEventListener("dblclick", (e) => { e.stopPropagation(); startRename(); });
       tree.append(row);
 
-      const subs = tool && tool.subTabs ? (tool.subTabs(tab.data || {}) || []) : [];
+      const subs = tool && tool.subTabs ? (tool.subTabs(tab.data || {}, tab) || []) : [];
       for (const s of subs) {
         const srow = el("div", { class: "tt-row tt-sub" }, [
           el("span", { class: "tt-title", text: s.label, title: "Click to open" }),

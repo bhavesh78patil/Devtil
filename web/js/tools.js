@@ -976,10 +976,15 @@
       sshHost: "", sshPort: "", sshPassword: "",
       context: "", namespace: "", podQuery: "", panels: [],
     }),
-    subTabs: (d) => (d.panels || []).map((p) => ({
+    subTabs: (d, tab) => (d.panels || []).map((p) => ({
       id: p.id,
       label: p.pod + " › " + p.container,
-      select: () => { p.minimized = false; },
+      select: () => {
+        p.minimized = false;
+        // un-maximize so the selected panel is actually visible
+        const reg = tab && kubeReg[tab.id];
+        if (reg && reg.maximizedId && reg.maximizedId !== p.id) reg.maximizedId = null;
+      },
       remove: () => {
         const i = d.panels.findIndex((x) => x.id === p.id);
         if (i >= 0) d.panels.splice(i, 1);
@@ -1043,6 +1048,9 @@
           panelsArea.append(el("div", { class: "status-line dim", text: "No panels open. Click a container above to open a terminal for it." }));
           return;
         }
+        // a maximized panel can be removed elsewhere (tab tree, another render);
+        // a stale id would filter every panel out and leave the area blank
+        if (reg.maximizedId && !d.panels.some((p) => p.id === reg.maximizedId)) reg.maximizedId = null;
         const list = reg.maximizedId ? d.panels.filter((p) => p.id === reg.maximizedId) : d.panels;
         for (const panel of list) {
           const node = buildPanel(panel);
@@ -1309,10 +1317,15 @@
     name: "SSH / PuTTY",
     desc: "Interactive SSH terminals (real PTY over WebSocket): multiple sessions in one tab, broadcast typing to all, minimize/maximize/close each.",
     defaults: () => ({ sessions: [], savedHosts: [], newHost: "", newPort: "22", newUser: "", newPass: "", shared: "" }),
-    subTabs: (d) => (d.sessions || []).map((s) => ({
+    subTabs: (d, tab) => (d.sessions || []).map((s) => ({
       id: s.id,
       label: (s.username ? s.username + "@" : "") + s.host + ":" + (s.port || "22"),
-      select: () => { s.minimized = false; },
+      select: () => {
+        s.minimized = false;
+        // un-maximize so the selected session is actually visible
+        const reg = tab && puttyReg[tab.id];
+        if (reg && reg.maximizedId && reg.maximizedId !== s.id) reg.maximizedId = null;
+      },
       remove: () => {
         const i = d.sessions.findIndex((x) => x.id === s.id);
         if (i >= 0) d.sessions.splice(i, 1);
@@ -1494,6 +1507,9 @@
         // per-terminal ResizeObserver re-fits when a panel grows/shrinks (e.g. a
         // sibling closes) so xterm reflows and repaints at the new size.
         const alive = new Set(d.sessions.map((s) => s.id));
+        // a maximized session can be removed elsewhere (tab tree, close);
+        // a stale id would mark every surviving panel hidden — nothing shows
+        if (reg.maximizedId && !alive.has(reg.maximizedId)) reg.maximizedId = null;
         for (const child of Array.from(panelsArea.children)) {
           if (!child._sid || !alive.has(child._sid)) child.remove();
         }
