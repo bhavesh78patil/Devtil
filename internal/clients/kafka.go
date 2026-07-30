@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/segmentio/kafka-go"
@@ -136,7 +137,25 @@ type KafkaMessage struct {
 	Headers   []KafkaHeader `json:"headers,omitempty"`
 }
 
-const maxKafkaMessages = 500
+const (
+	maxKafkaMessages = 500
+
+	// Partitions are read concurrently. Each partition needs its own
+	// connection to its leader (TCP + TLS + SASL handshake) plus offset
+	// lookups; doing that one partition at a time against a remote broker
+	// costs seconds each and is what made a 30-partition topic take minutes.
+	kafkaPartWorkers = 12
+
+	// Broker-side wait per fetch. A consume only ever reads history up to the
+	// high watermark, so a fetch must never sit waiting for new messages.
+	// Left at zero, kafka-go infers this from the read deadline (minutes).
+	kafkaFetchMaxWait  = 500 * time.Millisecond
+	kafkaFetchMaxBytes = 10 << 20
+
+	// Per-partition budget, so one slow or idle partition can't eat the whole
+	// request deadline.
+	kafkaPartTimeout = 15 * time.Second
+)
 
 type KafkaConsumeRequest struct {
 	Conn       KafkaConn `json:"conn"`
@@ -156,6 +175,125 @@ type KafkaConsumeResponse struct {
 	Truncated bool           `json:"truncated"` // hit the scan/result cap
 }
 
+// partRead is one partition's contribution to a consume.
+type partRead struct {
+	msgs      []KafkaMessage
+	scanned   int
+	truncated bool
+	err       error
+	elapsed   time.Duration
+}
+
+// readPartitionWindow dials a partition's leader, seeks to the requested
+// window and reads up to limit messages, keeping the ones that match the
+// key/value filters. It never waits for new messages: reading stops at the
+// high watermark, or as soon as a fetch comes back empty.
+func readPartitionWindow(ctx context.Context, dialer *kafka.Dialer, broker string, req KafkaConsumeRequest, partID, limit int, keyQ, valQ string) (out partRead) {
+	started := time.Now()
+	defer func() { out.elapsed = time.Since(started) }()
+
+	c, err := dialer.DialLeader(ctx, "tcp", broker, req.Topic, partID)
+	if err != nil {
+		out.err = fmt.Errorf("partition %d: %v", partID, err)
+		return out
+	}
+	defer c.Close()
+
+	first, last, err := c.ReadOffsets()
+	if err != nil {
+		out.err = fmt.Errorf("partition %d: %v", partID, err)
+		return out
+	}
+
+	var start int64
+	switch req.From {
+	case "beginning":
+		start = first
+	case "time":
+		off, e := c.ReadOffset(time.UnixMilli(req.StartMs))
+		if e != nil || off < first {
+			off = first
+		}
+		start = off
+	default: // latest: the newest `limit` messages of this partition
+		start = last - int64(limit)
+		if start < first {
+			start = first
+		}
+	}
+	if start >= last {
+		return out // partition is empty, or the window starts past its end
+	}
+	if _, err := c.Seek(start, kafka.SeekAbsolute); err != nil {
+		out.err = fmt.Errorf("partition %d: %v", partID, err)
+		return out
+	}
+
+	// Bound this partition's own work instead of inheriting the whole request
+	// budget, and keep the read deadline short so kafka-go can never derive a
+	// multi-minute fetch wait from it.
+	deadline := time.Now().Add(kafkaPartTimeout)
+	if d, ok := ctx.Deadline(); ok && d.Before(deadline) {
+		deadline = d
+	}
+	c.SetReadDeadline(deadline)
+
+	read := 0
+	for read < limit && ctx.Err() == nil && time.Now().Before(deadline) {
+		batch := c.ReadBatchWith(kafka.ReadBatchConfig{
+			MinBytes: 1,
+			MaxBytes: kafkaFetchMaxBytes,
+			MaxWait:  kafkaFetchMaxWait,
+		})
+		inBatch, done := 0, false
+		for read < limit {
+			m, err := batch.ReadMessage()
+			if err != nil {
+				break // batch drained (or a read error) — handled below
+			}
+			inBatch++
+			read++
+			if req.EndMs > 0 && m.Time.UnixMilli() > req.EndMs {
+				done = true // partitions are time-ordered; past the range end
+				break
+			}
+			out.scanned++
+			key, value := string(m.Key), string(m.Value)
+			if (keyQ == "" || strings.Contains(strings.ToLower(key), keyQ)) &&
+				(valQ == "" || strings.Contains(strings.ToLower(value), valQ)) {
+				var hdrs []KafkaHeader
+				for _, h := range m.Headers {
+					hdrs = append(hdrs, KafkaHeader{Key: h.Key, Value: string(h.Value)})
+				}
+				out.msgs = append(out.msgs, KafkaMessage{
+					Partition: partID,
+					Offset:    m.Offset,
+					Time:      m.Time.UTC().Format(time.RFC3339),
+					Key:       key,
+					Value:     value,
+					Headers:   hdrs,
+				})
+			}
+			// offsets can be sparse (compaction, transaction markers), so stop
+			// on reaching the high watermark rather than counting reads
+			if m.Offset >= last-1 {
+				done = true
+				break
+			}
+		}
+		batch.Close()
+		// An empty fetch means there is no more history here — fetching again
+		// would only wait for messages that haven't been produced yet.
+		if done || inBatch == 0 {
+			return out
+		}
+	}
+	if read >= limit || ctx.Err() != nil || !time.Now().Before(deadline) {
+		out.truncated = true // stopped on a budget, not at the log end
+	}
+	return out
+}
+
 // KafkaConsume reads messages from a topic — from the tail, the beginning,
 // or a time range — optionally filtering by key/value substrings, and
 // returns up to Max matches merged in chronological order.
@@ -173,6 +311,7 @@ func KafkaConsume(req KafkaConsumeRequest) (*KafkaConsumeResponse, error) {
 		return nil, fmt.Errorf("a start time is required for time-range reads")
 	}
 
+	consumeStart := time.Now()
 	keyQ := strings.ToLower(strings.TrimSpace(req.KeyQuery))
 	valQ := strings.ToLower(strings.TrimSpace(req.ValueQuery))
 	// searching or reading forward needs a wider scan window than the
@@ -200,10 +339,12 @@ func KafkaConsume(req KafkaConsumeRequest) (*KafkaConsumeResponse, error) {
 	logging.Logf("kafka: consume topic=%s from=%s max=%d scanCap=%d keyQ=%q valQ=%q startMs=%d endMs=%d timeout=%s opTimeout=%s",
 		req.Topic, req.From, max, scanCap, keyQ, valQ, req.StartMs, req.EndMs, conn.timeout(), opTimeout)
 
+	lookupStart := time.Now()
 	parts, err := dialer.LookupPartitions(ctx, "tcp", brokers[0], req.Topic)
 	if err != nil {
 		return nil, fmt.Errorf("kafka: %v", err)
 	}
+	lookupMs := time.Since(lookupStart).Milliseconds()
 
 	// Split the scan budget across partitions so a search covers every
 	// partition instead of the first one exhausting the whole global cap.
@@ -212,122 +353,55 @@ func KafkaConsume(req KafkaConsumeRequest) (*KafkaConsumeResponse, error) {
 		perPart = scanCap/len(parts) + 1
 	}
 
-	resp := &KafkaConsumeResponse{Messages: []KafkaMessage{}}
-	for _, p := range parts {
-		if resp.Scanned >= scanCap || ctx.Err() != nil {
-			resp.Truncated = true
-			break
-		}
-		c, err := dialer.DialLeader(ctx, "tcp", brokers[0], req.Topic, p.ID)
-		if err != nil {
-			return nil, fmt.Errorf("kafka partition %d: %v", p.ID, err)
-		}
-		first, last, err := c.ReadOffsets()
-		if err != nil {
-			c.Close()
-			return nil, fmt.Errorf("kafka partition %d: %v", p.ID, err)
-		}
+	// Read the partitions concurrently. The per-partition cost is dominated by
+	// the leader handshake and offset lookups, not by reading messages, so
+	// serialising them made the whole consume scale with partition count.
+	results := make([]partRead, len(parts))
+	sem := make(chan struct{}, kafkaPartWorkers)
+	var wg sync.WaitGroup
+	for i, p := range parts {
+		wg.Add(1)
+		go func(idx, partID int) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			if ctx.Err() != nil {
+				results[idx] = partRead{truncated: true}
+				return
+			}
+			results[idx] = readPartitionWindow(ctx, dialer, brokers[0], req, partID, perPart, keyQ, valQ)
+		}(i, p.ID)
+	}
+	wg.Wait()
 
-		var start int64
-		switch req.From {
-		case "beginning":
-			start = first
-		case "time":
-			off, err := c.ReadOffset(time.UnixMilli(req.StartMs))
-			if err != nil || off < first {
-				off = first
-			}
-			start = off
-		default: // latest: window of the newest messages per partition
-			start = last - int64(perPart)
-			if start < first {
-				start = first
-			}
+	resp := &KafkaConsumeResponse{Messages: []KafkaMessage{}}
+	var firstErr error
+	var slowest time.Duration
+	for _, r := range results {
+		if r.elapsed > slowest {
+			slowest = r.elapsed
 		}
-		if start >= last {
-			c.Close()
+		if r.err != nil {
+			if firstErr == nil {
+				firstErr = r.err
+			}
 			continue
 		}
-		if _, err := c.Seek(start, kafka.SeekAbsolute); err != nil {
-			c.Close()
-			return nil, fmt.Errorf("kafka partition %d: %v", p.ID, err)
+		resp.Scanned += r.scanned
+		resp.Messages = append(resp.Messages, r.msgs...)
+		if r.truncated {
+			resp.Truncated = true
 		}
-		if dl, ok := ctx.Deadline(); ok {
-			c.SetReadDeadline(dl)
-		}
-
-		// Fetch whole batches and filter in memory. Conn.ReadMessage issues a
-		// full fetch round-trip per message AND discards the rest of each
-		// batch, which made scans (especially searches) painfully slow — one
-		// batch fetch here yields hundreds/thousands of messages at once.
-		read := 0
-	scan:
-		for {
-			if read >= perPart || resp.Scanned >= scanCap {
-				resp.Truncated = true
-				break
-			}
-			batch := c.ReadBatchWith(kafka.ReadBatchConfig{
-				MinBytes: 1,
-				MaxBytes: 10 << 20,
-				MaxWait:  2 * time.Second, // don't hang on the op deadline at the log end
-			})
-			inBatch := 0
-			for {
-				if read >= perPart || resp.Scanned >= scanCap {
-					resp.Truncated = true
-					batch.Close()
-					break scan
-				}
-				m, err := batch.ReadMessage()
-				if err != nil {
-					batch.Close()
-					if ctx.Err() != nil {
-						// deadline mid-scan: the search didn't cover everything —
-						// surface that instead of silently returning less
-						resp.Truncated = true
-						break scan
-					}
-					if inBatch == 0 {
-						break scan // no progress: log end (or a real error) — stop this partition
-					}
-					continue scan // batch exhausted; fetch the next one
-				}
-				inBatch++
-				read++
-				if req.EndMs > 0 && m.Time.UnixMilli() > req.EndMs {
-					batch.Close()
-					break scan // partitions are time-ordered; past the range end
-				}
-				resp.Scanned++
-				key, value := string(m.Key), string(m.Value)
-				match := (keyQ == "" || strings.Contains(strings.ToLower(key), keyQ)) &&
-					(valQ == "" || strings.Contains(strings.ToLower(value), valQ))
-				if match {
-					resp.Matched++
-					var hdrs []KafkaHeader
-					for _, h := range m.Headers {
-						hdrs = append(hdrs, KafkaHeader{Key: h.Key, Value: string(h.Value)})
-					}
-					resp.Messages = append(resp.Messages, KafkaMessage{
-						Partition: p.ID,
-						Offset:    m.Offset,
-						Time:      m.Time.UTC().Format(time.RFC3339),
-						Key:       key,
-						Value:     value,
-						Headers:   hdrs,
-					})
-				}
-				// stop at the log end — offsets can be sparse (compacted
-				// topics), so counting on `last-start` reads would block
-				if m.Offset >= last-1 {
-					batch.Close()
-					break scan
-				}
-			}
-		}
-		c.Close()
 	}
+	if firstErr != nil {
+		// partial failures are worth surfacing, but only fail the whole read
+		// when nothing at all came back
+		logging.Logf("kafka: consume partition error: %v", firstErr)
+		if len(resp.Messages) == 0 && resp.Scanned == 0 {
+			return nil, fmt.Errorf("kafka: %v", firstErr)
+		}
+	}
+	resp.Matched = len(resp.Messages)
 
 	sort.Slice(resp.Messages, func(i, j int) bool {
 		if resp.Messages[i].Time != resp.Messages[j].Time {
@@ -343,8 +417,9 @@ func KafkaConsume(req KafkaConsumeRequest) (*KafkaConsumeResponse, error) {
 			resp.Messages = resp.Messages[:max] // from the range start
 		}
 	}
-	logging.Logf("kafka: consume done — scanned=%d matched=%d returned=%d truncated=%v",
-		resp.Scanned, resp.Matched, len(resp.Messages), resp.Truncated)
+	logging.Logf("kafka: consume done — partitions=%d scanned=%d matched=%d returned=%d truncated=%v · lookup=%dms slowestPartition=%dms total=%dms",
+		len(parts), resp.Scanned, resp.Matched, len(resp.Messages), resp.Truncated,
+		lookupMs, slowest.Milliseconds(), time.Since(consumeStart).Milliseconds())
 	return resp, nil
 }
 
