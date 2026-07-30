@@ -104,13 +104,26 @@ Two levels, consistent across the app:
 - **Tab-specific nav** inside the bigger tools: the API client has a
   Collection/History side panel with inner request tabs, and the
   Elastic/Cassandra/Relational-DB consoles can **export results to CSV or
-  Excel** (choose how many rows, default 1000, up to 10 000);
+  Excel** (choose how many rows, default 1000, up to 10 000); their result
+  grids have **resizable columns** (drag the header edge) and **expandable
+  cells** — double-click (or ⤢) opens the full value, pretty-printed when
+  it's JSON; the SQL editor holds **multiple queries** — select one, or just
+  put the cursor on it, and Run executes only that statement;
   Kafka/Elastic/Cassandra/Relational-DB tools have a **connections side panel**
   (add/edit/delete clusters, click one to make it active — green dot) with
   **inner console tabs** on the right, so one tool tab can hold many parallel
   queries against many clusters.
 
 ## Workspaces, tabs & autosave
+
+**Closing a tab never deletes it.** The × on a tab only hides it — the tab
+and everything inside it stay in the workspace. The sidebar shows a **tab
+tree** under the active workspace: every tab (open or closed, closed ones
+marked) with its **sub-tabs** — request tabs, console tabs, notepad pads,
+terminal sessions, container panels — nested beneath it. From the tree you
+can click to (re)open a tab or jump straight to a sub-tab, **rename** a tab
+(✎ or double-click), and **delete** a tab or sub-tab permanently (with a
+confirmation) — deletion only ever happens from the tree.
 
 - Create as many **workspaces** as you like (per project, per task…). Rename
   with a double-click, delete with confirmation.

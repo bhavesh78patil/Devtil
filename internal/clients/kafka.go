@@ -256,48 +256,74 @@ func KafkaConsume(req KafkaConsumeRequest) (*KafkaConsumeResponse, error) {
 			c.SetReadDeadline(dl)
 		}
 
+		// Fetch whole batches and filter in memory. Conn.ReadMessage issues a
+		// full fetch round-trip per message AND discards the rest of each
+		// batch, which made scans (especially searches) painfully slow — one
+		// batch fetch here yields hundreds/thousands of messages at once.
 		read := 0
+	scan:
 		for {
 			if read >= perPart || resp.Scanned >= scanCap {
 				resp.Truncated = true
 				break
 			}
-			m, err := c.ReadMessage(10 << 20)
-			if err != nil {
-				// a deadline mid-scan means the search didn't cover everything —
-				// surface that instead of silently returning a partial result
-				if ctx.Err() != nil {
+			batch := c.ReadBatchWith(kafka.ReadBatchConfig{
+				MinBytes: 1,
+				MaxBytes: 10 << 20,
+				MaxWait:  2 * time.Second, // don't hang on the op deadline at the log end
+			})
+			inBatch := 0
+			for {
+				if read >= perPart || resp.Scanned >= scanCap {
 					resp.Truncated = true
+					batch.Close()
+					break scan
 				}
-				break
-			}
-			read++
-			if req.EndMs > 0 && m.Time.UnixMilli() > req.EndMs {
-				break // partitions are time-ordered; past the range end
-			}
-			resp.Scanned++
-			key, value := string(m.Key), string(m.Value)
-			match := (keyQ == "" || strings.Contains(strings.ToLower(key), keyQ)) &&
-				(valQ == "" || strings.Contains(strings.ToLower(value), valQ))
-			if match {
-				resp.Matched++
-				var hdrs []KafkaHeader
-				for _, h := range m.Headers {
-					hdrs = append(hdrs, KafkaHeader{Key: h.Key, Value: string(h.Value)})
+				m, err := batch.ReadMessage()
+				if err != nil {
+					batch.Close()
+					if ctx.Err() != nil {
+						// deadline mid-scan: the search didn't cover everything —
+						// surface that instead of silently returning less
+						resp.Truncated = true
+						break scan
+					}
+					if inBatch == 0 {
+						break scan // no progress: log end (or a real error) — stop this partition
+					}
+					continue scan // batch exhausted; fetch the next one
 				}
-				resp.Messages = append(resp.Messages, KafkaMessage{
-					Partition: p.ID,
-					Offset:    m.Offset,
-					Time:      m.Time.UTC().Format(time.RFC3339),
-					Key:       key,
-					Value:     value,
-					Headers:   hdrs,
-				})
-			}
-			// stop at the log end — offsets can be sparse (compacted topics),
-			// so waiting for `last-start` reads would block on the deadline
-			if m.Offset >= last-1 {
-				break
+				inBatch++
+				read++
+				if req.EndMs > 0 && m.Time.UnixMilli() > req.EndMs {
+					batch.Close()
+					break scan // partitions are time-ordered; past the range end
+				}
+				resp.Scanned++
+				key, value := string(m.Key), string(m.Value)
+				match := (keyQ == "" || strings.Contains(strings.ToLower(key), keyQ)) &&
+					(valQ == "" || strings.Contains(strings.ToLower(value), valQ))
+				if match {
+					resp.Matched++
+					var hdrs []KafkaHeader
+					for _, h := range m.Headers {
+						hdrs = append(hdrs, KafkaHeader{Key: h.Key, Value: string(h.Value)})
+					}
+					resp.Messages = append(resp.Messages, KafkaMessage{
+						Partition: p.ID,
+						Offset:    m.Offset,
+						Time:      m.Time.UTC().Format(time.RFC3339),
+						Key:       key,
+						Value:     value,
+						Headers:   hdrs,
+					})
+				}
+				// stop at the log end — offsets can be sparse (compacted
+				// topics), so counting on `last-start` reads would block
+				if m.Offset >= last-1 {
+					batch.Close()
+					break scan
+				}
 			}
 		}
 		c.Close()
