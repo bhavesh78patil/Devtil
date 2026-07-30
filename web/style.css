@@ -1,38 +1,44 @@
 :root {
-  /* Claude / Anthropic warm-cream light theme (default) */
-  --bg: #f5f0e8;          /* surface-soft canvas */
-  --bg2: #fffdf7;         /* panels / inputs / cards — a hair above canvas */
-  --bg3: #efe9de;         /* surface-card — hovers, chips, active */
-  --border: #e6dfd8;      /* hairline */
-  --text: #141413;        /* ink */
-  --text-dim: #6c6a64;    /* muted */
-  --accent: #cc785c;      /* coral */
-  --accent-soft: rgba(204, 120, 92, 0.14);
+  /* Zapier-inspired light theme (default): warm-cream canvas, coffee ink,
+     a single saturated orange accent */
+  --bg: #fffefb;          /* canvas — warm off-white, never pure white */
+  --bg2: #f8f4f0;         /* canvas-soft — cards / panels / inputs */
+  --bg3: #f1ebe3;         /* a step deeper cream — hovers, chips, active */
+  --border: #e7e1d6;      /* warm hairline */
+  --text: #201515;        /* ink — deep coffee, not pure black */
+  --text-dim: #605d52;    /* body */
+  --mute: #c5c0b1;        /* lowest-priority text / strong dividers */
+  --accent: #ff4f00;      /* Zapier orange — the single CTA accent */
+  --accent-soft: rgba(255, 79, 0, 0.10);
   --green: #5a9d67;
   --red: #c64545;
   --yellow: #b07d18;
-  --overlay: rgba(20, 20, 19, 0.38);
+  --overlay: rgba(32, 21, 21, 0.38);
   --mono: "JetBrains Mono", ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
   --sans: Inter, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-  --serif: "Iowan Old Style", "Palatino Linotype", "Book Antiqua", Palatino, Georgia, "Times New Roman", serif;
-  --radius-btn: 8px;
+  /* display face: Degular Display is proprietary — Inter 500 is the
+     documented substitute, so displays share the sans stack */
+  --serif: Inter, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --radius-btn: 12px;     /* the brand's canonical button + card radius */
+  --radius-input: 6px;    /* form inputs */
   --radius-card: 12px;
 }
 
 :root[data-theme="dark"] {
-  /* warm dark surfaces (Anthropic navy family), lifted off pure black */
-  --bg: #201e1b;          /* surface-dark, lifted */
-  --bg2: #29251f;         /* surface-dark-soft */
-  --bg3: #332e27;         /* surface-dark-elevated */
-  --border: #3d3831;
-  --text: #faf9f5;        /* on-dark (cream white) */
-  --text-dim: #a09d96;    /* on-dark-soft */
-  --accent: #e0906f;      /* coral, brightened for dark */
-  --accent-soft: rgba(224, 144, 111, 0.20);
+  /* polarity-flipped coffee-ink surfaces, lifted off pure black */
+  --bg: #201515;          /* ink as canvas */
+  --bg2: #2b211d;         /* ink-soft panels */
+  --bg3: #382c26;         /* elevated / hover */
+  --border: #46392f;
+  --text: #fffefb;        /* warm white */
+  --text-dim: #b3a99c;
+  --mute: #7c7263;
+  --accent: #ff6a2b;      /* orange, lifted for dark surfaces */
+  --accent-soft: rgba(255, 106, 43, 0.18);
   --green: #6bbf82;
   --red: #e07a72;
   --yellow: #d4a017;
-  --overlay: rgba(10, 9, 8, 0.6);
+  --overlay: rgba(14, 9, 8, 0.6);
 }
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -297,8 +303,10 @@ body {
   font-weight: 500;
   cursor: pointer;
 }
-.btn:hover { border-color: var(--accent); }
-.btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+/* brand tertiary button: ink hairline on hover — orange stays reserved for
+   the primary CTA fill so it keeps its conversion meaning */
+.btn:hover { border-color: var(--text); }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: #fffefb; }
 .btn.primary:hover { filter: brightness(1.06); }
 .btn.danger:hover { border-color: var(--red); color: var(--red); }
 .btn:disabled { opacity: 0.5; cursor: default; }
@@ -306,7 +314,7 @@ body {
 textarea, input[type="text"], input[type="number"], input[type="password"], input[type="datetime-local"], select {
   background: var(--bg2);
   border: 1px solid var(--border);
-  border-radius: var(--radius-btn);
+  border-radius: var(--radius-input);
   color: var(--text);
   font-family: var(--mono);
   font-size: 13px;
@@ -321,7 +329,8 @@ label.inline { display: inline-flex; align-items: center; gap: 6px; font-size: 1
 .split { display: flex; gap: 12px; flex: 1; min-height: 0; }
 .split > * { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 6px; }
 
-.pane-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-dim); }
+/* brand eyebrow: UPPERCASE with positive tracking, medium weight */
+.pane-label { font-size: 11px; font-weight: 500; text-transform: uppercase; letter-spacing: 0.09em; color: var(--text-dim); }
 
 .status-line { font-size: 13px; min-height: 18px; }
 .status-line.ok { color: var(--green); }
@@ -659,7 +668,7 @@ table.kafka-msgs td.kafka-key { max-width: 160px; overflow: hidden; text-overflo
   width: 100%;
   padding: 7px 10px;
   border: 1px solid var(--border);
-  border-radius: var(--radius-btn, 6px);
+  border-radius: var(--radius-input, 6px);
   background: var(--bg1);
   color: var(--text);
   font-size: 14px;
