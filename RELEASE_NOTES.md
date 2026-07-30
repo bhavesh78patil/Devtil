@@ -47,7 +47,7 @@ single dependency-free binary (with an optional native desktop app).
 
 **Workspaces & UX**
 - Workspaces + tabs, all **autosaved**; rename tabs/workspaces; collapsible
-  sidebar; **light & dark** themes (warm cream + coral / warm dark); an
+  sidebar; **light & dark** themes (warm cream + orange / coffee-ink dark); an
   **App Logs** tool for debugging
 
 ## Install

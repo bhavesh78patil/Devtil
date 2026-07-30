@@ -562,6 +562,16 @@
       collection: { baseUrl: "", headers: [{ k: "", v: "" }], requests: [] },
       history: [], swaggerUrl: "", reqTabs: [], activeReqId: null,
     }),
+    subTabs: (d) => (d.reqTabs || []).map((r) => ({
+      id: r.id,
+      label: r.name || ((r.method || "GET") + " " + (r.url || "request")),
+      select: () => { d.activeReqId = r.id; },
+      remove: () => {
+        const i = d.reqTabs.findIndex((x) => x.id === r.id);
+        if (i >= 0) d.reqTabs.splice(i, 1);
+        if (d.activeReqId === r.id) d.activeReqId = d.reqTabs[0]?.id ?? null;
+      },
+    })),
     render(root, tab, ctx) {
       const d = tab.data;
 
@@ -966,6 +976,20 @@
       sshHost: "", sshPort: "", sshPassword: "",
       context: "", namespace: "", podQuery: "", panels: [],
     }),
+    subTabs: (d, tab) => (d.panels || []).map((p) => ({
+      id: p.id,
+      label: p.pod + " › " + p.container,
+      select: () => {
+        p.minimized = false;
+        // un-maximize so the selected panel is actually visible
+        const reg = tab && kubeReg[tab.id];
+        if (reg && reg.maximizedId && reg.maximizedId !== p.id) reg.maximizedId = null;
+      },
+      remove: () => {
+        const i = d.panels.findIndex((x) => x.id === p.id);
+        if (i >= 0) d.panels.splice(i, 1);
+      },
+    })),
     render(root, tab, ctx) {
       const d = tab.data;
       if (!Array.isArray(d.panels)) d.panels = [];
@@ -1024,6 +1048,9 @@
           panelsArea.append(el("div", { class: "status-line dim", text: "No panels open. Click a container above to open a terminal for it." }));
           return;
         }
+        // a maximized panel can be removed elsewhere (tab tree, another render);
+        // a stale id would filter every panel out and leave the area blank
+        if (reg.maximizedId && !d.panels.some((p) => p.id === reg.maximizedId)) reg.maximizedId = null;
         const list = reg.maximizedId ? d.panels.filter((p) => p.id === reg.maximizedId) : d.panels;
         for (const panel of list) {
           const node = buildPanel(panel);
@@ -1290,6 +1317,20 @@
     name: "SSH / PuTTY",
     desc: "Interactive SSH terminals (real PTY over WebSocket): multiple sessions in one tab, broadcast typing to all, minimize/maximize/close each.",
     defaults: () => ({ sessions: [], savedHosts: [], newHost: "", newPort: "22", newUser: "", newPass: "", shared: "" }),
+    subTabs: (d, tab) => (d.sessions || []).map((s) => ({
+      id: s.id,
+      label: (s.username ? s.username + "@" : "") + s.host + ":" + (s.port || "22"),
+      select: () => {
+        s.minimized = false;
+        // un-maximize so the selected session is actually visible
+        const reg = tab && puttyReg[tab.id];
+        if (reg && reg.maximizedId && reg.maximizedId !== s.id) reg.maximizedId = null;
+      },
+      remove: () => {
+        const i = d.sessions.findIndex((x) => x.id === s.id);
+        if (i >= 0) d.sessions.splice(i, 1);
+      },
+    })),
     render(root, tab, ctx) {
       const d = tab.data;
       if (!Array.isArray(d.sessions)) d.sessions = [];
@@ -1305,8 +1346,8 @@
       const themeColors = () => {
         const dark = document.documentElement.getAttribute("data-theme") === "dark";
         return dark
-          ? { background: "#201e1b", foreground: "#faf9f5", cursor: "#e0906f" }
-          : { background: "#faf9f5", foreground: "#141413", cursor: "#cc785c" };
+          ? { background: "#201515", foreground: "#fffefb", cursor: "#ff6a2b" }
+          : { background: "#fffefb", foreground: "#201515", cursor: "#ff4f00" };
       };
 
       function connect(s) {
@@ -1448,6 +1489,17 @@
 
       function renderPanels() {
         if (!hasXterm) { panelsArea.replaceChildren(el("div", { class: "status-line err", text: "Terminal component failed to load." })); return; }
+        // dispose live terminals whose session was removed elsewhere (e.g. the
+        // workspace tab tree) so the shell doesn't linger unseen
+        for (const id of Object.keys(rt)) {
+          if (!d.sessions.some((s) => s.id === id)) {
+            try { rt[id].ro && rt[id].ro.disconnect(); } catch (e) {}
+            try { rt[id].ws && rt[id].ws.close(); } catch (e) {}
+            try { rt[id].term && rt[id].term.dispose(); } catch (e) {}
+            delete rt[id];
+            delete nodes[id];
+          }
+        }
         if (!d.sessions.length) { panelsArea.replaceChildren(el("div", { class: "status-line dim", text: "No sessions. Add a host above and click “Open session”." })); return; }
         // Reconcile in place: keep each session's persistent panel node, drop the
         // nodes of closed sessions, and hide (not remove) panels when another is
@@ -1455,6 +1507,9 @@
         // per-terminal ResizeObserver re-fits when a panel grows/shrinks (e.g. a
         // sibling closes) so xterm reflows and repaints at the new size.
         const alive = new Set(d.sessions.map((s) => s.id));
+        // a maximized session can be removed elsewhere (tab tree, close);
+        // a stale id would mark every surviving panel hidden — nothing shows
+        if (reg.maximizedId && !alive.has(reg.maximizedId)) reg.maximizedId = null;
         for (const child of Array.from(panelsArea.children)) {
           if (!child._sid || !alive.has(child._sid)) child.remove();
         }
@@ -1709,6 +1764,21 @@
       name: cfg.name,
       desc: cfg.desc,
       defaults: () => ({ connections: [], activeConnId: null, consoles: [], activeConsoleId: null }),
+      // inner console tabs, for the workspace tab tree in the sidebar
+      subTabs: (d) => (d.consoles || []).map((c) => {
+        const conn = (d.connections || []).find((x) => x.id === c.connId);
+        const where = conn ? (conn.name || cfg.connName(conn) || "") : "";
+        return {
+          id: c.id,
+          label: cfg.consoleLabel(c) + (where ? " · " + where : ""),
+          select: () => { d.activeConsoleId = c.id; if (c.connId) d.activeConnId = c.connId; },
+          remove: () => {
+            const i = d.consoles.findIndex((x) => x.id === c.id);
+            if (i >= 0) d.consoles.splice(i, 1);
+            if (d.activeConsoleId === c.id) d.activeConsoleId = d.consoles[0]?.id ?? null;
+          },
+        };
+      }),
       render(root, tab, ctx) {
         const d = tab.data;
         if (!Array.isArray(d.connections)) d.connections = [];
@@ -1902,14 +1972,63 @@
     if (!res.columns || !res.columns.length) {
       return el("div", { class: "status-line ok", text: `✓ OK — ${res.rowsAffected ?? 0} row(s) affected · ${res.durationMs ?? 0} ms` });
     }
+
+    const table = el("table", { class: "kv rg" });
+    const headRow = el("tr");
+
+    // draggable grip on each header: freezes the current layout on first use,
+    // then resizes just that column (the table grows/shrinks and the wrapper
+    // scrolls horizontally)
+    const addGrip = (th) => {
+      const grip = el("span", { class: "col-grip", title: "Drag to resize column" });
+      grip.addEventListener("mousedown", (e) => {
+        e.preventDefault();
+        const startX = e.clientX, startW = th.offsetWidth, startTableW = table.offsetWidth;
+        if (table.style.tableLayout !== "fixed") {
+          for (const h of headRow.children) h.style.width = h.offsetWidth + "px";
+          table.style.tableLayout = "fixed";
+          table.style.width = startTableW + "px";
+        }
+        const move = (ev) => {
+          const dx = ev.clientX - startX;
+          const w = Math.max(60, startW + dx);
+          th.style.width = w + "px";
+          table.style.width = startTableW + (w - startW) + "px";
+        };
+        const up = () => { document.removeEventListener("mousemove", move); document.removeEventListener("mouseup", up); };
+        document.addEventListener("mousemove", move);
+        document.addEventListener("mouseup", up);
+      });
+      th.append(grip);
+    };
+    for (const cName of res.columns) {
+      const th = el("th", {}, [el("span", { text: cName })]);
+      addGrip(th);
+      headRow.append(th);
+    }
+    table.append(headRow);
+
+    const looksJson = (s) => (s.startsWith("{") || s.startsWith("[")) && s.length > 1;
+    for (const r of res.rows) {
+      table.append(el("tr", {}, r.map((v, i) => {
+        const s = String(v ?? "");
+        const td = el("td", { class: "rg-cell", title: "Double-click to expand (pretty-prints JSON)" }, [
+          el("span", { class: "rg-cell-text", text: s }),
+        ]);
+        if (s.length > 60 || looksJson(s.trim())) {
+          td.append(el("button", {
+            class: "icon-btn rg-expand", text: "⤢", title: "Expand — JSON is shown formatted",
+            onclick: (e) => { e.stopPropagation(); showJsonModal(res.columns[i], s); },
+          }));
+        }
+        td.addEventListener("dblclick", () => showJsonModal(res.columns[i], s));
+        return td;
+      })));
+    }
+
     return el("div", { class: "tool", style: "flex:1;min-height:0" }, [
       el("div", { class: "status-line ok", text: `✓ ${res.rows.length} row(s)${res.truncated ? " (truncated)" : ""} · ${res.durationMs} ms` }),
-      el("div", { style: "overflow:auto;flex:1;min-height:120px" }, [
-        el("table", { class: "kv" }, [
-          el("tr", {}, res.columns.map((c) => el("th", { text: c }))),
-          ...res.rows.map((r) => el("tr", {}, r.map((v) => el("td", { text: v })))),
-        ]),
-      ]),
+      el("div", { style: "overflow:auto;flex:1;min-height:120px" }, [table]),
     ]);
   }
 
@@ -2051,7 +2170,10 @@
     };
     refreshTarget();
 
-    const query = el("textarea", { rows: "5", style: "width:100%", spellcheck: "false", placeholder: cfg0.placeholder });
+    const query = el("textarea", {
+      rows: "6", style: "width:100%", spellcheck: "false",
+      placeholder: cfg0.placeholder + ";\n-- multiple queries supported: separate with ';' — select one (or put the cursor on it) and Run",
+    });
     query.value = c.query || "";
     query.addEventListener("input", () => { c.query = query.value; ctx.save(); });
 
@@ -2059,24 +2181,45 @@
     maxRows.value = c.maxRows || "200";
     maxRows.addEventListener("input", () => { c.maxRows = maxRows.value; ctx.save(); });
 
+    // The editor can hold several statements. Run executes the selected text
+    // if there is a selection; otherwise the ';'-separated statement under the
+    // cursor (the whole text when there's only one). Naive split: a ';' inside
+    // a string literal counts as a separator.
+    const pickStatement = () => {
+      const full = query.value || "";
+      const s = query.selectionStart ?? 0, e = query.selectionEnd ?? 0;
+      if (e > s && full.slice(s, e).trim()) return { text: full.slice(s, e).trim(), how: "selection" };
+      const parts = [];
+      let off = 0;
+      for (const seg of full.split(";")) {
+        parts.push({ text: seg, start: off, end: off + seg.length });
+        off += seg.length + 1;
+      }
+      const stmts = parts.filter((p) => p.text.trim());
+      if (stmts.length <= 1) return { text: full.trim(), how: "all" };
+      const cur = stmts.find((p) => s >= p.start && s <= p.end + 1) || stmts[stmts.length - 1];
+      return { text: cur.text.trim(), how: `statement ${stmts.indexOf(cur) + 1} of ${stmts.length}` };
+    };
+
     const run = async () => {
-      if (!(c.query || "").trim()) return setStatus(status, "✗ Enter a query", "err");
+      const picked = pickStatement();
+      if (!picked.text) return setStatus(status, "✗ Enter a query", "err");
       const k = cluster();
-      setStatus(status, "Running…", "dim");
+      setStatus(status, picked.how === "all" ? "Running…" : `Running ${picked.how}…`, "dim");
       try {
         const res = await api("POST", "/api/db/query", {
           type: resolve(k).type,
           conn: { ...k, port: Number(k.port) || 0 },
-          query: c.query,
+          query: picked.text,
           maxRows: Number(c.maxRows) || 200,
         });
         c.result = res;
-        setStatus(status, "", "dim");
+        setStatus(status, picked.how === "all" ? "" : `✓ ran ${picked.how}`, picked.how === "all" ? "dim" : "ok");
       } catch (e) {
         c.result = { error: e.message };
         setStatus(status, "", "dim");
       }
-      c.name = consoleName(c.query, "query");
+      c.name = consoleName(picked.text, "query");
       ctx.save();
       out.replaceChildren(resultGrid(c.result));
     };
@@ -2089,11 +2232,13 @@
     const browserCfg = () => resolve(cluster()).browser;
 
     // ---- export: re-run the current query at the export size, download ----
+    // (same statement Run would pick: the selection, or the one under the cursor)
     const doExport = async (fmt, n) => {
-      if (!(c.query || "").trim()) return setStatus(status, "✗ Enter (or build) a query first", "err");
+      const picked = pickStatement();
+      if (!picked.text) return setStatus(status, "✗ Enter (or build) a query first", "err");
       setStatus(status, `Exporting up to ${n} row(s)…`, "dim");
       try {
-        const res = await dbq(c.query, n);
+        const res = await dbq(picked.text, n);
         if (!res.columns || !res.columns.length) return setStatus(status, "✗ The query returned no result grid to export", "err");
         exportRows(fmt, resolve(cluster()).type + "-export", res.columns, res.rows || []);
         setStatus(status, `✓ Exported ${(res.rows || []).length} row(s)${res.truncated ? " (truncated)" : ""}`, "ok");
@@ -2119,10 +2264,16 @@
       colsBox.replaceChildren();
       if (!c.table || !Array.isArray(c.cols) || !c.cols.length) return;
       if (!Array.isArray(c.selectedCols)) c.selectedCols = c.cols.map((f) => f.name);
-      colsBox.append(
-        el("span", { class: "pane-label", text: `Columns of ${c.table} — pick what to select` }),
-        colsPicker(c.cols, c.selectedCols, (next) => { c.selectedCols = next; ctx.save(); })
-      );
+      // collapsed by default — open to pick a subset of columns
+      const summary = el("summary", { text: `Columns of ${c.table} (${c.selectedCols.length}/${c.cols.length} selected) — open to choose` });
+      colsBox.append(el("details", { class: "section" }, [
+        summary,
+        colsPicker(c.cols, c.selectedCols, (next) => {
+          c.selectedCols = next;
+          summary.textContent = `Columns of ${c.table} (${next.length}/${c.cols.length} selected) — open to choose`;
+          ctx.save();
+        }),
+      ]));
     };
 
     const loadTables = async () => {
@@ -2586,10 +2737,16 @@
       fieldsBox.replaceChildren();
       if (!c.index || !Array.isArray(c.fields) || !c.fields.length) return;
       if (!Array.isArray(c.selectedFields)) c.selectedFields = c.fields.map((f) => f.name);
-      fieldsBox.append(
-        el("span", { class: "pane-label", text: `Return fields (_source) — pick which columns come back` }),
-        colsPicker(c.fields, c.selectedFields, (next) => { c.selectedFields = next; syncBody(); })
-      );
+      // collapsed by default — open to pick which fields come back
+      const summary = el("summary", { text: `Return fields (_source) — ${c.selectedFields.length}/${c.fields.length} selected, open to choose` });
+      fieldsBox.append(el("details", { class: "section" }, [
+        summary,
+        colsPicker(c.fields, c.selectedFields, (next) => {
+          c.selectedFields = next;
+          summary.textContent = `Return fields (_source) — ${next.length}/${c.fields.length} selected, open to choose`;
+          syncBody();
+        }),
+      ]));
     };
 
     const loadIndices = async () => {
@@ -3000,6 +3157,16 @@
     name: "Notepad",
     desc: "Scratch pads that autosave as you type — multiple pads as inner tabs, named after their first line.",
     defaults: () => ({ pads: [], activePadId: null }),
+    subTabs: (d) => (d.pads || []).map((p) => ({
+      id: p.id,
+      label: ((p.text || "").split("\n")[0].trim().slice(0, 32)) || "pad",
+      select: () => { d.activePadId = p.id; },
+      remove: () => {
+        const i = d.pads.findIndex((x) => x.id === p.id);
+        if (i >= 0) d.pads.splice(i, 1);
+        if (d.activePadId === p.id) d.activePadId = d.pads[0]?.id ?? null;
+      },
+    })),
     render(root, tab, ctx) {
       const d = tab.data;
       const newPad = () => ({ id: uid(), text: "", mono: true });
