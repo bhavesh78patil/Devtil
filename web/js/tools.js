@@ -771,55 +771,35 @@
       const sideBox = el("div", { class: "api-side" });
       const mainBox = el("div", { class: "api-main" });
       root.append(el("div", { class: "api-layout" }, [sideBox, mainBox]));
-      let sideView = "collection";
+      let sideView = "requests";
 
       // ================= side panel =================
 
+      // The panel is split so each tab answers one question: what can I open
+      // (Requests), how is the collection configured (Setup), what did I run
+      // (History) — instead of stacking all of it in one column.
       function renderSide() {
+        const tab = (view, label) => el("button", {
+          class: sideView === view ? "active" : "",
+          text: label,
+          onclick: () => { sideView = view; renderSide(); },
+        });
+        const panels = { requests: requestsPanel, setup: setupPanel, history: historyPanel };
         sideBox.replaceChildren(
           el("div", { class: "subtabs" }, [
-            el("button", {
-              class: sideView === "collection" ? "active" : "",
-              text: `Collection (${col.requests.length})`,
-              onclick: () => { sideView = "collection"; renderSide(); },
-            }),
-            el("button", {
-              class: sideView === "history" ? "active" : "",
-              text: "History",
-              onclick: () => { sideView = "history"; renderSide(); },
-            }),
+            tab("requests", `Requests (${col.requests.length})`),
+            tab("setup", "Setup"),
+            tab("history", "History"),
           ]),
-          sideView === "collection" ? collectionPanel() : historyPanel()
+          (panels[sideView] || requestsPanel)()
         );
       }
 
-      function collectionPanel() {
+      // ---- Requests: what you can open ----
+      function requestsPanel() {
         const box = el("div", { class: "api-side-content" });
-
-        const baseInput = el("input", { type: "text", placeholder: "https://api.example.com", value: col.baseUrl, style: "width:100%" });
-        baseInput.addEventListener("input", () => { col.baseUrl = baseInput.value.trim().replace(/\/+$/, ""); ctx.save(); });
-        box.append(el("span", { class: "pane-label", text: "Base URL" }), baseInput);
-
-        const ghCount = col.headers.filter((h) => h.k.trim()).length;
-        const gh = el("details", { class: "section" }, [
-          el("summary", { text: `Global headers (${ghCount}) — sent with every request under the base URL` }),
-          headersEditor(col.headers),
-        ]);
-        if (ghCount) gh.open = true;
-        box.append(gh);
-
-        // collection auth — used by every request under the base URL whose own
-        // auth is set to "inherit"
-        const ga = el("details", { class: "section" }, [
-          el("summary", { text: authSummary(col.auth) + " — used by requests under the base URL" }),
-          authEditor(col, ctx, { onChange: () => { renderSide(); renderMain(); } }),
-        ]);
-        if (col.auth && col.auth.type && col.auth.type !== "none") ga.open = true;
-        box.append(ga);
-
-        box.append(el("span", { class: "pane-label", text: "Saved requests — click to open in a tab" }));
         if (!col.requests.length) {
-          box.append(el("div", { class: "status-line dim", text: "Nothing saved yet. Import from Swagger below, or use “Save to collection” on a request." }));
+          box.append(el("div", { class: "status-line dim", text: "Nothing saved yet. Use “Save to collection” on a request, or import a Swagger/OpenAPI URL below." }));
         }
         col.requests.forEach((r, i) => {
           box.append(el("div", {
@@ -848,6 +828,32 @@
           importStatus,
           importBox,
         ]));
+        return box;
+      }
+
+      // ---- Setup: what every request under the base URL inherits ----
+      function setupPanel() {
+        const box = el("div", { class: "api-side-content" });
+
+        const baseInput = el("input", { type: "text", placeholder: "https://api.example.com", value: col.baseUrl, style: "width:100%" });
+        baseInput.addEventListener("input", () => { col.baseUrl = baseInput.value.trim().replace(/\/+$/, ""); ctx.save(); });
+        box.append(el("span", { class: "pane-label", text: "Base URL" }), baseInput);
+        box.append(el("div", { class: "status-line dim", text: "Requests starting with this URL inherit the headers and auth below." }));
+
+        const ghCount = col.headers.filter((h) => h.k.trim()).length;
+        const gh = el("details", { class: "section" }, [
+          el("summary", { text: `Global headers (${ghCount})` }),
+          headersEditor(col.headers),
+        ]);
+        if (ghCount) gh.open = true;
+        box.append(gh);
+
+        const ga = el("details", { class: "section" }, [
+          el("summary", { text: authSummary(col.auth) }),
+          authEditor(col, ctx, { onChange: () => { renderSide(); renderMain(); } }),
+        ]);
+        if (col.auth && col.auth.type && col.auth.type !== "none") ga.open = true;
+        box.append(ga);
         return box;
       }
 
@@ -1054,7 +1060,7 @@
           col.requests.push({ method: r.method, path, name: r.name === "New request" ? "" : r.name });
           ctx.save();
           setStatus(status, "✓ Saved — see the Collection panel on the left", "ok");
-          sideView = "collection";
+          sideView = "requests";
           renderSide();
         }
       }

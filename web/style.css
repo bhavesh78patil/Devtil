@@ -380,6 +380,8 @@ table.kv th { color: var(--text-dim); font-weight: 500; white-space: nowrap; }
   overflow: hidden;
 }
 .api-side .subtabs { padding: 0 8px; flex-shrink: 0; }
+/* three tabs have to fit the narrow side panel */
+.api-side .subtabs button { padding: 6px 9px; font-size: 12.5px; }
 .api-side-content {
   padding: 10px;
   overflow-y: auto;
