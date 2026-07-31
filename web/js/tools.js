@@ -2235,69 +2235,88 @@
   }
 
   /** Render a QueryResult (or {error}) as a status line + data grid. */
+  // ---- shared data table ---------------------------------------------------
+  // One table treatment for every result grid (SQL, Kafka, Elastic): resizable
+  // columns, and every cell clamped to a line with hover actions to expand
+  // (pretty-printing JSON) or copy the full value.
+
+  /** A <td> whose text is clamped, with expand + copy on hover. */
+  function gridCell(text, label, extra = []) {
+    const s = text == null ? "" : String(text);
+    const td = el("td", { class: "rg-cell", title: s ? "Double-click to expand · full value is never truncated when copied" : "" });
+    const tools = el("div", { class: "rg-tools" }, [
+      ...extra,
+      el("button", {
+        class: "icon-btn", text: "⤢", title: "Expand" + (looksJson(s) ? " (formatted JSON)" : ""),
+        onclick: (e) => { e.stopPropagation(); showJsonModal(label, s); },
+      }),
+      copyBtn(() => s, "⧉"),
+    ]);
+    td.append(el("span", { class: "rg-cell-text", text: s }), tools);
+    td.addEventListener("dblclick", () => showJsonModal(label, s));
+    return td;
+  }
+
+  const looksJson = (v) => {
+    const s = String(v ?? "").trim();
+    return s.length > 1 && (s.startsWith("{") || s.startsWith("["));
+  };
+
+  /** Make a header cell resizable by dragging its right edge. */
+  function addColGrip(table, headRow, th) {
+    const grip = el("span", { class: "col-grip", title: "Drag to resize column" });
+    grip.addEventListener("mousedown", (e) => {
+      e.preventDefault();
+      const startX = e.clientX, startW = th.offsetWidth, startTableW = table.offsetWidth;
+      if (table.style.tableLayout !== "fixed") {
+        // freeze the current layout so only the dragged column changes
+        for (const h of headRow.children) h.style.width = h.offsetWidth + "px";
+        table.style.tableLayout = "fixed";
+        table.style.width = startTableW + "px";
+      }
+      const move = (ev) => {
+        const w = Math.max(60, startW + (ev.clientX - startX));
+        th.style.width = w + "px";
+        table.style.width = startTableW + (w - startW) + "px";
+      };
+      const up = () => { document.removeEventListener("mousemove", move); document.removeEventListener("mouseup", up); };
+      document.addEventListener("mousemove", move);
+      document.addEventListener("mouseup", up);
+    });
+    th.append(grip);
+  }
+
+  /**
+   * Build a result table. `columns` are header labels; `rows` are arrays of
+   * values, or of {text, extra} to add per-cell buttons.
+   */
+  function dataTable(columns, rows) {
+    const table = el("table", { class: "kv rg" });
+    const headRow = el("tr");
+    for (const name of columns) {
+      const th = el("th", {}, [el("span", { text: name })]);
+      addColGrip(table, headRow, th);
+      headRow.append(th);
+    }
+    table.append(headRow);
+    for (const r of rows) {
+      table.append(el("tr", {}, r.map((v, i) => {
+        const cell = v && typeof v === "object" && "text" in v ? v : { text: v };
+        return gridCell(cell.text, columns[i], cell.extra || []);
+      })));
+    }
+    return el("div", { class: "rg-wrap" }, [table]);
+  }
+
   function resultGrid(res) {
     if (!res) return el("div", { class: "status-line dim", text: "Run a query to see results here" });
     if (res.error) return el("div", { class: "status-line err", text: "✗ " + res.error });
     if (!res.columns || !res.columns.length) {
       return el("div", { class: "status-line ok", text: `✓ OK — ${res.rowsAffected ?? 0} row(s) affected · ${res.durationMs ?? 0} ms` });
     }
-
-    const table = el("table", { class: "kv rg" });
-    const headRow = el("tr");
-
-    // draggable grip on each header: freezes the current layout on first use,
-    // then resizes just that column (the table grows/shrinks and the wrapper
-    // scrolls horizontally)
-    const addGrip = (th) => {
-      const grip = el("span", { class: "col-grip", title: "Drag to resize column" });
-      grip.addEventListener("mousedown", (e) => {
-        e.preventDefault();
-        const startX = e.clientX, startW = th.offsetWidth, startTableW = table.offsetWidth;
-        if (table.style.tableLayout !== "fixed") {
-          for (const h of headRow.children) h.style.width = h.offsetWidth + "px";
-          table.style.tableLayout = "fixed";
-          table.style.width = startTableW + "px";
-        }
-        const move = (ev) => {
-          const dx = ev.clientX - startX;
-          const w = Math.max(60, startW + dx);
-          th.style.width = w + "px";
-          table.style.width = startTableW + (w - startW) + "px";
-        };
-        const up = () => { document.removeEventListener("mousemove", move); document.removeEventListener("mouseup", up); };
-        document.addEventListener("mousemove", move);
-        document.addEventListener("mouseup", up);
-      });
-      th.append(grip);
-    };
-    for (const cName of res.columns) {
-      const th = el("th", {}, [el("span", { text: cName })]);
-      addGrip(th);
-      headRow.append(th);
-    }
-    table.append(headRow);
-
-    const looksJson = (s) => (s.startsWith("{") || s.startsWith("[")) && s.length > 1;
-    for (const r of res.rows) {
-      table.append(el("tr", {}, r.map((v, i) => {
-        const s = String(v ?? "");
-        const td = el("td", { class: "rg-cell", title: "Double-click to expand (pretty-prints JSON)" }, [
-          el("span", { class: "rg-cell-text", text: s }),
-        ]);
-        if (s.length > 60 || looksJson(s.trim())) {
-          td.append(el("button", {
-            class: "icon-btn rg-expand", text: "⤢", title: "Expand — JSON is shown formatted",
-            onclick: (e) => { e.stopPropagation(); showJsonModal(res.columns[i], s); },
-          }));
-        }
-        td.addEventListener("dblclick", () => showJsonModal(res.columns[i], s));
-        return td;
-      })));
-    }
-
     return el("div", { class: "tool", style: "flex:1;min-height:0" }, [
       el("div", { class: "status-line ok", text: `✓ ${res.rows.length} row(s)${res.truncated ? " (truncated)" : ""} · ${res.durationMs} ms` }),
-      el("div", { style: "overflow:auto;flex:1;min-height:120px" }, [table]),
+      dataTable(res.columns, res.rows),
     ]);
   }
 
@@ -2676,15 +2695,9 @@
 
     const tryPretty = (v) => { try { return JSON.stringify(JSON.parse(v), null, 2); } catch { return v == null ? "" : String(v); } };
 
-    const valueCell = (m) => {
+    // the ⤢ button on a value cell opens the full-screen Value/Headers view
+    const maximizeBtn = (m) => {
       const pretty = tryPretty(m.value);
-      const pre = el("pre", { class: "kafka-val-pre collapsed" });
-      pre.textContent = pretty;
-      const toggle = el("button", { class: "btn xs", text: "Expand" });
-      toggle.addEventListener("click", () => {
-        const collapsed = pre.classList.toggle("collapsed");
-        toggle.textContent = collapsed ? "Expand" : "Collapse";
-      });
       const headersView = () => {
         const hs = m.headers || [];
         if (!hs.length) return el("div", { class: "status-line dim", text: "No headers on this message." });
@@ -2702,12 +2715,11 @@
         { label: "Value", build: valueView },
         { label: `Headers (${(m.headers || []).length})`, build: headersView },
       ]);
-      const tools = el("div", { class: "kafka-val-tools" }, [
-        toggle,
-        el("button", { class: "btn xs", text: "⤢ Maximize", title: "Open full-screen with Value & Headers tabs", onclick: maximize }),
-        copyBtn(() => pretty, "Copy"),
-      ]);
-      return el("td", { class: "kafka-val-cell" }, [tools, pre]);
+      return el("button", {
+        class: "icon-btn", text: "⛶",
+        title: "Open full-screen with Value & Headers tabs",
+        onclick: (e) => { e.stopPropagation(); maximize(); },
+      });
     };
 
     const draw = () => {
@@ -2717,20 +2729,14 @@
         const rows = c.messages.slice().reverse();
         out.append(
           el("span", { class: "pane-label", text: `Messages (${c.messages.length}, newest first)` }),
-          el("table", { class: "kv kafka-msgs" }, [
-            el("tr", {}, [
-              el("th", { class: "nowrap", text: "P/Offset" }),
-              el("th", { class: "nowrap", text: "Time" }),
-              el("th", { class: "nowrap", text: "Key" }),
-              el("th", { text: "Value" }),
-            ]),
-            ...rows.map((m) => el("tr", {}, [
-              el("td", { class: "nowrap", text: m.partition + "/" + m.offset }),
-              el("td", { class: "nowrap", text: (m.time || "").replace("T", " ").replace("Z", "") }),
-              el("td", { class: "kafka-key", title: m.key, text: m.key }),
-              valueCell(m),
-            ])),
-          ])
+          // same table treatment as the SQL/Elastic grids: resizable columns,
+          // every cell expandable and copyable (so a long key is reachable)
+          dataTable(["P/Offset", "Time", "Key", "Value"], rows.map((m) => [
+            m.partition + "/" + m.offset,
+            (m.time || "").replace("T", " ").replace("Z", ""),
+            m.key,
+            { text: tryPretty(m.value), extra: [maximizeBtn(m)] },
+          ]))
         );
       }
     };
@@ -2942,7 +2948,42 @@
     // is bound to right now, not a connection captured when the tab was drawn.
     const cluster = () => (getConn && getConn()) || conn;
     const status = el("div", { class: "status-line dim" });
-    const out = el("pre", { class: "output", style: "flex:1;min-height:160px" });
+    const out = el("div", { class: "tool", style: "flex:1;min-height:160px" });
+    let esView = "table"; // _search results render as a grid by default
+
+    // Search responses get the same table treatment as the SQL/Kafka grids —
+    // hits are flattened to dot-notation columns, every cell expandable and
+    // copyable — with the raw JSON one click away.
+    const drawResponse = () => {
+      out.replaceChildren();
+      const text = c.response || "";
+      if (!text) {
+        out.append(el("div", { class: "status-line dim", text: "Send a request to see the response here" }));
+        return;
+      }
+      const rawPre = () => {
+        const p = el("pre", { class: "output", style: "flex:1;overflow:auto;margin:0" });
+        p.textContent = text;
+        return p;
+      };
+      let hits = null;
+      try {
+        const j = JSON.parse(text);
+        if (j && j.hits && Array.isArray(j.hits.hits)) hits = j.hits.hits;
+      } catch { /* not JSON — show it raw */ }
+      if (!hits) { out.append(rawPre()); return; }
+
+      out.append(el("div", { class: "subtabs" }, [
+        el("button", { class: esView === "table" ? "active" : "", text: `Table (${hits.length})`, onclick: () => { esView = "table"; drawResponse(); } }),
+        el("button", { class: esView === "raw" ? "active" : "", text: "Raw JSON", onclick: () => { esView = "raw"; drawResponse(); } }),
+        copyBtn(() => text, "Copy JSON"),
+      ]));
+      if (esView === "raw" || !hits.length) { out.append(rawPre()); return; }
+      const flat = hits.map((h) => flatten(h._source, "", { _id: h._id }));
+      const cols = [];
+      for (const row of flat) for (const k of Object.keys(row)) if (!cols.includes(k)) cols.push(k);
+      out.append(dataTable(cols, flat.map((row) => cols.map((k) => row[k] ?? ""))));
+    };
 
     // Visible target so it's unambiguous which cluster this console talks to.
     const target = el("div", { class: "es-target" });
@@ -2986,7 +3027,7 @@
         c.response = text;
         c.name = method + " /" + String(p || "").split("?")[0];
         ctx.save();
-        out.textContent = text;
+        drawResponse();
         setStatus(status, `${r.status < 400 ? "✓" : "✗"} ${r.status} · ${r.durationMs} ms · ${fmtBytes(r.size)}`, r.status < 400 ? "ok" : "err");
       } catch (e) {
         setStatus(status, "✗ " + e.message, "err");
@@ -3285,7 +3326,7 @@
       status,
       out
     );
-    if (c.response) out.textContent = c.response;
+    drawResponse();
   }
 
   clientTool({
