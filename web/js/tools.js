@@ -2377,8 +2377,10 @@
     if (fmt === "xls") downloadFile(`${baseName}-${ts}.xls`, "application/vnd.ms-excel", toXls(cols, rows));
     else downloadFile(`${baseName}-${ts}.csv`, "text/csv;charset=utf-8", toCsv(cols, rows));
   }
-  // shared "Export [n] rows [CSV] [Excel]" toolbar row; doExport(fmt, n)
-  function exportBar(c, ctx, doExport) {
+  // shared "Export [n] rows [CSV] [Excel]" toolbar row; doExport(fmt, n).
+  // `extras` are appended after the export buttons (e.g. a copy-response
+  // button) so each console can add its own action without a second toolbar.
+  function exportBar(c, ctx, doExport, extras = []) {
     const n = el("input", { type: "number", min: "1", max: String(EXPORT_MAX), style: "width:90px", title: `Rows to export (max ${EXPORT_MAX})` });
     n.value = c.exportN || String(EXPORT_DEFAULT);
     n.addEventListener("input", () => { c.exportN = n.value; ctx.save(); });
@@ -2388,6 +2390,7 @@
       el("span", { class: "pane-label", text: "rows as" }),
       el("button", { class: "btn", text: "CSV", onclick: () => doExport("csv", clampExport(c.exportN)) }),
       el("button", { class: "btn", text: "Excel", onclick: () => doExport("xls", clampExport(c.exportN)) }),
+      ...extras,
     ]);
   }
 
@@ -2976,13 +2979,23 @@
       out.append(el("div", { class: "subtabs" }, [
         el("button", { class: esView === "table" ? "active" : "", text: `Table (${hits.length})`, onclick: () => { esView = "table"; drawResponse(); } }),
         el("button", { class: esView === "raw" ? "active" : "", text: "Raw JSON", onclick: () => { esView = "raw"; drawResponse(); } }),
-        copyBtn(() => text, "Copy JSON"),
       ]));
       if (esView === "raw" || !hits.length) { out.append(rawPre()); return; }
       const flat = hits.map((h) => flatten(h._source, "", { _id: h._id }));
       const cols = [];
       for (const row of flat) for (const k of Object.keys(row)) if (!cols.includes(k)) cols.push(k);
       out.append(dataTable(cols, flat.map((row) => cols.map((k) => row[k] ?? ""))));
+    };
+
+    // copies the whole response body exactly as shown (pretty-printed JSON)
+    const copyResponseBtn = () => {
+      const btn = el("button", { class: "btn", text: "Copy response" });
+      btn.addEventListener("click", () => {
+        const text = c.response || "";
+        if (!text) return setStatus(status, "✗ Nothing to copy — send a request first", "err");
+        Devtil.copyText(text, btn);
+      });
+      return btn;
     };
 
     // Visible target so it's unambiguous which cluster this console talks to.
@@ -3322,7 +3335,9 @@
         el("button", { class: "btn primary", text: "Send", onclick: () => send(c.method || "GET", c.path, c.body) }),
       ]),
       el("div", {}, [el("span", { class: "pane-label", text: "Body (JSON, for _search etc.)" }), reqBody]),
-      exportBar(c, ctx, doExport),
+      // copy sits with the export actions so it's available for every
+      // response, not just the _search ones that render as a table
+      exportBar(c, ctx, doExport, [copyResponseBtn()]),
       status,
       out
     );
