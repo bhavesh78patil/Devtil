@@ -514,6 +514,22 @@ details.section[open] summary { margin-bottom: 8px; }
 .btn.chip { padding: 3px 10px; margin: 2px 4px 2px 0; font-size: 12px; }
 
 /* container terminal panels (MobaXterm-like) */
+/* API client auth editor */
+.auth-box { display: flex; flex-direction: column; gap: 8px; }
+.auth-box .form-grid .field { flex: 1 1 180px; min-width: 0; }
+.auth-preview { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.auth-preview code {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--mono);
+  font-size: 12px;
+  background: var(--bg3);
+  border-radius: var(--radius-input);
+  padding: 5px 8px;
+  word-break: break-all;
+  white-space: pre-wrap;
+}
+
 /* DB result grid: resizable columns + expandable cells */
 .kv.rg th { position: relative; padding-right: 16px; }
 .kv.rg th > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: block; }

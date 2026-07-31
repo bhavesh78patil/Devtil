@@ -17,7 +17,8 @@ single dependency-free binary (with an optional native desktop app).
 - **Notepad** — multiple autosaving pads as inner tabs
 
 **API client (Postman-style)**
-- Request tabs, headers, body, response viewer; **Collection** with a base URL
+- Request tabs, headers, body, response viewer; **auth** (Basic / Bearer /
+  API key, per request or inherited from the collection); **Collection** with a base URL
   and **global headers**; **History**; import endpoints from a
   **Swagger/OpenAPI** URL. Requests are proxied through the backend so CORS is
   never in the way.

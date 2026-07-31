@@ -553,11 +553,129 @@
     return { endpoints, baseUrl: base.replace(/\/+$/, "") };
   }
 
+  // ---- request authorization (API client) --------------------------------
+  // Auth lives on the request, and on the collection so requests under the
+  // base URL can inherit one set of credentials.
+  const AUTH_TYPES = [
+    { value: "none", label: "No auth" },
+    { value: "basic", label: "Basic" },
+    { value: "bearer", label: "Bearer token" },
+    { value: "apikey", label: "API key" },
+  ];
+
+  /** Turn an auth config into the headers (and query params) it contributes. */
+  function authParts(auth) {
+    const out = { headers: {}, query: [] };
+    if (!auth) return out;
+    switch (auth.type) {
+      case "basic": {
+        const u = auth.username || "", p = auth.password || "";
+        if (!u && !p) break;
+        // RFC 7617: base64 of "user:password" — b64encode is UTF-8 safe, so
+        // non-ASCII credentials encode correctly
+        out.headers["Authorization"] = "Basic " + b64encode(u + ":" + p);
+        break;
+      }
+      case "bearer": {
+        const t = (auth.token || "").trim();
+        if (!t) break;
+        // tolerate a token pasted with the scheme already on it
+        out.headers["Authorization"] = /^bearer\s+/i.test(t) ? t : "Bearer " + t;
+        break;
+      }
+      case "apikey": {
+        const k = (auth.key || "").trim();
+        if (!k) break;
+        if (auth.in === "query") out.query.push([k, auth.value || ""]);
+        else out.headers[k] = auth.value || "";
+        break;
+      }
+    }
+    return out;
+  }
+
+  const appendQuery = (url, pairs) => {
+    if (!pairs.length) return url;
+    const qs = pairs.map(([k, v]) => encodeURIComponent(k) + "=" + encodeURIComponent(v)).join("&");
+    return url + (url.includes("?") ? "&" : "?") + qs;
+  };
+
+  /** Editor for an auth config living on `holder.auth`. */
+  function authEditor(holder, ctx, { allowInherit = false, onChange } = {}) {
+    if (!holder.auth) holder.auth = { type: allowInherit ? "inherit" : "none", in: "header" };
+    const a = holder.auth;
+    const box = el("div", { class: "auth-box" });
+    const types = allowInherit
+      ? [{ value: "inherit", label: "Inherit from collection" }, ...AUTH_TYPES]
+      : AUTH_TYPES;
+
+    const field = (label, node) => el("div", { class: "field" }, [el("span", { class: "pane-label", text: label }), node]);
+    const bind = (key, attrs) => {
+      const input = el("input", { style: "width:100%", ...attrs });
+      input.value = a[key] || "";
+      input.addEventListener("input", () => { a[key] = input.value; ctx.save(); draw(); });
+      return input;
+    };
+
+    function draw() {
+      box.replaceChildren();
+      const sel = el("select", {}, types.map((t) => el("option", { value: t.value, text: t.label })));
+      sel.value = a.type || types[0].value;
+      sel.addEventListener("change", () => { a.type = sel.value; ctx.save(); draw(); onChange && onChange(); });
+      box.append(el("div", { class: "toolbar" }, [el("span", { class: "pane-label", text: "Type" }), sel]));
+
+      if (a.type === "basic") {
+        box.append(el("div", { class: "form-grid" }, [
+          field("Username", bind("username", { type: "text", placeholder: "user" })),
+          field("Password", bind("password", { type: "password", placeholder: "password" })),
+        ]));
+      } else if (a.type === "bearer") {
+        box.append(el("div", { class: "form-grid" }, [
+          field("Token", bind("token", { type: "text", placeholder: "eyJhbGciOi… (the 'Bearer ' prefix is added for you)" })),
+        ]));
+      } else if (a.type === "apikey") {
+        const inSel = el("select", {}, [
+          el("option", { value: "header", text: "Header" }),
+          el("option", { value: "query", text: "Query param" }),
+        ]);
+        inSel.value = a.in || "header";
+        inSel.addEventListener("change", () => { a.in = inSel.value; ctx.save(); draw(); });
+        box.append(el("div", { class: "form-grid" }, [
+          field("Key", bind("key", { type: "text", placeholder: "X-API-Key" })),
+          field("Value", bind("value", { type: "text", placeholder: "secret" })),
+          field("Send in", inSel),
+        ]));
+      }
+
+      // show exactly what will be sent, so the encoding is verifiable
+      const parts = authParts(a);
+      const lines = Object.entries(parts.headers).map(([k, v]) => k + ": " + v)
+        .concat(parts.query.map(([k, v]) => "?" + k + "=" + v));
+      if (lines.length) {
+        const text = lines.join("\n");
+        box.append(el("div", { class: "auth-preview" }, [
+          el("span", { class: "pane-label", text: "Sends" }),
+          el("code", { text }),
+          copyBtn(() => text, "Copy"),
+        ]));
+      }
+    }
+    draw();
+    return box;
+  }
+
+  const authSummary = (auth, inheriting) => {
+    const t = (auth && auth.type) || "none";
+    if (t === "inherit") return "Auth — inherit from collection" + (inheriting ? " (" + inheriting + ")" : "");
+    const label = (AUTH_TYPES.find((x) => x.value === t) || AUTH_TYPES[0]).label;
+    return "Auth — " + label;
+  };
+
   registerTool({
     type: "api",
     icon: "🚀",
     name: "API Client",
-    desc: "Postman-like client: request tabs, a saved collection with global headers, Swagger/OpenAPI import, and history.",
+    desc: "Postman-like client: request tabs, auth (Basic / Bearer / API key), a saved collection with global headers, Swagger/OpenAPI import, and history.",
     defaults: () => ({
       collection: { baseUrl: "", headers: [{ k: "", v: "" }], requests: [] },
       history: [], swaggerUrl: "", reqTabs: [], activeReqId: null,
@@ -579,11 +697,13 @@
         id: uid(), name: partial.name || "New request", method: partial.method || "GET",
         url: partial.url || "", headers: partial.headers && partial.headers.length ? partial.headers : [{ k: "", v: "" }],
         body: partial.body || "", insecure: !!partial.insecure, response: partial.response || null,
+        auth: partial.auth || { type: "inherit", in: "header" },
       });
 
       // ---- init & migration from the pre-inner-tabs data shape ----
       if (!d.collection) d.collection = { baseUrl: "", headers: [], requests: [] };
       const col = d.collection;
+      if (!col.auth) col.auth = { type: "none", in: "header" };
       if (!Array.isArray(col.headers) || !col.headers.length) col.headers = [{ k: "", v: "" }];
       if (!Array.isArray(col.requests)) col.requests = [];
       if (!Array.isArray(d.history)) d.history = [];
@@ -687,6 +807,15 @@
         ]);
         if (ghCount) gh.open = true;
         box.append(gh);
+
+        // collection auth — used by every request under the base URL whose own
+        // auth is set to "inherit"
+        const ga = el("details", { class: "section" }, [
+          el("summary", { text: authSummary(col.auth) + " — used by requests under the base URL" }),
+          authEditor(col, ctx, { onChange: () => { renderSide(); renderMain(); } }),
+        ]);
+        if (col.auth && col.auth.type && col.auth.type !== "none") ga.open = true;
+        box.append(ga);
 
         box.append(el("span", { class: "pane-label", text: "Saved requests — click to open in a tab" }));
         if (!col.requests.length) {
@@ -844,6 +973,16 @@
           el("button", { class: "btn", text: "Save to collection", title: "Keep this request in the collection panel", onclick: saveToCollection }),
         ]));
 
+        // auth: falls back to the collection's when set to inherit
+        const colAuthLabel = (col.auth && col.auth.type && col.auth.type !== "none")
+          ? (AUTH_TYPES.find((x) => x.value === col.auth.type) || {}).label : "none set";
+        const authDetails = el("details", { class: "section" }, [
+          el("summary", { text: authSummary(r.auth, colAuthLabel) }),
+          authEditor(r, ctx, { allowInherit: true, onChange: () => renderMain(view) }),
+        ]);
+        if (r.auth && r.auth.type && r.auth.type !== "inherit" && r.auth.type !== "none") authDetails.open = true;
+        mainBox.append(authDetails);
+
         const hdrCount = r.headers.filter((h) => h.k.trim()).length;
         const hdrDetails = el("details", { class: "section" }, [
           el("summary", { text: `Request headers (${hdrCount})` }),
@@ -875,12 +1014,21 @@
           setStatus(status, "Sending…", "dim");
           try {
             const headers = {};
-            if (inCollection(r.url.trim())) {
+            const under = inCollection(r.url.trim());
+            if (under) {
               for (const h of col.headers) if (h.k.trim()) headers[h.k.trim()] = h.v;
             }
+            // request auth wins; "inherit" falls back to the collection's auth
+            // (only for requests under its base URL)
+            const auth = (r.auth && r.auth.type && r.auth.type !== "inherit")
+              ? r.auth
+              : (under ? col.auth : null);
+            const parts = authParts(auth);
+            Object.assign(headers, parts.headers);
+            // an explicit header always overrides the generated one
             for (const h of r.headers) if (h.k.trim()) headers[h.k.trim()] = h.v;
             const resp = await api("POST", "/api/proxy", {
-              method: r.method, url: r.url.trim(), headers, body: r.body, insecure: r.insecure,
+              method: r.method, url: appendQuery(r.url.trim(), parts.query), headers, body: r.body, insecure: r.insecure,
             });
             r.response = resp;
             if (r.name === "New request") r.name = r.method + " " + (shortPath(r.url.trim()) || r.url.trim());
