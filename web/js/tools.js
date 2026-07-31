@@ -553,11 +553,129 @@
     return { endpoints, baseUrl: base.replace(/\/+$/, "") };
   }
 
+  // ---- request authorization (API client) --------------------------------
+  // Auth lives on the request, and on the collection so requests under the
+  // base URL can inherit one set of credentials.
+  const AUTH_TYPES = [
+    { value: "none", label: "No auth" },
+    { value: "basic", label: "Basic" },
+    { value: "bearer", label: "Bearer token" },
+    { value: "apikey", label: "API key" },
+  ];
+
+  /** Turn an auth config into the headers (and query params) it contributes. */
+  function authParts(auth) {
+    const out = { headers: {}, query: [] };
+    if (!auth) return out;
+    switch (auth.type) {
+      case "basic": {
+        const u = auth.username || "", p = auth.password || "";
+        if (!u && !p) break;
+        // RFC 7617: base64 of "user:password" — b64encode is UTF-8 safe, so
+        // non-ASCII credentials encode correctly
+        out.headers["Authorization"] = "Basic " + b64encode(u + ":" + p);
+        break;
+      }
+      case "bearer": {
+        const t = (auth.token || "").trim();
+        if (!t) break;
+        // tolerate a token pasted with the scheme already on it
+        out.headers["Authorization"] = /^bearer\s+/i.test(t) ? t : "Bearer " + t;
+        break;
+      }
+      case "apikey": {
+        const k = (auth.key || "").trim();
+        if (!k) break;
+        if (auth.in === "query") out.query.push([k, auth.value || ""]);
+        else out.headers[k] = auth.value || "";
+        break;
+      }
+    }
+    return out;
+  }
+
+  const appendQuery = (url, pairs) => {
+    if (!pairs.length) return url;
+    const qs = pairs.map(([k, v]) => encodeURIComponent(k) + "=" + encodeURIComponent(v)).join("&");
+    return url + (url.includes("?") ? "&" : "?") + qs;
+  };
+
+  /** Editor for an auth config living on `holder.auth`. */
+  function authEditor(holder, ctx, { allowInherit = false, onChange } = {}) {
+    if (!holder.auth) holder.auth = { type: allowInherit ? "inherit" : "none", in: "header" };
+    const a = holder.auth;
+    const box = el("div", { class: "auth-box" });
+    const types = allowInherit
+      ? [{ value: "inherit", label: "Inherit from collection" }, ...AUTH_TYPES]
+      : AUTH_TYPES;
+
+    const field = (label, node) => el("div", { class: "field" }, [el("span", { class: "pane-label", text: label }), node]);
+    const bind = (key, attrs) => {
+      const input = el("input", { style: "width:100%", ...attrs });
+      input.value = a[key] || "";
+      input.addEventListener("input", () => { a[key] = input.value; ctx.save(); draw(); });
+      return input;
+    };
+
+    function draw() {
+      box.replaceChildren();
+      const sel = el("select", {}, types.map((t) => el("option", { value: t.value, text: t.label })));
+      sel.value = a.type || types[0].value;
+      sel.addEventListener("change", () => { a.type = sel.value; ctx.save(); draw(); onChange && onChange(); });
+      box.append(el("div", { class: "toolbar" }, [el("span", { class: "pane-label", text: "Type" }), sel]));
+
+      if (a.type === "basic") {
+        box.append(el("div", { class: "form-grid" }, [
+          field("Username", bind("username", { type: "text", placeholder: "user" })),
+          field("Password", bind("password", { type: "password", placeholder: "password" })),
+        ]));
+      } else if (a.type === "bearer") {
+        box.append(el("div", { class: "form-grid" }, [
+          field("Token", bind("token", { type: "text", placeholder: "eyJhbGciOi… (the 'Bearer ' prefix is added for you)" })),
+        ]));
+      } else if (a.type === "apikey") {
+        const inSel = el("select", {}, [
+          el("option", { value: "header", text: "Header" }),
+          el("option", { value: "query", text: "Query param" }),
+        ]);
+        inSel.value = a.in || "header";
+        inSel.addEventListener("change", () => { a.in = inSel.value; ctx.save(); draw(); });
+        box.append(el("div", { class: "form-grid" }, [
+          field("Key", bind("key", { type: "text", placeholder: "X-API-Key" })),
+          field("Value", bind("value", { type: "text", placeholder: "secret" })),
+          field("Send in", inSel),
+        ]));
+      }
+
+      // show exactly what will be sent, so the encoding is verifiable
+      const parts = authParts(a);
+      const lines = Object.entries(parts.headers).map(([k, v]) => k + ": " + v)
+        .concat(parts.query.map(([k, v]) => "?" + k + "=" + v));
+      if (lines.length) {
+        const text = lines.join("\n");
+        box.append(el("div", { class: "auth-preview" }, [
+          el("span", { class: "pane-label", text: "Sends" }),
+          el("code", { text }),
+          copyBtn(() => text, "Copy"),
+        ]));
+      }
+    }
+    draw();
+    return box;
+  }
+
+  const authSummary = (auth, inheriting) => {
+    const t = (auth && auth.type) || "none";
+    if (t === "inherit") return "Auth — inherit from collection" + (inheriting ? " (" + inheriting + ")" : "");
+    const label = (AUTH_TYPES.find((x) => x.value === t) || AUTH_TYPES[0]).label;
+    return "Auth — " + label;
+  };
+
   registerTool({
     type: "api",
     icon: "🚀",
     name: "API Client",
-    desc: "Postman-like client: request tabs, a saved collection with global headers, Swagger/OpenAPI import, and history.",
+    desc: "Postman-like client: request tabs, auth (Basic / Bearer / API key), a saved collection with global headers, Swagger/OpenAPI import, and history.",
     defaults: () => ({
       collection: { baseUrl: "", headers: [{ k: "", v: "" }], requests: [] },
       history: [], swaggerUrl: "", reqTabs: [], activeReqId: null,
@@ -579,11 +697,13 @@
         id: uid(), name: partial.name || "New request", method: partial.method || "GET",
         url: partial.url || "", headers: partial.headers && partial.headers.length ? partial.headers : [{ k: "", v: "" }],
         body: partial.body || "", insecure: !!partial.insecure, response: partial.response || null,
+        auth: partial.auth || { type: "inherit", in: "header" },
       });
 
       // ---- init & migration from the pre-inner-tabs data shape ----
       if (!d.collection) d.collection = { baseUrl: "", headers: [], requests: [] };
       const col = d.collection;
+      if (!col.auth) col.auth = { type: "none", in: "header" };
       if (!Array.isArray(col.headers) || !col.headers.length) col.headers = [{ k: "", v: "" }];
       if (!Array.isArray(col.requests)) col.requests = [];
       if (!Array.isArray(d.history)) d.history = [];
@@ -651,46 +771,37 @@
       const sideBox = el("div", { class: "api-side" });
       const mainBox = el("div", { class: "api-main" });
       root.append(el("div", { class: "api-layout" }, [sideBox, mainBox]));
-      let sideView = "collection";
+      let sideView = "requests";
+      // survives the renderSide() rebuild that an import triggers
+      let shareMsg = null;
 
       // ================= side panel =================
 
+      // The panel is split so each tab answers one question: what can I open
+      // (Requests), how is the collection configured (Setup), what did I run
+      // (History) — instead of stacking all of it in one column.
       function renderSide() {
+        const tab = (view, label) => el("button", {
+          class: sideView === view ? "active" : "",
+          text: label,
+          onclick: () => { sideView = view; renderSide(); },
+        });
+        const panels = { requests: requestsPanel, setup: setupPanel, history: historyPanel };
         sideBox.replaceChildren(
           el("div", { class: "subtabs" }, [
-            el("button", {
-              class: sideView === "collection" ? "active" : "",
-              text: `Collection (${col.requests.length})`,
-              onclick: () => { sideView = "collection"; renderSide(); },
-            }),
-            el("button", {
-              class: sideView === "history" ? "active" : "",
-              text: "History",
-              onclick: () => { sideView = "history"; renderSide(); },
-            }),
+            tab("requests", `Requests (${col.requests.length})`),
+            tab("setup", "Setup"),
+            tab("history", "History"),
           ]),
-          sideView === "collection" ? collectionPanel() : historyPanel()
+          (panels[sideView] || requestsPanel)()
         );
       }
 
-      function collectionPanel() {
+      // ---- Requests: what you can open ----
+      function requestsPanel() {
         const box = el("div", { class: "api-side-content" });
-
-        const baseInput = el("input", { type: "text", placeholder: "https://api.example.com", value: col.baseUrl, style: "width:100%" });
-        baseInput.addEventListener("input", () => { col.baseUrl = baseInput.value.trim().replace(/\/+$/, ""); ctx.save(); });
-        box.append(el("span", { class: "pane-label", text: "Base URL" }), baseInput);
-
-        const ghCount = col.headers.filter((h) => h.k.trim()).length;
-        const gh = el("details", { class: "section" }, [
-          el("summary", { text: `Global headers (${ghCount}) — sent with every request under the base URL` }),
-          headersEditor(col.headers),
-        ]);
-        if (ghCount) gh.open = true;
-        box.append(gh);
-
-        box.append(el("span", { class: "pane-label", text: "Saved requests — click to open in a tab" }));
         if (!col.requests.length) {
-          box.append(el("div", { class: "status-line dim", text: "Nothing saved yet. Import from Swagger below, or use “Save to collection” on a request." }));
+          box.append(el("div", { class: "status-line dim", text: "Nothing saved yet. Use “Save to collection” on a request, or import a Swagger/OpenAPI URL below." }));
         }
         col.requests.forEach((r, i) => {
           box.append(el("div", {
@@ -720,6 +831,145 @@
           importBox,
         ]));
         return box;
+      }
+
+      // ---- Setup: what every request under the base URL inherits ----
+      function setupPanel() {
+        const box = el("div", { class: "api-side-content" });
+
+        const baseInput = el("input", { type: "text", placeholder: "https://api.example.com", value: col.baseUrl, style: "width:100%" });
+        baseInput.addEventListener("input", () => { col.baseUrl = baseInput.value.trim().replace(/\/+$/, ""); ctx.save(); });
+        box.append(el("span", { class: "pane-label", text: "Base URL" }), baseInput);
+        box.append(el("div", { class: "status-line dim", text: "Requests starting with this URL inherit the headers and auth below." }));
+
+        const ghCount = col.headers.filter((h) => h.k.trim()).length;
+        const gh = el("details", { class: "section" }, [
+          el("summary", { text: `Global headers (${ghCount})` }),
+          headersEditor(col.headers),
+        ]);
+        if (ghCount) gh.open = true;
+        box.append(gh);
+
+        const ga = el("details", { class: "section" }, [
+          el("summary", { text: authSummary(col.auth) }),
+          authEditor(col, ctx, { onChange: () => { renderSide(); renderMain(); } }),
+        ]);
+        if (col.auth && col.auth.type && col.auth.type !== "none") ga.open = true;
+        box.append(ga);
+
+        box.append(sharePanel());
+        return box;
+      }
+
+      // ---- share: export / import the collection as a JSON file ----
+      function sharePanel() {
+        const shareStatus = el("div", { class: "status-line dim" });
+        const withSecrets = el("input", { type: "checkbox" });
+
+        const doExport = () => {
+          const include = withSecrets.checked;
+          const auth = JSON.parse(JSON.stringify(col.auth || { type: "none" }));
+          if (!include) {
+            // never write passwords/tokens into a file meant for sharing
+            // unless the user explicitly asked for it
+            for (const k of ["password", "token", "value"]) if (auth[k]) auth[k] = "";
+          }
+          const doc = {
+            devtil: "api-collection",
+            version: 1,
+            exportedAt: new Date().toISOString(),
+            containsCredentials: include,
+            collection: {
+              baseUrl: col.baseUrl || "",
+              headers: (col.headers || []).filter((h) => (h.k || "").trim()),
+              auth,
+              requests: col.requests || [],
+            },
+          };
+          const ts = new Date().toISOString().slice(0, 19).replaceAll(":", "-");
+          downloadFile(`devtil-collection-${ts}.json`, "application/json", JSON.stringify(doc, null, 2));
+          shareMsg = include
+            ? { text: "✓ Exported with credentials — treat the file as a secret", kind: "err" }
+            : { text: "✓ Exported — auth credentials left out; global header values are included, so review before sharing", kind: "ok" };
+          setStatus(shareStatus, shareMsg.text, shareMsg.kind);
+        };
+
+        const fileIn = el("input", { type: "file", accept: "application/json,.json", style: "display:none" });
+        fileIn.addEventListener("change", async () => {
+          const f = fileIn.files && fileIn.files[0];
+          if (!f) return;
+          try {
+            const doc = JSON.parse(await f.text());
+            const src = doc.collection || doc; // tolerate a bare collection object
+            if (!Array.isArray(src.requests)) throw new Error("no requests array — is this a Devtil collection export?");
+
+            // merge, never clobber: existing settings win, new requests are added
+            const notes = [];
+            if ((src.baseUrl || "").trim()) {
+              if (!col.baseUrl) col.baseUrl = src.baseUrl.trim().replace(/\/+$/, "");
+              else if (col.baseUrl !== src.baseUrl.trim().replace(/\/+$/, "")) notes.push("kept your base URL");
+            }
+            let addedHeaders = 0;
+            for (const h of src.headers || []) {
+              const k = (h.k || "").trim();
+              if (!k) continue;
+              if ((col.headers || []).some((x) => (x.k || "").trim().toLowerCase() === k.toLowerCase())) continue;
+              col.headers.push({ k, v: h.v || "" });
+              addedHeaders++;
+            }
+            const curAuth = (col.auth && col.auth.type) || "none";
+            if (src.auth && src.auth.type && src.auth.type !== "none") {
+              if (curAuth === "none") col.auth = src.auth;
+              else notes.push("kept your auth");
+            }
+            let added = 0;
+            for (const r of src.requests) {
+              if (!r || !r.path) continue;
+              const method = (r.method || "GET").toUpperCase();
+              if (col.requests.some((q) => q.method === method && q.path === r.path)) continue;
+              col.requests.push({ method, path: r.path, name: r.name || "" });
+              added++;
+            }
+            // keep the blank "new header" row at the bottom
+            col.headers = (col.headers || []).filter((h) => (h.k || "").trim() || (h.v || "").trim());
+            col.headers.push({ k: "", v: "" });
+
+            if (doc.containsCredentials === false && col.auth && col.auth.type !== "none") {
+              notes.push("credentials weren't exported, so fill in the auth");
+            }
+            const bits = [`${added} request(s)`];
+            if (addedHeaders) bits.push(`${addedHeaders} header(s)`);
+            shareMsg = {
+              text: `✓ Imported ${bits.join(", ")} — see the Requests tab` + (notes.length ? " · " + notes.join(", ") : ""),
+              kind: "ok",
+            };
+            ctx.save();
+            renderSide(); // rebuilds this panel; shareMsg carries the result across
+            renderMain();
+          } catch (e) {
+            shareMsg = { text: "✗ " + e.message, kind: "err" };
+            setStatus(shareStatus, shareMsg.text, shareMsg.kind);
+          }
+          fileIn.value = "";
+        });
+
+        const sec = el("details", { class: "section" }, [
+          el("summary", { text: "Share — export / import" }),
+          el("div", { class: "status-line dim", text: "Exports the base URL, global headers, auth and saved requests as a JSON file. Importing merges into this collection and never overwrites what you already set." }),
+          el("label", { class: "inline" }, [withSecrets, "Include credentials (passwords / tokens)"]),
+          el("div", { class: "toolbar" }, [
+            el("button", { class: "btn", text: "Export", onclick: doExport }),
+            el("button", { class: "btn", text: "Import", onclick: () => fileIn.click() }),
+            fileIn,
+          ]),
+          shareStatus,
+        ]);
+        // show (and keep open) the result of the last export/import
+        if (shareMsg) {
+          setStatus(shareStatus, shareMsg.text, shareMsg.kind);
+          sec.open = true;
+        }
+        return sec;
       }
 
       function historyPanel() {
@@ -844,6 +1094,16 @@
           el("button", { class: "btn", text: "Save to collection", title: "Keep this request in the collection panel", onclick: saveToCollection }),
         ]));
 
+        // auth: falls back to the collection's when set to inherit
+        const colAuthLabel = (col.auth && col.auth.type && col.auth.type !== "none")
+          ? (AUTH_TYPES.find((x) => x.value === col.auth.type) || {}).label : "none set";
+        const authDetails = el("details", { class: "section" }, [
+          el("summary", { text: authSummary(r.auth, colAuthLabel) }),
+          authEditor(r, ctx, { allowInherit: true, onChange: () => renderMain(view) }),
+        ]);
+        if (r.auth && r.auth.type && r.auth.type !== "inherit" && r.auth.type !== "none") authDetails.open = true;
+        mainBox.append(authDetails);
+
         const hdrCount = r.headers.filter((h) => h.k.trim()).length;
         const hdrDetails = el("details", { class: "section" }, [
           el("summary", { text: `Request headers (${hdrCount})` }),
@@ -875,12 +1135,21 @@
           setStatus(status, "Sending…", "dim");
           try {
             const headers = {};
-            if (inCollection(r.url.trim())) {
+            const under = inCollection(r.url.trim());
+            if (under) {
               for (const h of col.headers) if (h.k.trim()) headers[h.k.trim()] = h.v;
             }
+            // request auth wins; "inherit" falls back to the collection's auth
+            // (only for requests under its base URL)
+            const auth = (r.auth && r.auth.type && r.auth.type !== "inherit")
+              ? r.auth
+              : (under ? col.auth : null);
+            const parts = authParts(auth);
+            Object.assign(headers, parts.headers);
+            // an explicit header always overrides the generated one
             for (const h of r.headers) if (h.k.trim()) headers[h.k.trim()] = h.v;
             const resp = await api("POST", "/api/proxy", {
-              method: r.method, url: r.url.trim(), headers, body: r.body, insecure: r.insecure,
+              method: r.method, url: appendQuery(r.url.trim(), parts.query), headers, body: r.body, insecure: r.insecure,
             });
             r.response = resp;
             if (r.name === "New request") r.name = r.method + " " + (shortPath(r.url.trim()) || r.url.trim());
@@ -906,7 +1175,7 @@
           col.requests.push({ method: r.method, path, name: r.name === "New request" ? "" : r.name });
           ctx.save();
           setStatus(status, "✓ Saved — see the Collection panel on the left", "ok");
-          sideView = "collection";
+          sideView = "requests";
           renderSide();
         }
       }
