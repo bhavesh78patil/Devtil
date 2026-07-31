@@ -2749,32 +2749,96 @@
         setStatus(status, "✗ " + e.message, "err");
       }
     };
+    const fmtSecs = (ms) => (ms / 1000).toFixed(1) + "s";
+    // "⟳ Reading messages… 12 so far   1.4s" — spinner + live elapsed time
+    const busy = (text, ms) => {
+      status.className = "status-line busy";
+      status.replaceChildren(
+        el("span", { class: "spinner" }),
+        el("span", { text }),
+        el("span", { class: "elapsed", text: fmtSecs(ms) }),
+      );
+    };
+
     const consume = async () => {
       if (!c.topic) return setStatus(status, "✗ Enter or pick a topic", "err");
       if ((c.from || "latest") === "time" && !c.startT) {
         return setStatus(status, "✗ Set the start of the time range", "err");
       }
-      setStatus(status, "Reading messages…", "dim");
+      const started = Date.now();
+      let live = [], seen = 0;
+      busy("Reading messages…", 0);
+      const ticker = setInterval(() => busy(`Reading messages… ${seen} so far`, Date.now() - started), 100);
+      // messages stream in as each partition yields them, so the table fills
+      // progressively instead of appearing all at once at the end
+      c.messages = [];
+      draw();
       try {
-        const r = await api("POST", "/api/kafka/consume", {
-          conn: kconn(),
-          topic: c.topic,
-          max: Number(c.max) || 50,
-          from: c.from || "latest",
-          startMs: c.startT ? new Date(c.startT).getTime() : 0,
-          endMs: c.endT ? new Date(c.endT).getTime() : 0,
-          keyQuery: c.keyQ || "",
-          valueQuery: c.valQ || "",
+        const res = await fetch("/api/kafka/consume/stream", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            conn: kconn(),
+            topic: c.topic,
+            max: Number(c.max) || 50,
+            from: c.from || "latest",
+            startMs: c.startT ? new Date(c.startT).getTime() : 0,
+            endMs: c.endT ? new Date(c.endT).getTime() : 0,
+            keyQuery: c.keyQ || "",
+            valueQuery: c.valQ || "",
+          }),
         });
-        c.messages = r.messages;
+        if (!res.ok || !res.body) {
+          let msg = `${res.status} ${res.statusText}`;
+          try { const j = JSON.parse(await res.text()); if (j.error) msg = j.error; } catch { /* not JSON */ }
+          throw new Error(msg);
+        }
+
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buf = "", done = null, failed = null, dirty = false;
+        // repaint on a timer rather than per message, so a fast burst of
+        // thousands of matches doesn't thrash the DOM
+        const painter = setInterval(() => {
+          if (!dirty) return;
+          dirty = false;
+          c.messages = live.slice();
+          draw();
+        }, 250);
+        try {
+          for (;;) {
+            const { value, done: fin } = await reader.read();
+            if (fin) break;
+            buf += decoder.decode(value, { stream: true });
+            const lines = buf.split("\n");
+            buf = lines.pop();
+            for (const line of lines) {
+              if (!line.trim()) continue;
+              let ev;
+              try { ev = JSON.parse(line); } catch { continue; }
+              if (ev.type === "msg") { live.push(ev.message); seen++; dirty = true; }
+              else if (ev.type === "done") done = ev;
+              else if (ev.type === "error") failed = ev;
+            }
+          }
+        } finally {
+          clearInterval(painter);
+        }
+        clearInterval(ticker);
+        if (failed) throw new Error(failed.error);
+
+        const took = fmtSecs(done ? done.elapsedMs : Date.now() - started);
+        // settle on the server's sorted + trimmed list
+        c.messages = done ? done.messages : live;
         c.name = c.topic;
         ctx.save();
         draw();
-        setStatus(status,
-          `✓ ${r.matched} match(es) of ${r.scanned} scanned, showing ${r.messages.length}${r.truncated ? " (scan capped — narrow the range or raise Last N)" : ""}`,
-          "ok");
+        setStatus(status, done
+          ? `✓ ${done.matched} match(es) of ${done.scanned} scanned, showing ${done.messages.length}${done.truncated ? " (scan capped — narrow the range or raise Last N)" : ""} · ${took}`
+          : `✓ ${c.messages.length} message(s) · ${took}`, "ok");
       } catch (e) {
-        setStatus(status, "✗ " + e.message, "err");
+        clearInterval(ticker);
+        setStatus(status, "✗ " + e.message + ` · ${fmtSecs(Date.now() - started)}`, "err");
       }
     };
 

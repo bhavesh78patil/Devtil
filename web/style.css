@@ -336,6 +336,31 @@ label.inline { display: inline-flex; align-items: center; gap: 6px; font-size: 1
 .status-line.ok { color: var(--green); }
 .status-line.err { color: var(--red); }
 .status-line.dim { color: var(--text-dim); }
+/* in-progress: accent-coloured, with a spinner and a live elapsed timer */
+.status-line.busy {
+  color: var(--accent);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 500;
+}
+.status-line.busy .elapsed {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--text-dim);
+  font-weight: 400;
+}
+.spinner {
+  width: 12px;
+  height: 12px;
+  flex: none;
+  border: 2px solid var(--accent-soft);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .spinner { animation-duration: 2s; } }
 
 pre.output {
   background: var(--bg2);
