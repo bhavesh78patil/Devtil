@@ -772,6 +772,8 @@
       const mainBox = el("div", { class: "api-main" });
       root.append(el("div", { class: "api-layout" }, [sideBox, mainBox]));
       let sideView = "requests";
+      // survives the renderSide() rebuild that an import triggers
+      let shareMsg = null;
 
       // ================= side panel =================
 
@@ -854,7 +856,120 @@
         ]);
         if (col.auth && col.auth.type && col.auth.type !== "none") ga.open = true;
         box.append(ga);
+
+        box.append(sharePanel());
         return box;
+      }
+
+      // ---- share: export / import the collection as a JSON file ----
+      function sharePanel() {
+        const shareStatus = el("div", { class: "status-line dim" });
+        const withSecrets = el("input", { type: "checkbox" });
+
+        const doExport = () => {
+          const include = withSecrets.checked;
+          const auth = JSON.parse(JSON.stringify(col.auth || { type: "none" }));
+          if (!include) {
+            // never write passwords/tokens into a file meant for sharing
+            // unless the user explicitly asked for it
+            for (const k of ["password", "token", "value"]) if (auth[k]) auth[k] = "";
+          }
+          const doc = {
+            devtil: "api-collection",
+            version: 1,
+            exportedAt: new Date().toISOString(),
+            containsCredentials: include,
+            collection: {
+              baseUrl: col.baseUrl || "",
+              headers: (col.headers || []).filter((h) => (h.k || "").trim()),
+              auth,
+              requests: col.requests || [],
+            },
+          };
+          const ts = new Date().toISOString().slice(0, 19).replaceAll(":", "-");
+          downloadFile(`devtil-collection-${ts}.json`, "application/json", JSON.stringify(doc, null, 2));
+          shareMsg = include
+            ? { text: "✓ Exported with credentials — treat the file as a secret", kind: "err" }
+            : { text: "✓ Exported — auth credentials left out; global header values are included, so review before sharing", kind: "ok" };
+          setStatus(shareStatus, shareMsg.text, shareMsg.kind);
+        };
+
+        const fileIn = el("input", { type: "file", accept: "application/json,.json", style: "display:none" });
+        fileIn.addEventListener("change", async () => {
+          const f = fileIn.files && fileIn.files[0];
+          if (!f) return;
+          try {
+            const doc = JSON.parse(await f.text());
+            const src = doc.collection || doc; // tolerate a bare collection object
+            if (!Array.isArray(src.requests)) throw new Error("no requests array — is this a Devtil collection export?");
+
+            // merge, never clobber: existing settings win, new requests are added
+            const notes = [];
+            if ((src.baseUrl || "").trim()) {
+              if (!col.baseUrl) col.baseUrl = src.baseUrl.trim().replace(/\/+$/, "");
+              else if (col.baseUrl !== src.baseUrl.trim().replace(/\/+$/, "")) notes.push("kept your base URL");
+            }
+            let addedHeaders = 0;
+            for (const h of src.headers || []) {
+              const k = (h.k || "").trim();
+              if (!k) continue;
+              if ((col.headers || []).some((x) => (x.k || "").trim().toLowerCase() === k.toLowerCase())) continue;
+              col.headers.push({ k, v: h.v || "" });
+              addedHeaders++;
+            }
+            const curAuth = (col.auth && col.auth.type) || "none";
+            if (src.auth && src.auth.type && src.auth.type !== "none") {
+              if (curAuth === "none") col.auth = src.auth;
+              else notes.push("kept your auth");
+            }
+            let added = 0;
+            for (const r of src.requests) {
+              if (!r || !r.path) continue;
+              const method = (r.method || "GET").toUpperCase();
+              if (col.requests.some((q) => q.method === method && q.path === r.path)) continue;
+              col.requests.push({ method, path: r.path, name: r.name || "" });
+              added++;
+            }
+            // keep the blank "new header" row at the bottom
+            col.headers = (col.headers || []).filter((h) => (h.k || "").trim() || (h.v || "").trim());
+            col.headers.push({ k: "", v: "" });
+
+            if (doc.containsCredentials === false && col.auth && col.auth.type !== "none") {
+              notes.push("credentials weren't exported, so fill in the auth");
+            }
+            const bits = [`${added} request(s)`];
+            if (addedHeaders) bits.push(`${addedHeaders} header(s)`);
+            shareMsg = {
+              text: `✓ Imported ${bits.join(", ")} — see the Requests tab` + (notes.length ? " · " + notes.join(", ") : ""),
+              kind: "ok",
+            };
+            ctx.save();
+            renderSide(); // rebuilds this panel; shareMsg carries the result across
+            renderMain();
+          } catch (e) {
+            shareMsg = { text: "✗ " + e.message, kind: "err" };
+            setStatus(shareStatus, shareMsg.text, shareMsg.kind);
+          }
+          fileIn.value = "";
+        });
+
+        const sec = el("details", { class: "section" }, [
+          el("summary", { text: "Share — export / import" }),
+          el("div", { class: "status-line dim", text: "Exports the base URL, global headers, auth and saved requests as a JSON file. Importing merges into this collection and never overwrites what you already set." }),
+          el("label", { class: "inline" }, [withSecrets, "Include credentials (passwords / tokens)"]),
+          el("div", { class: "toolbar" }, [
+            el("button", { class: "btn", text: "Export", onclick: doExport }),
+            el("button", { class: "btn", text: "Import", onclick: () => fileIn.click() }),
+            fileIn,
+          ]),
+          shareStatus,
+        ]);
+        // show (and keep open) the result of the last export/import
+        if (shareMsg) {
+          setStatus(shareStatus, shareMsg.text, shareMsg.kind);
+          sec.open = true;
+        }
+        return sec;
       }
 
       function historyPanel() {
