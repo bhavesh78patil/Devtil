@@ -557,6 +557,32 @@ details.section[open] summary { margin-bottom: 8px; }
   white-space: pre-wrap;
 }
 
+/* Notepad find/replace bar */
+.find-bar {
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  padding: 8px 10px;
+}
+.find-bar.hidden { display: none; }
+
+/* Console layout: the request controls keep their natural height (and scroll
+   among themselves if the query builder is open), so the result area below
+   always keeps the majority of the pane instead of being pushed off-screen. */
+.console-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  flex: 0 1 auto;
+  max-height: 55%;
+  overflow-y: auto;
+  padding-right: 2px;
+}
+.console-controls textarea { max-height: 22vh; }
+/* the result area gets everything else */
+.api-main > .tool > .tool:last-child,
+.api-main > .tool > div:last-child { min-height: 200px; }
+
 /* shared result grid (SQL / Kafka / Elastic): resizable columns, and every
    cell clamped to one line with expand + copy actions on hover */
 .rg-wrap { overflow: auto; flex: 1; min-height: 120px; }

@@ -2622,15 +2622,17 @@
     drawCols();
 
     body.append(
-      target,
-      helper,
-      query,
-      el("div", { class: "toolbar" }, [
-        el("button", { class: "btn primary", text: "Run (Ctrl+Enter)", onclick: run }),
-        el("label", { class: "inline" }, ["Max rows", maxRows]),
-        status,
+      el("div", { class: "console-controls" }, [
+        target,
+        helper,
+        query,
+        el("div", { class: "toolbar" }, [
+          el("button", { class: "btn primary", text: "Run (Ctrl+Enter)", onclick: run }),
+          el("label", { class: "inline" }, ["Max rows", maxRows]),
+          status,
+        ]),
+        exportBar(c, ctx, doExport),
       ]),
-      exportBar(c, ctx, doExport),
       out
     );
     out.replaceChildren(resultGrid(c.result));
@@ -3322,23 +3324,28 @@
     drawFields();
     renderConds();
 
+    // controls are grouped so they keep their natural size (scrolling among
+    // themselves when the builder is open) and the response always gets the
+    // rest of the pane instead of being pushed off the bottom
     body.append(
-      target,
-      builder,
-      el("div", { class: "toolbar" }, [
-        quick("Cluster health", "GET", "_cluster/health"),
-        quick("Indices", "GET", "_cat/indices?v&format=json"),
-        quick("Nodes", "GET", "_cat/nodes?v&format=json"),
+      el("div", { class: "console-controls" }, [
+        target,
+        builder,
+        el("div", { class: "toolbar" }, [
+          quick("Cluster health", "GET", "_cluster/health"),
+          quick("Indices", "GET", "_cat/indices?v&format=json"),
+          quick("Nodes", "GET", "_cat/nodes?v&format=json"),
+        ]),
+        el("div", { class: "req-line" }, [
+          methodSel, path,
+          el("button", { class: "btn primary", text: "Send", onclick: () => send(c.method || "GET", c.path, c.body) }),
+        ]),
+        el("div", {}, [el("span", { class: "pane-label", text: "Body (JSON, for _search etc.)" }), reqBody]),
+        // copy sits with the export actions so it's available for every
+        // response, not just the _search ones that render as a table
+        exportBar(c, ctx, doExport, [copyResponseBtn()]),
+        status,
       ]),
-      el("div", { class: "req-line" }, [
-        methodSel, path,
-        el("button", { class: "btn primary", text: "Send", onclick: () => send(c.method || "GET", c.path, c.body) }),
-      ]),
-      el("div", {}, [el("span", { class: "pane-label", text: "Body (JSON, for _search etc.)" }), reqBody]),
-      // copy sits with the export actions so it's available for every
-      // response, not just the _search ones that render as a table
-      exportBar(c, ctx, doExport, [copyResponseBtn()]),
-      status,
       out
     );
     drawResponse();
@@ -3623,24 +3630,196 @@
         area.value = p.text || "";
         const mono = el("input", { type: "checkbox" });
         mono.checked = p.mono !== false;
+        const wrap = el("input", { type: "checkbox" });
+        wrap.checked = p.wrap !== false;
 
         const update = () => {
           area.style.fontFamily = p.mono !== false ? "var(--mono)" : "var(--sans)";
+          // off = don't wrap long lines; the textarea scrolls horizontally
+          area.wrap = p.wrap !== false ? "soft" : "off";
+          area.style.whiteSpace = p.wrap !== false ? "" : "pre";
           const text = p.text || "";
           const words = text.trim() ? text.trim().split(/\s+/).length : 0;
           counter.textContent = `${text.length} chars · ${words} words · ${text ? text.split("\n").length : 0} lines`;
         };
         area.addEventListener("input", () => { p.text = area.value; ctx.save(); update(); });
         mono.addEventListener("change", () => { p.mono = mono.checked; ctx.save(); update(); });
+        wrap.addEventListener("change", () => { p.wrap = wrap.checked; ctx.save(); update(); });
+
+        // ---- find / replace -------------------------------------------------
+        const findIn = el("input", { type: "text", placeholder: "Find", style: "min-width:150px" });
+        const replIn = el("input", { type: "text", placeholder: "Replace with", style: "min-width:150px" });
+        const caseChk = el("input", { type: "checkbox" });
+        const findStatus = el("span", { class: "status-line dim" });
+        const findBar = el("div", { class: "toolbar find-bar hidden" });
+
+        const needle = () => findIn.value;
+        const hay = () => area.value;
+        const norm = (s) => (caseChk.checked ? s : s.toLowerCase());
+
+        const setText = (next, caretAt) => {
+          area.value = next;
+          p.text = next;
+          ctx.save();
+          update();
+          if (caretAt != null) { area.selectionStart = area.selectionEnd = caretAt; }
+          area.focus();
+        };
+
+        // select the next match after the caret, wrapping to the top
+        const findNext = (backwards) => {
+          const n = needle();
+          if (!n) return setStatus(findStatus, "", "dim");
+          const h = norm(hay()), q = norm(n);
+          let idx;
+          if (backwards) {
+            const before = area.selectionStart;
+            idx = h.lastIndexOf(q, Math.max(0, before - 1));
+            if (idx < 0) idx = h.lastIndexOf(q); // wrap to the end
+          } else {
+            idx = h.indexOf(q, area.selectionEnd);
+            if (idx < 0) idx = h.indexOf(q); // wrap to the start
+          }
+          if (idx < 0) return setStatus(findStatus, "No matches", "err");
+          area.focus();
+          area.setSelectionRange(idx, idx + n.length);
+          // keep the match in view
+          const upto = area.value.slice(0, idx).split("\n").length;
+          area.scrollTop = Math.max(0, (upto - 5) * 18);
+          const total = countAll();
+          setStatus(findStatus, `Match ${h.slice(0, idx).split(q).length} of ${total}`, "ok");
+        };
+
+        const countAll = () => {
+          const n = needle();
+          if (!n) return 0;
+          return norm(hay()).split(norm(n)).length - 1;
+        };
+
+        const findAll = () => {
+          const total = countAll();
+          if (!needle()) return setStatus(findStatus, "Enter something to find", "err");
+          setStatus(findStatus, total ? `${total} match(es)` : "No matches", total ? "ok" : "err");
+          if (total) findNext(false);
+        };
+
+        // replace just the current selection when it is a match, then advance
+        const replaceOne = () => {
+          const n = needle();
+          if (!n) return;
+          const sel = area.value.slice(area.selectionStart, area.selectionEnd);
+          if (sel && norm(sel) === norm(n)) {
+            const at = area.selectionStart;
+            setText(area.value.slice(0, at) + replIn.value + area.value.slice(area.selectionEnd), at + replIn.value.length);
+            setStatus(findStatus, `Replaced · ${countAll()} left`, "ok");
+          }
+          findNext(false);
+        };
+
+        const replaceAll = () => {
+          const n = needle();
+          if (!n) return setStatus(findStatus, "Enter something to find", "err");
+          const total = countAll();
+          if (!total) return setStatus(findStatus, "No matches", "err");
+          let out;
+          if (caseChk.checked) {
+            out = area.value.split(n).join(replIn.value);
+          } else {
+            // case-insensitive replace without regex, so the needle can hold
+            // any characters safely
+            const h = area.value, q = norm(n);
+            let res = "", from = 0, i;
+            while ((i = norm(h).indexOf(q, from)) >= 0) {
+              res += h.slice(from, i) + replIn.value;
+              from = i + n.length;
+            }
+            out = res + h.slice(from);
+          }
+          setText(out);
+          setStatus(findStatus, `Replaced ${total} occurrence(s)`, "ok");
+        };
+
+        const showFind = (withReplace) => {
+          findBar.classList.remove("hidden");
+          replIn.style.display = withReplace ? "" : "none";
+          findBar.querySelectorAll(".repl-only").forEach((b) => (b.style.display = withReplace ? "" : "none"));
+          const sel = area.value.slice(area.selectionStart, area.selectionEnd);
+          if (sel && !sel.includes("\n")) findIn.value = sel;
+          findIn.focus();
+          findIn.select();
+        };
+        const hideFind = () => { findBar.classList.add("hidden"); area.focus(); };
+
+        findBar.append(
+          el("span", { class: "pane-label", text: "Find" }),
+          findIn,
+          el("button", { class: "btn", text: "Find", title: "Enter / F3", onclick: () => findNext(false) }),
+          el("button", { class: "btn", text: "◀", title: "Find previous (Shift+Enter / Shift+F3)", onclick: () => findNext(true) }),
+          el("button", { class: "btn", text: "Find all", onclick: findAll }),
+          replIn,
+          el("button", { class: "btn repl-only", text: "Replace", onclick: replaceOne }),
+          el("button", { class: "btn repl-only", text: "Replace all", onclick: replaceAll }),
+          el("label", { class: "inline" }, [caseChk, "Match case"]),
+          findStatus,
+          el("button", { class: "icon-btn", text: "×", title: "Close (Esc)", onclick: hideFind }),
+        );
+        findIn.addEventListener("keydown", (e) => {
+          if (e.key === "Enter") { e.preventDefault(); findNext(e.shiftKey); }
+          if (e.key === "Escape") { e.preventDefault(); hideFind(); }
+        });
+        replIn.addEventListener("keydown", (e) => {
+          if (e.key === "Enter") { e.preventDefault(); replaceOne(); }
+          if (e.key === "Escape") { e.preventDefault(); hideFind(); }
+        });
+
+        // ---- line/text operations ------------------------------------------
+        // operate on the selection when there is one, else the whole pad
+        const onTarget = (fn) => () => {
+          const s = area.selectionStart, e = area.selectionEnd;
+          if (e > s) {
+            const next = area.value.slice(0, s) + fn(area.value.slice(s, e)) + area.value.slice(e);
+            setText(next);
+            area.setSelectionRange(s, s + fn(area.value.slice(s, e)).length);
+          } else {
+            setText(fn(area.value));
+          }
+        };
+        const lines = (t) => t.split("\n");
+        const ops = [
+          ["UPPER", (t) => t.toUpperCase()],
+          ["lower", (t) => t.toLowerCase()],
+          ["Sort", (t) => lines(t).sort((a, b) => a.localeCompare(b)).join("\n")],
+          ["Dedupe", (t) => [...new Set(lines(t))].join("\n")],
+          ["Trim", (t) => lines(t).map((l) => l.replace(/\s+$/, "")).join("\n")],
+          ["Drop blanks", (t) => lines(t).filter((l) => l.trim()).join("\n")],
+        ];
 
         root.append(
           el("div", { class: "toolbar" }, [
+            el("button", { class: "btn", text: "Find", title: "Ctrl+F", onclick: () => showFind(false) }),
+            el("button", { class: "btn", text: "Replace", title: "Ctrl+H", onclick: () => showFind(true) }),
+            ...ops.map(([label, fn]) => el("button", { class: "btn", text: label, title: "Applies to the selection, or the whole pad", onclick: onTarget(fn) })),
+            el("label", { class: "inline" }, [wrap, "Wrap"]),
             el("label", { class: "inline" }, [mono, "Monospace"]),
             copyBtn(() => p.text || "", "Copy all"),
             counter,
           ]),
+          findBar,
           area
         );
+        // editor shortcuts: Ctrl/Cmd+F find, Ctrl/Cmd+H replace, F3 next
+        area.addEventListener("keydown", (e) => {
+          const mod = e.ctrlKey || e.metaKey;
+          if (mod && e.key.toLowerCase() === "f") { e.preventDefault(); showFind(false); }
+          else if (mod && e.key.toLowerCase() === "h") { e.preventDefault(); showFind(true); }
+          else if (e.key === "F3") { e.preventDefault(); findNext(e.shiftKey); }
+          else if (e.key === "Escape") hideFind();
+          else if (e.key === "Tab") { // keep Tab in the editor
+            e.preventDefault();
+            const s = area.selectionStart;
+            setText(area.value.slice(0, s) + "  " + area.value.slice(area.selectionEnd), s + 2);
+          }
+        });
         update();
       };
       renderPad();
