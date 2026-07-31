@@ -186,6 +186,428 @@
   });
 
   // ======================================================================
+  // JSONPath
+  // ======================================================================
+  // A dependency-free evaluator for the common JSONPath subset:
+  //   $  .key  ['key']  ..key  ..*  *  [*]  [n]  [-n]  [a,b]  [start:end:step]
+  //   [?(@.k > 1 && (@.j == 'x' || @.z))]  filters with == != < <= > >= =~
+  //   .length on arrays/strings
+  // Evaluation returns both the matched values and their normalised paths.
+
+  function jpParse(expr) {
+    const s = String(expr).trim();
+    if (!s) throw new Error("expression is empty");
+    let i = 0;
+    const steps = [];
+    const isNameChar = (ch) => /[A-Za-z0-9_$\-À-￿]/.test(ch);
+    const readName = () => {
+      const start = i;
+      while (i < s.length && isNameChar(s[i])) i++;
+      if (i === start) throw new Error(`expected a property name at position ${start}`);
+      return s.slice(start, i);
+    };
+    const readQuoted = () => {
+      const q = s[i++];
+      let out = "";
+      while (i < s.length && s[i] !== q) {
+        if (s[i] === "\\") i++;
+        out += s[i++];
+      }
+      if (s[i] !== q) throw new Error("unterminated quoted name");
+      i++;
+      return out;
+    };
+
+    if (s[i] === "$") i++;
+    else if (s[i] === "@") i++;
+
+    while (i < s.length) {
+      if (s[i] === ".") {
+        if (s[i + 1] === ".") { // recursive descent
+          i += 2;
+          steps.push({ t: "descend" });
+          if (s[i] === "[") continue;         // ..[...] — the bracket handles it
+          if (s[i] === "*") { steps.push({ t: "wild" }); i++; continue; }
+          steps.push({ t: "child", names: [readName()] });
+          continue;
+        }
+        i++;
+        if (s[i] === "*") { steps.push({ t: "wild" }); i++; continue; }
+        steps.push({ t: "child", names: [readName()] });
+        continue;
+      }
+      if (s[i] === "[") {
+        i++;
+        while (s[i] === " ") i++;
+        if (s[i] === "*") {
+          i++;
+          steps.push({ t: "wild" });
+        } else if (s[i] === "?") {
+          i++;
+          if (s[i] !== "(") throw new Error("expected '(' after '?'");
+          const start = ++i;
+          let depth = 1;
+          while (i < s.length && depth > 0) {
+            if (s[i] === "(") depth++;
+            else if (s[i] === ")") depth--;
+            if (depth > 0) i++;
+          }
+          if (depth !== 0) throw new Error("unterminated filter expression");
+          steps.push({ t: "filter", pred: jpCompileFilter(s.slice(start, i)) });
+          i++; // past ')'
+        } else if (s[i] === "'" || s[i] === '"') {
+          const names = [readQuoted()];
+          while (s[i] === "," || s[i] === " ") {
+            i++;
+            while (s[i] === " ") i++;
+            if (s[i] === "'" || s[i] === '"') names.push(readQuoted());
+          }
+          steps.push({ t: "child", names });
+        } else {
+          // indices, unions and slices
+          const start = i;
+          while (i < s.length && s[i] !== "]") i++;
+          const body = s.slice(start, i).trim();
+          if (body.includes(":")) {
+            const [a, b, c] = body.split(":");
+            steps.push({
+              t: "slice",
+              start: a.trim() === "" ? null : Number(a),
+              end: b === undefined || b.trim() === "" ? null : Number(b),
+              step: c === undefined || c.trim() === "" ? 1 : Number(c),
+            });
+          } else if (body === "") {
+            throw new Error("empty []");
+          } else {
+            const idx = body.split(",").map((x) => {
+              const n = Number(x.trim());
+              if (!Number.isInteger(n)) throw new Error(`"${x.trim()}" is not an array index`);
+              return n;
+            });
+            steps.push({ t: "index", idx });
+          }
+        }
+        while (s[i] === " ") i++;
+        if (s[i] !== "]") throw new Error("expected ']'");
+        i++;
+        continue;
+      }
+      if (i === 0 || steps.length === 0) { // tolerate "store.book" without a leading $
+        steps.push({ t: "child", names: [readName()] });
+        continue;
+      }
+      throw new Error(`unexpected "${s[i]}" at position ${i}`);
+    }
+    return steps;
+  }
+
+  // ---- filter expressions -------------------------------------------------
+  // Recursive descent over: or := and ('||' and)*, and := cmp ('&&' cmp)*,
+  // cmp := '(' or ')' | operand [op operand]. No eval() anywhere.
+  function jpCompileFilter(src) {
+    let i = 0;
+    const s = src;
+    const ws = () => { while (i < s.length && /\s/.test(s[i])) i++; };
+
+    const parseOperand = () => {
+      ws();
+      if (s[i] === "@" || s[i] === "$") {
+        const start = i;
+        i++;
+        while (i < s.length && /[.\[\]'"A-Za-z0-9_$\-]/.test(s[i])) {
+          if (s[i] === "]" ) { i++; break; }
+          i++;
+        }
+        const path = s.slice(start, i);
+        const steps = jpParse(path);
+        return (node) => {
+          const hits = jpEval(node, steps);
+          return hits.length ? hits[0].value : undefined;
+        };
+      }
+      if (s[i] === "'" || s[i] === '"') {
+        const q = s[i++];
+        let out = "";
+        while (i < s.length && s[i] !== q) { if (s[i] === "\\") i++; out += s[i++]; }
+        i++;
+        return () => out;
+      }
+      if (s[i] === "/") { // regex literal for =~
+        const start = ++i;
+        while (i < s.length && s[i] !== "/") { if (s[i] === "\\") i++; i++; }
+        const body = s.slice(start, i);
+        i++;
+        let flags = "";
+        while (i < s.length && /[a-z]/.test(s[i])) flags += s[i++];
+        const re = new RegExp(body, flags);
+        return () => re;
+      }
+      const start = i;
+      while (i < s.length && /[^\s&|)=!<>~]/.test(s[i])) i++;
+      const lit = s.slice(start, i).trim();
+      if (lit === "true") return () => true;
+      if (lit === "false") return () => false;
+      if (lit === "null") return () => null;
+      const n = Number(lit);
+      if (lit !== "" && !isNaN(n)) return () => n;
+      return () => lit;
+    };
+
+    const parseCmp = () => {
+      ws();
+      if (s[i] === "(") {
+        i++;
+        const inner = parseOr();
+        ws();
+        if (s[i] !== ")") throw new Error("expected ')' in filter");
+        i++;
+        return inner;
+      }
+      const left = parseOperand();
+      ws();
+      const ops = ["==", "!=", "<=", ">=", "=~", "<", ">"];
+      const op = ops.find((o) => s.startsWith(o, i));
+      if (!op) return (node) => { // bare @.field — an existence test
+        const v = left(node);
+        return v !== undefined && v !== false && v !== null;
+      };
+      i += op.length;
+      const right = parseOperand();
+      return (node) => {
+        const a = left(node), b = right(node);
+        switch (op) {
+          case "==": return a == b; // eslint-disable-line eqeqeq — JSONPath is loose
+          case "!=": return a != b; // eslint-disable-line eqeqeq
+          case "<": return a < b;
+          case "<=": return a <= b;
+          case ">": return a > b;
+          case ">=": return a >= b;
+          case "=~": return b instanceof RegExp && typeof a === "string" && b.test(a);
+        }
+        return false;
+      };
+    };
+
+    const parseAnd = () => {
+      let left = parseCmp();
+      for (;;) {
+        ws();
+        if (!s.startsWith("&&", i)) return left;
+        i += 2;
+        const right = parseCmp();
+        const l = left;
+        left = (node) => l(node) && right(node);
+      }
+    };
+    const parseOr = () => {
+      let left = parseAnd();
+      for (;;) {
+        ws();
+        if (!s.startsWith("||", i)) return left;
+        i += 2;
+        const right = parseAnd();
+        const l = left;
+        left = (node) => l(node) || right(node);
+      }
+    };
+
+    const pred = parseOr();
+    ws();
+    if (i < s.length) throw new Error(`unexpected "${s[i]}" in filter`);
+    return pred;
+  }
+
+  const jpSeg = (key) => (typeof key === "number" ? `[${key}]` : `['${key}']`);
+
+  /** Run parsed steps over a document; returns [{value, path}]. */
+  function jpEval(doc, steps) {
+    let cur = [{ value: doc, path: "$" }];
+    for (const step of steps) {
+      const next = [];
+      for (const node of cur) {
+        const v = node.value;
+        switch (step.t) {
+          case "child":
+            for (const name of step.names) {
+              if (v && typeof v === "object" && name in v) {
+                next.push({ value: v[name], path: node.path + jpSeg(name) });
+              } else if (name === "length" && (Array.isArray(v) || typeof v === "string")) {
+                next.push({ value: v.length, path: node.path + jpSeg("length") });
+              }
+            }
+            break;
+          case "wild":
+            if (Array.isArray(v)) v.forEach((x, k) => next.push({ value: x, path: node.path + jpSeg(k) }));
+            else if (v && typeof v === "object") for (const k of Object.keys(v)) next.push({ value: v[k], path: node.path + jpSeg(k) });
+            break;
+          case "index":
+            if (Array.isArray(v)) {
+              for (const raw of step.idx) {
+                const k = raw < 0 ? v.length + raw : raw;
+                if (k >= 0 && k < v.length) next.push({ value: v[k], path: node.path + jpSeg(k) });
+              }
+            }
+            break;
+          case "slice":
+            if (Array.isArray(v)) {
+              const len = v.length;
+              const stp = step.step || 1;
+              let a = step.start == null ? (stp > 0 ? 0 : len - 1) : (step.start < 0 ? len + step.start : step.start);
+              let b = step.end == null ? (stp > 0 ? len : -1) : (step.end < 0 ? len + step.end : step.end);
+              if (stp > 0) for (let k = Math.max(0, a); k < Math.min(len, b); k += stp) next.push({ value: v[k], path: node.path + jpSeg(k) });
+              else for (let k = Math.min(len - 1, a); k > Math.max(-1, b); k += stp) next.push({ value: v[k], path: node.path + jpSeg(k) });
+            }
+            break;
+          case "filter": {
+            const test = (val, path) => { try { if (step.pred(val)) next.push({ value: val, path }); } catch { /* skip */ } };
+            if (Array.isArray(v)) v.forEach((x, k) => test(x, node.path + jpSeg(k)));
+            else if (v && typeof v === "object") for (const k of Object.keys(v)) test(v[k], node.path + jpSeg(k));
+            break;
+          }
+          case "descend": {
+            // self and every descendant, document order
+            const walk = (val, path) => {
+              next.push({ value: val, path });
+              if (Array.isArray(val)) val.forEach((x, k) => walk(x, path + jpSeg(k)));
+              else if (val && typeof val === "object") for (const k of Object.keys(val)) walk(val[k], path + jpSeg(k));
+            };
+            walk(v, node.path);
+            break;
+          }
+        }
+      }
+      cur = next;
+    }
+    return cur;
+  }
+
+  /** Evaluate a JSONPath against a parsed document. */
+  function jsonPath(doc, expr) {
+    return jpEval(doc, jpParse(expr));
+  }
+  Devtil.jsonPath = jsonPath; // exported for reuse and tests
+
+  const JSONPATH_SAMPLE = JSON.stringify({
+    store: {
+      book: [
+        { category: "reference", author: "Nigel Rees", title: "Sayings of the Century", price: 8.95 },
+        { category: "fiction", author: "Evelyn Waugh", title: "Sword of Honour", price: 12.99 },
+        { category: "fiction", author: "Herman Melville", title: "Moby Dick", isbn: "0-553-21311-3", price: 8.99 },
+        { category: "fiction", author: "J. R. R. Tolkien", title: "The Lord of the Rings", isbn: "0-395-19395-8", price: 22.99 },
+      ],
+      bicycle: { color: "red", price: 19.95 },
+    },
+    expensive: 10,
+  }, null, 2);
+
+  const JSONPATH_EXAMPLES = [
+    ["$.store.book[*].author", "authors of all books"],
+    ["$..author", "all authors, at any depth"],
+    ["$.store.*", "everything in the store"],
+    ["$.store..price", "every price"],
+    ["$..book[2]", "the third book"],
+    ["$..book[-1]", "the last book"],
+    ["$..book[0,1]", "the first two books"],
+    ["$..book[:2]", "the first two books (slice)"],
+    ["$..book[?(@.isbn)]", "books that have an ISBN"],
+    ["$..book[?(@.price < 10)]", "books cheaper than 10"],
+    ["$..book[?(@.category == 'fiction' && @.price > 10)]", "combined filter"],
+    ["$..book[?(@.author =~ /tolkien/i)]", "regex on the author"],
+    ["$..book.length", "how many books"],
+  ];
+
+  registerTool({
+    type: "jsonpath",
+    icon: "$·",
+    name: "JSONPath",
+    desc: "Evaluate JSONPath expressions against a JSON document — filters, slices, wildcards and recursive descent, with matched values or their paths.",
+    // a new tab opens on the sample document with a filter already applied,
+    // so the tool demonstrates itself
+    defaults: () => ({ input: JSONPATH_SAMPLE, path: "$..book[?(@.price < 10)]", mode: "values", output: "" }),
+    render(root, tab, ctx) {
+      const d = tab.data;
+      if (!d.input) d.input = JSONPATH_SAMPLE;
+      if (!d.path) d.path = "$";
+
+      const status = el("div", { class: "status-line dim" });
+      const output = el("textarea", { class: "grow", spellcheck: "false", readonly: "" });
+      const input = boundArea(d, "input", ctx, {}, () => run());
+
+      const pathIn = el("input", { type: "text", class: "jp-path", placeholder: "$.store.book[?(@.price < 10)].title", value: d.path });
+      const modeSel = el("select", {}, [
+        el("option", { value: "values", text: "Matched values" }),
+        el("option", { value: "paths", text: "Matched paths" }),
+        el("option", { value: "both", text: "Paths + values" }),
+      ]);
+      modeSel.value = d.mode || "values";
+
+      const run = () => {
+        const src = d.input || "";
+        if (!src.trim()) { output.value = ""; d.output = ""; return setStatus(status, "Paste some JSON to start", "dim"); }
+        let doc;
+        try {
+          doc = JSON.parse(src);
+        } catch (e) {
+          output.value = "";
+          d.output = "";
+          return setStatus(status, "✗ Invalid JSON: " + e.message, "err");
+        }
+        let hits;
+        try {
+          hits = jsonPath(doc, d.path || "$");
+        } catch (e) {
+          output.value = "";
+          d.output = "";
+          return setStatus(status, "✗ Invalid JSONPath: " + e.message, "err");
+        }
+        let text;
+        if (d.mode === "paths") text = hits.map((h) => h.path).join("\n");
+        else if (d.mode === "both") text = hits.map((h) => h.path + "  →  " + JSON.stringify(h.value)).join("\n");
+        else text = JSON.stringify(hits.map((h) => h.value), null, 2);
+        output.value = text;
+        d.output = text;
+        ctx.save();
+        setStatus(status, hits.length ? `✓ ${hits.length} match(es)` : "No matches", hits.length ? "ok" : "err");
+      };
+
+      pathIn.addEventListener("input", () => { d.path = pathIn.value; ctx.save(); run(); });
+      pathIn.addEventListener("keydown", (e) => { if (e.key === "Enter") run(); });
+      modeSel.addEventListener("change", () => { d.mode = modeSel.value; ctx.save(); run(); });
+
+      const examples = el("details", { class: "section" }, [
+        el("summary", { text: "Examples — click one to try it" }),
+        el("div", { class: "jp-examples" }, JSONPATH_EXAMPLES.map(([ex, why]) =>
+          el("button", {
+            class: "btn chip", text: ex, title: why,
+            onclick: () => { d.path = ex; pathIn.value = ex; ctx.save(); run(); },
+          })
+        )),
+      ]);
+
+      root.append(
+        el("div", { class: "toolbar" }, [
+          el("span", { class: "pane-label", text: "JSONPath" }),
+          pathIn,
+          el("button", { class: "btn primary", text: "Evaluate", onclick: run }),
+          modeSel,
+          copyBtn(() => output.value, "Copy result"),
+          el("button", {
+            class: "btn", text: "Load sample",
+            onclick: () => { d.input = JSONPATH_SAMPLE; input.value = JSONPATH_SAMPLE; ctx.save(); run(); },
+          }),
+        ]),
+        examples,
+        status,
+        el("div", { class: "split" }, [
+          el("div", {}, [el("span", { class: "pane-label", text: "JSON" }), input]),
+          el("div", {}, [el("span", { class: "pane-label", text: "Result" }), output]),
+        ])
+      );
+      run();
+    },
+  });
+
+  // ======================================================================
   // XML ⇄ JSON
   // ======================================================================
   // Dependency-free conversion using the browser's DOMParser. Convention:
@@ -2235,69 +2657,88 @@
   }
 
   /** Render a QueryResult (or {error}) as a status line + data grid. */
+  // ---- shared data table ---------------------------------------------------
+  // One table treatment for every result grid (SQL, Kafka, Elastic): resizable
+  // columns, and every cell clamped to a line with hover actions to expand
+  // (pretty-printing JSON) or copy the full value.
+
+  /** A <td> whose text is clamped, with expand + copy on hover. */
+  function gridCell(text, label, extra = []) {
+    const s = text == null ? "" : String(text);
+    const td = el("td", { class: "rg-cell", title: s ? "Double-click to expand · full value is never truncated when copied" : "" });
+    const tools = el("div", { class: "rg-tools" }, [
+      ...extra,
+      el("button", {
+        class: "icon-btn", text: "⤢", title: "Expand" + (looksJson(s) ? " (formatted JSON)" : ""),
+        onclick: (e) => { e.stopPropagation(); showJsonModal(label, s); },
+      }),
+      copyBtn(() => s, "⧉"),
+    ]);
+    td.append(el("span", { class: "rg-cell-text", text: s }), tools);
+    td.addEventListener("dblclick", () => showJsonModal(label, s));
+    return td;
+  }
+
+  const looksJson = (v) => {
+    const s = String(v ?? "").trim();
+    return s.length > 1 && (s.startsWith("{") || s.startsWith("["));
+  };
+
+  /** Make a header cell resizable by dragging its right edge. */
+  function addColGrip(table, headRow, th) {
+    const grip = el("span", { class: "col-grip", title: "Drag to resize column" });
+    grip.addEventListener("mousedown", (e) => {
+      e.preventDefault();
+      const startX = e.clientX, startW = th.offsetWidth, startTableW = table.offsetWidth;
+      if (table.style.tableLayout !== "fixed") {
+        // freeze the current layout so only the dragged column changes
+        for (const h of headRow.children) h.style.width = h.offsetWidth + "px";
+        table.style.tableLayout = "fixed";
+        table.style.width = startTableW + "px";
+      }
+      const move = (ev) => {
+        const w = Math.max(60, startW + (ev.clientX - startX));
+        th.style.width = w + "px";
+        table.style.width = startTableW + (w - startW) + "px";
+      };
+      const up = () => { document.removeEventListener("mousemove", move); document.removeEventListener("mouseup", up); };
+      document.addEventListener("mousemove", move);
+      document.addEventListener("mouseup", up);
+    });
+    th.append(grip);
+  }
+
+  /**
+   * Build a result table. `columns` are header labels; `rows` are arrays of
+   * values, or of {text, extra} to add per-cell buttons.
+   */
+  function dataTable(columns, rows) {
+    const table = el("table", { class: "kv rg" });
+    const headRow = el("tr");
+    for (const name of columns) {
+      const th = el("th", {}, [el("span", { text: name })]);
+      addColGrip(table, headRow, th);
+      headRow.append(th);
+    }
+    table.append(headRow);
+    for (const r of rows) {
+      table.append(el("tr", {}, r.map((v, i) => {
+        const cell = v && typeof v === "object" && "text" in v ? v : { text: v };
+        return gridCell(cell.text, columns[i], cell.extra || []);
+      })));
+    }
+    return el("div", { class: "rg-wrap" }, [table]);
+  }
+
   function resultGrid(res) {
     if (!res) return el("div", { class: "status-line dim", text: "Run a query to see results here" });
     if (res.error) return el("div", { class: "status-line err", text: "✗ " + res.error });
     if (!res.columns || !res.columns.length) {
       return el("div", { class: "status-line ok", text: `✓ OK — ${res.rowsAffected ?? 0} row(s) affected · ${res.durationMs ?? 0} ms` });
     }
-
-    const table = el("table", { class: "kv rg" });
-    const headRow = el("tr");
-
-    // draggable grip on each header: freezes the current layout on first use,
-    // then resizes just that column (the table grows/shrinks and the wrapper
-    // scrolls horizontally)
-    const addGrip = (th) => {
-      const grip = el("span", { class: "col-grip", title: "Drag to resize column" });
-      grip.addEventListener("mousedown", (e) => {
-        e.preventDefault();
-        const startX = e.clientX, startW = th.offsetWidth, startTableW = table.offsetWidth;
-        if (table.style.tableLayout !== "fixed") {
-          for (const h of headRow.children) h.style.width = h.offsetWidth + "px";
-          table.style.tableLayout = "fixed";
-          table.style.width = startTableW + "px";
-        }
-        const move = (ev) => {
-          const dx = ev.clientX - startX;
-          const w = Math.max(60, startW + dx);
-          th.style.width = w + "px";
-          table.style.width = startTableW + (w - startW) + "px";
-        };
-        const up = () => { document.removeEventListener("mousemove", move); document.removeEventListener("mouseup", up); };
-        document.addEventListener("mousemove", move);
-        document.addEventListener("mouseup", up);
-      });
-      th.append(grip);
-    };
-    for (const cName of res.columns) {
-      const th = el("th", {}, [el("span", { text: cName })]);
-      addGrip(th);
-      headRow.append(th);
-    }
-    table.append(headRow);
-
-    const looksJson = (s) => (s.startsWith("{") || s.startsWith("[")) && s.length > 1;
-    for (const r of res.rows) {
-      table.append(el("tr", {}, r.map((v, i) => {
-        const s = String(v ?? "");
-        const td = el("td", { class: "rg-cell", title: "Double-click to expand (pretty-prints JSON)" }, [
-          el("span", { class: "rg-cell-text", text: s }),
-        ]);
-        if (s.length > 60 || looksJson(s.trim())) {
-          td.append(el("button", {
-            class: "icon-btn rg-expand", text: "⤢", title: "Expand — JSON is shown formatted",
-            onclick: (e) => { e.stopPropagation(); showJsonModal(res.columns[i], s); },
-          }));
-        }
-        td.addEventListener("dblclick", () => showJsonModal(res.columns[i], s));
-        return td;
-      })));
-    }
-
     return el("div", { class: "tool", style: "flex:1;min-height:0" }, [
       el("div", { class: "status-line ok", text: `✓ ${res.rows.length} row(s)${res.truncated ? " (truncated)" : ""} · ${res.durationMs} ms` }),
-      el("div", { style: "overflow:auto;flex:1;min-height:120px" }, [table]),
+      dataTable(res.columns, res.rows),
     ]);
   }
 
@@ -2358,8 +2799,10 @@
     if (fmt === "xls") downloadFile(`${baseName}-${ts}.xls`, "application/vnd.ms-excel", toXls(cols, rows));
     else downloadFile(`${baseName}-${ts}.csv`, "text/csv;charset=utf-8", toCsv(cols, rows));
   }
-  // shared "Export [n] rows [CSV] [Excel]" toolbar row; doExport(fmt, n)
-  function exportBar(c, ctx, doExport) {
+  // shared "Export [n] rows [CSV] [Excel]" toolbar row; doExport(fmt, n).
+  // `extras` are appended after the export buttons (e.g. a copy-response
+  // button) so each console can add its own action without a second toolbar.
+  function exportBar(c, ctx, doExport, extras = []) {
     const n = el("input", { type: "number", min: "1", max: String(EXPORT_MAX), style: "width:90px", title: `Rows to export (max ${EXPORT_MAX})` });
     n.value = c.exportN || String(EXPORT_DEFAULT);
     n.addEventListener("input", () => { c.exportN = n.value; ctx.save(); });
@@ -2369,6 +2812,7 @@
       el("span", { class: "pane-label", text: "rows as" }),
       el("button", { class: "btn", text: "CSV", onclick: () => doExport("csv", clampExport(c.exportN)) }),
       el("button", { class: "btn", text: "Excel", onclick: () => doExport("xls", clampExport(c.exportN)) }),
+      ...extras,
     ]);
   }
 
@@ -2600,15 +3044,17 @@
     drawCols();
 
     body.append(
-      target,
-      helper,
-      query,
-      el("div", { class: "toolbar" }, [
-        el("button", { class: "btn primary", text: "Run (Ctrl+Enter)", onclick: run }),
-        el("label", { class: "inline" }, ["Max rows", maxRows]),
-        status,
+      el("div", { class: "console-controls" }, [
+        target,
+        helper,
+        query,
+        el("div", { class: "toolbar" }, [
+          el("button", { class: "btn primary", text: "Run (Ctrl+Enter)", onclick: run }),
+          el("label", { class: "inline" }, ["Max rows", maxRows]),
+          status,
+        ]),
+        exportBar(c, ctx, doExport),
       ]),
-      exportBar(c, ctx, doExport),
       out
     );
     out.replaceChildren(resultGrid(c.result));
@@ -2676,15 +3122,9 @@
 
     const tryPretty = (v) => { try { return JSON.stringify(JSON.parse(v), null, 2); } catch { return v == null ? "" : String(v); } };
 
-    const valueCell = (m) => {
+    // the ⤢ button on a value cell opens the full-screen Value/Headers view
+    const maximizeBtn = (m) => {
       const pretty = tryPretty(m.value);
-      const pre = el("pre", { class: "kafka-val-pre collapsed" });
-      pre.textContent = pretty;
-      const toggle = el("button", { class: "btn xs", text: "Expand" });
-      toggle.addEventListener("click", () => {
-        const collapsed = pre.classList.toggle("collapsed");
-        toggle.textContent = collapsed ? "Expand" : "Collapse";
-      });
       const headersView = () => {
         const hs = m.headers || [];
         if (!hs.length) return el("div", { class: "status-line dim", text: "No headers on this message." });
@@ -2702,12 +3142,11 @@
         { label: "Value", build: valueView },
         { label: `Headers (${(m.headers || []).length})`, build: headersView },
       ]);
-      const tools = el("div", { class: "kafka-val-tools" }, [
-        toggle,
-        el("button", { class: "btn xs", text: "⤢ Maximize", title: "Open full-screen with Value & Headers tabs", onclick: maximize }),
-        copyBtn(() => pretty, "Copy"),
-      ]);
-      return el("td", { class: "kafka-val-cell" }, [tools, pre]);
+      return el("button", {
+        class: "icon-btn", text: "⛶",
+        title: "Open full-screen with Value & Headers tabs",
+        onclick: (e) => { e.stopPropagation(); maximize(); },
+      });
     };
 
     const draw = () => {
@@ -2717,20 +3156,14 @@
         const rows = c.messages.slice().reverse();
         out.append(
           el("span", { class: "pane-label", text: `Messages (${c.messages.length}, newest first)` }),
-          el("table", { class: "kv kafka-msgs" }, [
-            el("tr", {}, [
-              el("th", { class: "nowrap", text: "P/Offset" }),
-              el("th", { class: "nowrap", text: "Time" }),
-              el("th", { class: "nowrap", text: "Key" }),
-              el("th", { text: "Value" }),
-            ]),
-            ...rows.map((m) => el("tr", {}, [
-              el("td", { class: "nowrap", text: m.partition + "/" + m.offset }),
-              el("td", { class: "nowrap", text: (m.time || "").replace("T", " ").replace("Z", "") }),
-              el("td", { class: "kafka-key", title: m.key, text: m.key }),
-              valueCell(m),
-            ])),
-          ])
+          // same table treatment as the SQL/Elastic grids: resizable columns,
+          // every cell expandable and copyable (so a long key is reachable)
+          dataTable(["P/Offset", "Time", "Key", "Value"], rows.map((m) => [
+            m.partition + "/" + m.offset,
+            (m.time || "").replace("T", " ").replace("Z", ""),
+            m.key,
+            { text: tryPretty(m.value), extra: [maximizeBtn(m)] },
+          ]))
         );
       }
     };
@@ -2749,32 +3182,96 @@
         setStatus(status, "✗ " + e.message, "err");
       }
     };
+    const fmtSecs = (ms) => (ms / 1000).toFixed(1) + "s";
+    // "⟳ Reading messages… 12 so far   1.4s" — spinner + live elapsed time
+    const busy = (text, ms) => {
+      status.className = "status-line busy";
+      status.replaceChildren(
+        el("span", { class: "spinner" }),
+        el("span", { text }),
+        el("span", { class: "elapsed", text: fmtSecs(ms) }),
+      );
+    };
+
     const consume = async () => {
       if (!c.topic) return setStatus(status, "✗ Enter or pick a topic", "err");
       if ((c.from || "latest") === "time" && !c.startT) {
         return setStatus(status, "✗ Set the start of the time range", "err");
       }
-      setStatus(status, "Reading messages…", "dim");
+      const started = Date.now();
+      let live = [], seen = 0;
+      busy("Reading messages…", 0);
+      const ticker = setInterval(() => busy(`Reading messages… ${seen} so far`, Date.now() - started), 100);
+      // messages stream in as each partition yields them, so the table fills
+      // progressively instead of appearing all at once at the end
+      c.messages = [];
+      draw();
       try {
-        const r = await api("POST", "/api/kafka/consume", {
-          conn: kconn(),
-          topic: c.topic,
-          max: Number(c.max) || 50,
-          from: c.from || "latest",
-          startMs: c.startT ? new Date(c.startT).getTime() : 0,
-          endMs: c.endT ? new Date(c.endT).getTime() : 0,
-          keyQuery: c.keyQ || "",
-          valueQuery: c.valQ || "",
+        const res = await fetch("/api/kafka/consume/stream", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            conn: kconn(),
+            topic: c.topic,
+            max: Number(c.max) || 50,
+            from: c.from || "latest",
+            startMs: c.startT ? new Date(c.startT).getTime() : 0,
+            endMs: c.endT ? new Date(c.endT).getTime() : 0,
+            keyQuery: c.keyQ || "",
+            valueQuery: c.valQ || "",
+          }),
         });
-        c.messages = r.messages;
+        if (!res.ok || !res.body) {
+          let msg = `${res.status} ${res.statusText}`;
+          try { const j = JSON.parse(await res.text()); if (j.error) msg = j.error; } catch { /* not JSON */ }
+          throw new Error(msg);
+        }
+
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buf = "", done = null, failed = null, dirty = false;
+        // repaint on a timer rather than per message, so a fast burst of
+        // thousands of matches doesn't thrash the DOM
+        const painter = setInterval(() => {
+          if (!dirty) return;
+          dirty = false;
+          c.messages = live.slice();
+          draw();
+        }, 250);
+        try {
+          for (;;) {
+            const { value, done: fin } = await reader.read();
+            if (fin) break;
+            buf += decoder.decode(value, { stream: true });
+            const lines = buf.split("\n");
+            buf = lines.pop();
+            for (const line of lines) {
+              if (!line.trim()) continue;
+              let ev;
+              try { ev = JSON.parse(line); } catch { continue; }
+              if (ev.type === "msg") { live.push(ev.message); seen++; dirty = true; }
+              else if (ev.type === "done") done = ev;
+              else if (ev.type === "error") failed = ev;
+            }
+          }
+        } finally {
+          clearInterval(painter);
+        }
+        clearInterval(ticker);
+        if (failed) throw new Error(failed.error);
+
+        const took = fmtSecs(done ? done.elapsedMs : Date.now() - started);
+        // settle on the server's sorted + trimmed list
+        c.messages = done ? done.messages : live;
         c.name = c.topic;
         ctx.save();
         draw();
-        setStatus(status,
-          `✓ ${r.matched} match(es) of ${r.scanned} scanned, showing ${r.messages.length}${r.truncated ? " (scan capped — narrow the range or raise Last N)" : ""}`,
-          "ok");
+        setStatus(status, done
+          ? `✓ ${done.matched} match(es) of ${done.scanned} scanned, showing ${done.messages.length}${done.truncated ? " (scan capped — narrow the range or raise Last N)" : ""} · ${took}`
+          : `✓ ${c.messages.length} message(s) · ${took}`, "ok");
       } catch (e) {
-        setStatus(status, "✗ " + e.message, "err");
+        clearInterval(ticker);
+        setStatus(status, "✗ " + e.message + ` · ${fmtSecs(Date.now() - started)}`, "err");
       }
     };
 
@@ -2878,7 +3375,52 @@
     // is bound to right now, not a connection captured when the tab was drawn.
     const cluster = () => (getConn && getConn()) || conn;
     const status = el("div", { class: "status-line dim" });
-    const out = el("pre", { class: "output", style: "flex:1;min-height:160px" });
+    const out = el("div", { class: "tool", style: "flex:1;min-height:160px" });
+    let esView = "table"; // _search results render as a grid by default
+
+    // Search responses get the same table treatment as the SQL/Kafka grids —
+    // hits are flattened to dot-notation columns, every cell expandable and
+    // copyable — with the raw JSON one click away.
+    const drawResponse = () => {
+      out.replaceChildren();
+      const text = c.response || "";
+      if (!text) {
+        out.append(el("div", { class: "status-line dim", text: "Send a request to see the response here" }));
+        return;
+      }
+      const rawPre = () => {
+        const p = el("pre", { class: "output", style: "flex:1;overflow:auto;margin:0" });
+        p.textContent = text;
+        return p;
+      };
+      let hits = null;
+      try {
+        const j = JSON.parse(text);
+        if (j && j.hits && Array.isArray(j.hits.hits)) hits = j.hits.hits;
+      } catch { /* not JSON — show it raw */ }
+      if (!hits) { out.append(rawPre()); return; }
+
+      out.append(el("div", { class: "subtabs" }, [
+        el("button", { class: esView === "table" ? "active" : "", text: `Table (${hits.length})`, onclick: () => { esView = "table"; drawResponse(); } }),
+        el("button", { class: esView === "raw" ? "active" : "", text: "Raw JSON", onclick: () => { esView = "raw"; drawResponse(); } }),
+      ]));
+      if (esView === "raw" || !hits.length) { out.append(rawPre()); return; }
+      const flat = hits.map((h) => flatten(h._source, "", { _id: h._id }));
+      const cols = [];
+      for (const row of flat) for (const k of Object.keys(row)) if (!cols.includes(k)) cols.push(k);
+      out.append(dataTable(cols, flat.map((row) => cols.map((k) => row[k] ?? ""))));
+    };
+
+    // copies the whole response body exactly as shown (pretty-printed JSON)
+    const copyResponseBtn = () => {
+      const btn = el("button", { class: "btn", text: "Copy response" });
+      btn.addEventListener("click", () => {
+        const text = c.response || "";
+        if (!text) return setStatus(status, "✗ Nothing to copy — send a request first", "err");
+        Devtil.copyText(text, btn);
+      });
+      return btn;
+    };
 
     // Visible target so it's unambiguous which cluster this console talks to.
     const target = el("div", { class: "es-target" });
@@ -2922,7 +3464,7 @@
         c.response = text;
         c.name = method + " /" + String(p || "").split("?")[0];
         ctx.save();
-        out.textContent = text;
+        drawResponse();
         setStatus(status, `${r.status < 400 ? "✓" : "✗"} ${r.status} · ${r.durationMs} ms · ${fmtBytes(r.size)}`, r.status < 400 ? "ok" : "err");
       } catch (e) {
         setStatus(status, "✗ " + e.message, "err");
@@ -3204,24 +3746,31 @@
     drawFields();
     renderConds();
 
+    // controls are grouped so they keep their natural size (scrolling among
+    // themselves when the builder is open) and the response always gets the
+    // rest of the pane instead of being pushed off the bottom
     body.append(
-      target,
-      builder,
-      el("div", { class: "toolbar" }, [
-        quick("Cluster health", "GET", "_cluster/health"),
-        quick("Indices", "GET", "_cat/indices?v&format=json"),
-        quick("Nodes", "GET", "_cat/nodes?v&format=json"),
+      el("div", { class: "console-controls" }, [
+        target,
+        builder,
+        el("div", { class: "toolbar" }, [
+          quick("Cluster health", "GET", "_cluster/health"),
+          quick("Indices", "GET", "_cat/indices?v&format=json"),
+          quick("Nodes", "GET", "_cat/nodes?v&format=json"),
+        ]),
+        el("div", { class: "req-line" }, [
+          methodSel, path,
+          el("button", { class: "btn primary", text: "Send", onclick: () => send(c.method || "GET", c.path, c.body) }),
+        ]),
+        el("div", {}, [el("span", { class: "pane-label", text: "Body (JSON, for _search etc.)" }), reqBody]),
+        // copy sits with the export actions so it's available for every
+        // response, not just the _search ones that render as a table
+        exportBar(c, ctx, doExport, [copyResponseBtn()]),
+        status,
       ]),
-      el("div", { class: "req-line" }, [
-        methodSel, path,
-        el("button", { class: "btn primary", text: "Send", onclick: () => send(c.method || "GET", c.path, c.body) }),
-      ]),
-      el("div", {}, [el("span", { class: "pane-label", text: "Body (JSON, for _search etc.)" }), reqBody]),
-      exportBar(c, ctx, doExport),
-      status,
       out
     );
-    if (c.response) out.textContent = c.response;
+    drawResponse();
   }
 
   clientTool({
@@ -3503,24 +4052,196 @@
         area.value = p.text || "";
         const mono = el("input", { type: "checkbox" });
         mono.checked = p.mono !== false;
+        const wrap = el("input", { type: "checkbox" });
+        wrap.checked = p.wrap !== false;
 
         const update = () => {
           area.style.fontFamily = p.mono !== false ? "var(--mono)" : "var(--sans)";
+          // off = don't wrap long lines; the textarea scrolls horizontally
+          area.wrap = p.wrap !== false ? "soft" : "off";
+          area.style.whiteSpace = p.wrap !== false ? "" : "pre";
           const text = p.text || "";
           const words = text.trim() ? text.trim().split(/\s+/).length : 0;
           counter.textContent = `${text.length} chars · ${words} words · ${text ? text.split("\n").length : 0} lines`;
         };
         area.addEventListener("input", () => { p.text = area.value; ctx.save(); update(); });
         mono.addEventListener("change", () => { p.mono = mono.checked; ctx.save(); update(); });
+        wrap.addEventListener("change", () => { p.wrap = wrap.checked; ctx.save(); update(); });
+
+        // ---- find / replace -------------------------------------------------
+        const findIn = el("input", { type: "text", placeholder: "Find", style: "min-width:150px" });
+        const replIn = el("input", { type: "text", placeholder: "Replace with", style: "min-width:150px" });
+        const caseChk = el("input", { type: "checkbox" });
+        const findStatus = el("span", { class: "status-line dim" });
+        const findBar = el("div", { class: "toolbar find-bar hidden" });
+
+        const needle = () => findIn.value;
+        const hay = () => area.value;
+        const norm = (s) => (caseChk.checked ? s : s.toLowerCase());
+
+        const setText = (next, caretAt) => {
+          area.value = next;
+          p.text = next;
+          ctx.save();
+          update();
+          if (caretAt != null) { area.selectionStart = area.selectionEnd = caretAt; }
+          area.focus();
+        };
+
+        // select the next match after the caret, wrapping to the top
+        const findNext = (backwards) => {
+          const n = needle();
+          if (!n) return setStatus(findStatus, "", "dim");
+          const h = norm(hay()), q = norm(n);
+          let idx;
+          if (backwards) {
+            const before = area.selectionStart;
+            idx = h.lastIndexOf(q, Math.max(0, before - 1));
+            if (idx < 0) idx = h.lastIndexOf(q); // wrap to the end
+          } else {
+            idx = h.indexOf(q, area.selectionEnd);
+            if (idx < 0) idx = h.indexOf(q); // wrap to the start
+          }
+          if (idx < 0) return setStatus(findStatus, "No matches", "err");
+          area.focus();
+          area.setSelectionRange(idx, idx + n.length);
+          // keep the match in view
+          const upto = area.value.slice(0, idx).split("\n").length;
+          area.scrollTop = Math.max(0, (upto - 5) * 18);
+          const total = countAll();
+          setStatus(findStatus, `Match ${h.slice(0, idx).split(q).length} of ${total}`, "ok");
+        };
+
+        const countAll = () => {
+          const n = needle();
+          if (!n) return 0;
+          return norm(hay()).split(norm(n)).length - 1;
+        };
+
+        const findAll = () => {
+          const total = countAll();
+          if (!needle()) return setStatus(findStatus, "Enter something to find", "err");
+          setStatus(findStatus, total ? `${total} match(es)` : "No matches", total ? "ok" : "err");
+          if (total) findNext(false);
+        };
+
+        // replace just the current selection when it is a match, then advance
+        const replaceOne = () => {
+          const n = needle();
+          if (!n) return;
+          const sel = area.value.slice(area.selectionStart, area.selectionEnd);
+          if (sel && norm(sel) === norm(n)) {
+            const at = area.selectionStart;
+            setText(area.value.slice(0, at) + replIn.value + area.value.slice(area.selectionEnd), at + replIn.value.length);
+            setStatus(findStatus, `Replaced · ${countAll()} left`, "ok");
+          }
+          findNext(false);
+        };
+
+        const replaceAll = () => {
+          const n = needle();
+          if (!n) return setStatus(findStatus, "Enter something to find", "err");
+          const total = countAll();
+          if (!total) return setStatus(findStatus, "No matches", "err");
+          let out;
+          if (caseChk.checked) {
+            out = area.value.split(n).join(replIn.value);
+          } else {
+            // case-insensitive replace without regex, so the needle can hold
+            // any characters safely
+            const h = area.value, q = norm(n);
+            let res = "", from = 0, i;
+            while ((i = norm(h).indexOf(q, from)) >= 0) {
+              res += h.slice(from, i) + replIn.value;
+              from = i + n.length;
+            }
+            out = res + h.slice(from);
+          }
+          setText(out);
+          setStatus(findStatus, `Replaced ${total} occurrence(s)`, "ok");
+        };
+
+        const showFind = (withReplace) => {
+          findBar.classList.remove("hidden");
+          replIn.style.display = withReplace ? "" : "none";
+          findBar.querySelectorAll(".repl-only").forEach((b) => (b.style.display = withReplace ? "" : "none"));
+          const sel = area.value.slice(area.selectionStart, area.selectionEnd);
+          if (sel && !sel.includes("\n")) findIn.value = sel;
+          findIn.focus();
+          findIn.select();
+        };
+        const hideFind = () => { findBar.classList.add("hidden"); area.focus(); };
+
+        findBar.append(
+          el("span", { class: "pane-label", text: "Find" }),
+          findIn,
+          el("button", { class: "btn", text: "Find", title: "Enter / F3", onclick: () => findNext(false) }),
+          el("button", { class: "btn", text: "◀", title: "Find previous (Shift+Enter / Shift+F3)", onclick: () => findNext(true) }),
+          el("button", { class: "btn", text: "Find all", onclick: findAll }),
+          replIn,
+          el("button", { class: "btn repl-only", text: "Replace", onclick: replaceOne }),
+          el("button", { class: "btn repl-only", text: "Replace all", onclick: replaceAll }),
+          el("label", { class: "inline" }, [caseChk, "Match case"]),
+          findStatus,
+          el("button", { class: "icon-btn", text: "×", title: "Close (Esc)", onclick: hideFind }),
+        );
+        findIn.addEventListener("keydown", (e) => {
+          if (e.key === "Enter") { e.preventDefault(); findNext(e.shiftKey); }
+          if (e.key === "Escape") { e.preventDefault(); hideFind(); }
+        });
+        replIn.addEventListener("keydown", (e) => {
+          if (e.key === "Enter") { e.preventDefault(); replaceOne(); }
+          if (e.key === "Escape") { e.preventDefault(); hideFind(); }
+        });
+
+        // ---- line/text operations ------------------------------------------
+        // operate on the selection when there is one, else the whole pad
+        const onTarget = (fn) => () => {
+          const s = area.selectionStart, e = area.selectionEnd;
+          if (e > s) {
+            const next = area.value.slice(0, s) + fn(area.value.slice(s, e)) + area.value.slice(e);
+            setText(next);
+            area.setSelectionRange(s, s + fn(area.value.slice(s, e)).length);
+          } else {
+            setText(fn(area.value));
+          }
+        };
+        const lines = (t) => t.split("\n");
+        const ops = [
+          ["UPPER", (t) => t.toUpperCase()],
+          ["lower", (t) => t.toLowerCase()],
+          ["Sort", (t) => lines(t).sort((a, b) => a.localeCompare(b)).join("\n")],
+          ["Dedupe", (t) => [...new Set(lines(t))].join("\n")],
+          ["Trim", (t) => lines(t).map((l) => l.replace(/\s+$/, "")).join("\n")],
+          ["Drop blanks", (t) => lines(t).filter((l) => l.trim()).join("\n")],
+        ];
 
         root.append(
           el("div", { class: "toolbar" }, [
+            el("button", { class: "btn", text: "Find", title: "Ctrl+F", onclick: () => showFind(false) }),
+            el("button", { class: "btn", text: "Replace", title: "Ctrl+H", onclick: () => showFind(true) }),
+            ...ops.map(([label, fn]) => el("button", { class: "btn", text: label, title: "Applies to the selection, or the whole pad", onclick: onTarget(fn) })),
+            el("label", { class: "inline" }, [wrap, "Wrap"]),
             el("label", { class: "inline" }, [mono, "Monospace"]),
             copyBtn(() => p.text || "", "Copy all"),
             counter,
           ]),
+          findBar,
           area
         );
+        // editor shortcuts: Ctrl/Cmd+F find, Ctrl/Cmd+H replace, F3 next
+        area.addEventListener("keydown", (e) => {
+          const mod = e.ctrlKey || e.metaKey;
+          if (mod && e.key.toLowerCase() === "f") { e.preventDefault(); showFind(false); }
+          else if (mod && e.key.toLowerCase() === "h") { e.preventDefault(); showFind(true); }
+          else if (e.key === "F3") { e.preventDefault(); findNext(e.shiftKey); }
+          else if (e.key === "Escape") hideFind();
+          else if (e.key === "Tab") { // keep Tab in the editor
+            e.preventDefault();
+            const s = area.selectionStart;
+            setText(area.value.slice(0, s) + "  " + area.value.slice(area.selectionEnd), s + 2);
+          }
+        });
         update();
       };
       renderPad();

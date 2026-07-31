@@ -51,6 +51,7 @@ func (s *Server) Handler() http.Handler {
 
 	mux.HandleFunc("POST /api/kafka/topics", s.kafkaTopics)
 	mux.HandleFunc("POST /api/kafka/consume", s.kafkaConsume)
+	mux.HandleFunc("POST /api/kafka/consume/stream", s.kafkaConsumeStream)
 	mux.HandleFunc("POST /api/kafka/produce", s.kafkaProduce)
 	mux.HandleFunc("POST /api/db/query", s.dbQuery)
 	mux.HandleFunc("POST /api/ssh/exec", s.sshExec)
@@ -90,6 +91,14 @@ func (r *statusRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 		return nil, nil, errString("underlying ResponseWriter is not a http.Hijacker")
 	}
 	return h.Hijack()
+}
+
+// Flush keeps streaming endpoints (NDJSON) working through the log wrapper —
+// without it the handler can't push partial responses to the client.
+func (r *statusRecorder) Flush() {
+	if f, ok := r.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
 }
 
 // logRequests logs every /api call (except the log viewer's own polling)
@@ -273,6 +282,66 @@ func (s *Server) kafkaConsume(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, resp)
+}
+
+// kafkaConsumeStream runs a consume and writes newline-delimited JSON as the
+// read progresses, so the UI can show messages while partitions are still
+// being read instead of waiting for the whole result.
+//
+// Line kinds: {"type":"msg","message":{…}} per match, then exactly one
+// {"type":"done",…} or {"type":"error","error":…}.
+func (s *Server) kafkaConsumeStream(w http.ResponseWriter, r *http.Request) {
+	var req clients.KafkaConsumeRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		// no streaming support — answer in one shot with the same shape as the
+		// terminal line, using the request we already decoded
+		resp, err := clients.KafkaConsume(req)
+		if err != nil {
+			writeError(w, http.StatusBadGateway, err)
+			return
+		}
+		writeJSON(w, map[string]any{
+			"type": "done", "messages": resp.Messages, "scanned": resp.Scanned,
+			"matched": resp.Matched, "truncated": resp.Truncated,
+		})
+		return
+	}
+	w.Header().Set("Content-Type", "application/x-ndjson")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.WriteHeader(http.StatusOK)
+
+	enc := json.NewEncoder(w)
+	var mu sync.Mutex
+	started := time.Now()
+	write := func(v any) {
+		mu.Lock()
+		defer mu.Unlock()
+		enc.Encode(v)
+		flusher.Flush()
+	}
+
+	sent := 0
+	resp, err := clients.KafkaConsumeStream(req, func(m clients.KafkaMessage) {
+		sent++
+		write(map[string]any{"type": "msg", "message": m, "elapsedMs": time.Since(started).Milliseconds()})
+	})
+	if err != nil {
+		write(map[string]any{"type": "error", "error": err.Error(), "elapsedMs": time.Since(started).Milliseconds()})
+		return
+	}
+	// the streamed messages are in partition order; the final line carries the
+	// sorted + trimmed result so the client can settle on the correct list
+	write(map[string]any{
+		"type": "done", "messages": resp.Messages, "scanned": resp.Scanned,
+		"matched": resp.Matched, "truncated": resp.Truncated,
+		"streamed": sent, "elapsedMs": time.Since(started).Milliseconds(),
+	})
 }
 
 func (s *Server) kafkaProduce(w http.ResponseWriter, r *http.Request) {

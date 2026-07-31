@@ -188,7 +188,7 @@ type partRead struct {
 // window and reads up to limit messages, keeping the ones that match the
 // key/value filters. It never waits for new messages: reading stops at the
 // high watermark, or as soon as a fetch comes back empty.
-func readPartitionWindow(ctx context.Context, dialer *kafka.Dialer, broker string, req KafkaConsumeRequest, partID, limit int, keyQ, valQ string) (out partRead) {
+func readPartitionWindow(ctx context.Context, dialer *kafka.Dialer, broker string, req KafkaConsumeRequest, partID, limit int, keyQ, valQ string, emit func(KafkaMessage)) (out partRead) {
 	started := time.Now()
 	defer func() { out.elapsed = time.Since(started) }()
 
@@ -265,14 +265,18 @@ func readPartitionWindow(ctx context.Context, dialer *kafka.Dialer, broker strin
 				for _, h := range m.Headers {
 					hdrs = append(hdrs, KafkaHeader{Key: h.Key, Value: string(h.Value)})
 				}
-				out.msgs = append(out.msgs, KafkaMessage{
+				km := KafkaMessage{
 					Partition: partID,
 					Offset:    m.Offset,
 					Time:      m.Time.UTC().Format(time.RFC3339),
 					Key:       key,
 					Value:     value,
 					Headers:   hdrs,
-				})
+				}
+				out.msgs = append(out.msgs, km)
+				if emit != nil {
+					emit(km) // hand it to the caller now, don't wait for the whole read
+				}
 			}
 			// offsets can be sparse (compaction, transaction markers), so stop
 			// on reaching the high watermark rather than counting reads
@@ -298,6 +302,18 @@ func readPartitionWindow(ctx context.Context, dialer *kafka.Dialer, broker strin
 // or a time range — optionally filtering by key/value substrings, and
 // returns up to Max matches merged in chronological order.
 func KafkaConsume(req KafkaConsumeRequest) (*KafkaConsumeResponse, error) {
+	return KafkaConsumeStream(req, nil)
+}
+
+// KafkaConsumeStream is KafkaConsume with an optional callback invoked for
+// every matching message as soon as its partition yields it, so callers can
+// render results while the read is still running. Partitions are read
+// concurrently, so onMessage is called from several goroutines — it is
+// serialised here and must not block for long.
+//
+// Streamed messages arrive in partition order, not globally sorted; the
+// returned response still holds the properly sorted and trimmed result.
+func KafkaConsumeStream(req KafkaConsumeRequest, onMessage func(KafkaMessage)) (*KafkaConsumeResponse, error) {
 	conn := req.Conn
 	brokers := conn.brokerList()
 	if len(brokers) == 0 || strings.TrimSpace(req.Topic) == "" {
@@ -359,6 +375,17 @@ func KafkaConsume(req KafkaConsumeRequest) (*KafkaConsumeResponse, error) {
 	results := make([]partRead, len(parts))
 	sem := make(chan struct{}, kafkaPartWorkers)
 	var wg sync.WaitGroup
+	var emitMu sync.Mutex
+	emit := onMessage
+	if emit != nil {
+		// serialise the callback: partitions run concurrently
+		inner := onMessage
+		emit = func(m KafkaMessage) {
+			emitMu.Lock()
+			defer emitMu.Unlock()
+			inner(m)
+		}
+	}
 	for i, p := range parts {
 		wg.Add(1)
 		go func(idx, partID int) {
@@ -369,7 +396,7 @@ func KafkaConsume(req KafkaConsumeRequest) (*KafkaConsumeResponse, error) {
 				results[idx] = partRead{truncated: true}
 				return
 			}
-			results[idx] = readPartitionWindow(ctx, dialer, brokers[0], req, partID, perPart, keyQ, valQ)
+			results[idx] = readPartitionWindow(ctx, dialer, brokers[0], req, partID, perPart, keyQ, valQ, emit)
 		}(i, p.ID)
 	}
 	wg.Wait()

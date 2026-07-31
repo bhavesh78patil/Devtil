@@ -336,6 +336,31 @@ label.inline { display: inline-flex; align-items: center; gap: 6px; font-size: 1
 .status-line.ok { color: var(--green); }
 .status-line.err { color: var(--red); }
 .status-line.dim { color: var(--text-dim); }
+/* in-progress: accent-coloured, with a spinner and a live elapsed timer */
+.status-line.busy {
+  color: var(--accent);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 500;
+}
+.status-line.busy .elapsed {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--text-dim);
+  font-weight: 400;
+}
+.spinner {
+  width: 12px;
+  height: 12px;
+  flex: none;
+  border: 2px solid var(--accent-soft);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .spinner { animation-duration: 2s; } }
 
 pre.output {
   background: var(--bg2);
@@ -532,8 +557,41 @@ details.section[open] summary { margin-bottom: 8px; }
   white-space: pre-wrap;
 }
 
-/* DB result grid: resizable columns + expandable cells */
-.kv.rg th { position: relative; padding-right: 16px; }
+/* JSONPath tool */
+.jp-path { flex: 1; min-width: 220px; font-family: var(--mono); }
+.jp-examples { display: flex; flex-wrap: wrap; gap: 4px; }
+.jp-examples .btn.chip { font-family: var(--mono); font-size: 11.5px; }
+
+/* Notepad find/replace bar */
+.find-bar {
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  padding: 8px 10px;
+}
+.find-bar.hidden { display: none; }
+
+/* Console layout: the request controls keep their natural height (and scroll
+   among themselves if the query builder is open), so the result area below
+   always keeps the majority of the pane instead of being pushed off-screen. */
+.console-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  flex: 0 1 auto;
+  max-height: 55%;
+  overflow-y: auto;
+  padding-right: 2px;
+}
+.console-controls textarea { max-height: 22vh; }
+/* the result area gets everything else */
+.api-main > .tool > .tool:last-child,
+.api-main > .tool > div:last-child { min-height: 200px; }
+
+/* shared result grid (SQL / Kafka / Elastic): resizable columns, and every
+   cell clamped to one line with expand + copy actions on hover */
+.rg-wrap { overflow: auto; flex: 1; min-height: 120px; }
+.kv.rg th { position: relative; padding-right: 16px; white-space: nowrap; }
 .kv.rg th > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: block; }
 .col-grip {
   position: absolute; top: 0; right: 0;
@@ -543,16 +601,39 @@ details.section[open] summary { margin-bottom: 8px; }
   border-right: 2px solid transparent;
 }
 .col-grip:hover { border-right-color: var(--accent); }
-.kv.rg td.rg-cell { max-width: 420px; position: relative; padding-right: 22px; }
-.rg-cell-text { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.rg-expand {
+.kv.rg td.rg-cell { position: relative; padding-right: 8px; }
+/* the cap lives on the text block, not the cell: a table in auto layout
+   ignores max-width on a <td>, so a long key would size the whole column */
+.rg-cell-text {
+  display: block;
+  max-width: 420px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--mono);
+  font-size: 12.5px;
+}
+.rg-tools {
   position: absolute; right: 2px; top: 50%;
   transform: translateY(-50%);
-  visibility: hidden;
+  display: none;
+  align-items: center;
+  gap: 2px;
   background: var(--bg2);
-  border-radius: 4px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-input);
+  padding: 1px 2px;
+  box-shadow: -6px 0 8px -4px var(--bg2);
 }
-.kv.rg td:hover .rg-expand { visibility: visible; }
+.kv.rg td.rg-cell:hover .rg-tools { display: flex; }
+.rg-tools .icon-btn, .rg-tools .btn {
+  font-size: 12px;
+  padding: 1px 5px;
+  border: none;
+  background: none;
+  line-height: 1.4;
+}
+.rg-tools .btn:hover, .rg-tools .icon-btn:hover { background: var(--bg3); color: var(--accent); }
 
 /* Elastic console: which cluster this tab talks to */
 .es-target { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; }
@@ -625,28 +706,8 @@ a.sftp-dir:hover, a.sftp-file:hover { color: var(--accent); text-decoration: und
 .es-conds { display: flex; flex-direction: column; gap: 6px; margin: 4px 0; }
 .es-conds .header-row { align-items: center; }
 
-/* Kafka message value cells */
+/* small button variant used inside modals/toolbars */
 .btn.xs { padding: 1px 8px; font-size: 11px; }
-/* keep P/Offset, Time (and the Key header) as narrow as their content */
-table.kafka-msgs td.nowrap, table.kafka-msgs th.nowrap { white-space: nowrap; width: 1%; word-break: normal; }
-/* cap the Key column so a long key can't steal width from Value (full key on hover) */
-table.kafka-msgs td.kafka-key { max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; word-break: normal; }
-.kafka-val-cell { vertical-align: top; }
-.kafka-val-tools { display: flex; gap: 4px; margin-bottom: 4px; flex-wrap: wrap; }
-.kafka-val-pre {
-  margin: 0;
-  font-family: var(--mono);
-  font-size: 12px;
-  line-height: 1.45;
-  white-space: pre-wrap;
-  word-break: break-word;
-  overflow: auto;
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  padding: 6px 8px;
-}
-.kafka-val-pre.collapsed { max-height: 4.6em; }
 
 /* full-screen JSON viewer modal */
 .json-modal-overlay {
