@@ -6,6 +6,7 @@ package clients
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -73,7 +74,16 @@ func (c KafkaConn) dialer() *kafka.Dialer {
 }
 
 func (c KafkaConn) transport() *kafka.Transport {
-	t := &kafka.Transport{DialTimeout: c.timeout()}
+	// Producing has to complete a TLS + SASL handshake to the partition
+	// leader. The connection timeout is tuned for "fail fast when the broker
+	// is unreachable" (1s by default) and is far too tight for that, so give
+	// the transport a floor — otherwise every dial attempt is abandoned and
+	// the write burns its whole budget retrying.
+	dial := c.timeout()
+	if dial < 10*time.Second {
+		dial = 10 * time.Second
+	}
+	t := &kafka.Transport{DialTimeout: dial}
 	if c.TLS {
 		t.TLS = &tls.Config{InsecureSkipVerify: c.Insecure}
 	}
@@ -450,21 +460,65 @@ func KafkaConsumeStream(req KafkaConsumeRequest, onMessage func(KafkaMessage)) (
 	return resp, nil
 }
 
+// kafkaCheckTopic fails fast when a topic can't be produced to. Auto topic
+// creation is off by default, and an unknown topic makes the writer retry the
+// metadata lookup until the context expires — which surfaces as a bare
+// "context deadline exceeded" with no clue about the real problem.
+func kafkaCheckTopic(ctx context.Context, conn KafkaConn, broker, topic string) error {
+	c, err := conn.dialer().DialContext(ctx, "tcp", broker)
+	if err != nil {
+		return fmt.Errorf("kafka: cannot reach broker %s: %v", broker, err)
+	}
+	defer c.Close()
+	parts, err := c.ReadPartitions(topic)
+	if err != nil {
+		return fmt.Errorf("kafka: topic %q is not available: %v — check the name, or create the topic first", topic, err)
+	}
+	if len(parts) == 0 {
+		return fmt.Errorf("kafka: topic %q has no partitions", topic)
+	}
+	return nil
+}
+
 func KafkaProduce(conn KafkaConn, topic, key, value string, headers []KafkaHeader) error {
 	brokers := conn.brokerList()
 	if len(brokers) == 0 || strings.TrimSpace(topic) == "" {
 		return fmt.Errorf("brokers and a topic are required")
 	}
+
+	// Scale the budget with the configured timeout instead of a fixed 15s: on
+	// a remote cluster the metadata lookup and leader handshake dominate.
+	timeout := conn.opDeadline()
+	if timeout < 20*time.Second {
+		timeout = 20 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	started := time.Now()
+	logging.Logf("kafka: produce topic=%s key=%q bytes=%d headers=%d timeout=%s",
+		topic, key, len(value), len(headers), timeout)
+
+	if err := kafkaCheckTopic(ctx, conn, brokers[0], topic); err != nil {
+		logging.Logf("kafka: produce pre-check failed: %v", err)
+		return err
+	}
+
 	w := &kafka.Writer{
 		Addr:      kafka.TCP(brokers...),
 		Topic:     topic,
 		Balancer:  &kafka.Hash{},
 		Transport: conn.transport(),
+		// wait for the leader to acknowledge, so a reported success means the
+		// broker really took the record (the zero value acknowledges nothing)
+		RequiredAcks: kafka.RequireOne,
+		// this is an interactive single-message send: don't sit in the batch
+		// window, and surface the real error instead of retrying it away
+		BatchTimeout: 10 * time.Millisecond,
+		BatchSize:    1,
+		MaxAttempts:  3,
 	}
 	defer w.Close()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
 
 	msg := kafka.Message{Value: []byte(value)}
 	if key != "" {
@@ -477,7 +531,14 @@ func KafkaProduce(conn KafkaConn, topic, key, value string, headers []KafkaHeade
 		msg.Headers = append(msg.Headers, kafka.Header{Key: h.Key, Value: []byte(h.Value)})
 	}
 	if err := w.WriteMessages(ctx, msg); err != nil {
+		logging.Logf("kafka: produce failed after %s: %v", time.Since(started).Round(time.Millisecond), err)
+		if errors.Is(err, context.DeadlineExceeded) {
+			return fmt.Errorf("kafka: produce timed out after %s — the topic exists, but the write was never acknowledged. "+
+				"Usually the broker's advertised listener points at a host this machine can't reach, the partition leader is "+
+				"down, or the cluster is refusing writes. Raising the cluster's timeout gives it longer", timeout.Round(time.Second))
+		}
 		return fmt.Errorf("kafka: %v", err)
 	}
+	logging.Logf("kafka: produce ok in %s", time.Since(started).Round(time.Millisecond))
 	return nil
 }

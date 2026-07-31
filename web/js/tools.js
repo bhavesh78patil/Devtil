@@ -3073,20 +3073,43 @@
     // field for typing a custom topic. Either keeps c.topic in sync.
     const topic = el("input", { type: "text", placeholder: "topic name", style: "min-width:160px" });
     topic.value = c.topic || "";
-    topic.addEventListener("input", () => { c.topic = topic.value.trim(); topicSel.value = topic.value.trim(); ctx.save(); });
+    topic.addEventListener("input", () => { c.topic = topic.value.trim(); ctx.save(); syncTopicInputs(); });
     const topicSel = el("select", { style: "min-width:200px" });
     topicSel.addEventListener("change", () => {
       if (!topicSel.value) return;
       c.topic = topicSel.value;
-      topic.value = topicSel.value;
       ctx.save();
+      syncTopicInputs();
     });
-    const fillTopics = () => {
+    // the Produce pane needs its own picker elements (a node can only live in
+    // one place), kept in sync through the same c.topic
+    const topic2 = el("input", { type: "text", placeholder: "topic name", style: "min-width:160px" });
+    const topicSel2 = el("select", { style: "min-width:200px" });
+    topic2.addEventListener("input", () => { c.topic = topic2.value.trim(); ctx.save(); syncTopicInputs(); });
+    topicSel2.addEventListener("change", () => {
+      if (!topicSel2.value) return;
+      c.topic = topicSel2.value;
+      ctx.save();
+      syncTopicInputs();
+    });
+    const syncTopicInputs = () => {
+      const t = c.topic || "";
+      if (topic.value !== t) topic.value = t;
+      if (topic2.value !== t) topic2.value = t;
+      const listed = (c.topics || []).some((x) => x.name === t);
+      topicSel.value = listed ? t : "";
+      topicSel2.value = listed ? t : "";
+    };
+
+    const fillOpts = (sel) => {
       const opts = [el("option", { value: "", text: (c.topics && c.topics.length) ? `— pick a topic (${c.topics.length}) —` : "— List topics first —" })];
       for (const t of (c.topics || [])) opts.push(el("option", { value: t.name, text: `${t.name} (${t.partitions}p)` }));
-      topicSel.replaceChildren(...opts);
-      // reflect the current topic in the dropdown if it's one of the listed ones
-      if (c.topic && (c.topics || []).some((t) => t.name === c.topic)) topicSel.value = c.topic;
+      sel.replaceChildren(...opts);
+    };
+    const fillTopics = () => {
+      fillOpts(topicSel);
+      fillOpts(topicSel2);
+      syncTopicInputs();
     };
     const max = el("input", { type: "number", min: "1", max: "500", style: "width:80px" });
     max.value = c.max || "50";
@@ -3184,14 +3207,16 @@
     };
     const fmtSecs = (ms) => (ms / 1000).toFixed(1) + "s";
     // "⟳ Reading messages… 12 so far   1.4s" — spinner + live elapsed time
-    const busy = (text, ms) => {
-      status.className = "status-line busy";
-      status.replaceChildren(
+    const busyIn = (node, text, ms) => {
+      node.className = "status-line busy";
+      node.replaceChildren(
         el("span", { class: "spinner" }),
         el("span", { text }),
         el("span", { class: "elapsed", text: fmtSecs(ms) }),
       );
     };
+    const busy = (text, ms) => busyIn(status, text, ms);
+    const busy2 = (text, ms) => busyIn(status2, text, ms);
 
     const consume = async () => {
       if (!c.topic) return setStatus(status, "✗ Enter or pick a topic", "err");
@@ -3282,15 +3307,21 @@
     const prodValue = el("input", { type: "text", placeholder: "message value", style: "flex:1;min-width:200px" });
     prodValue.value = c.prodValue || "";
     prodValue.addEventListener("input", () => { c.prodValue = prodValue.value; ctx.save(); });
+    // the Produce pane reports into its own status line
+    const status2 = el("div", { class: "status-line dim" });
     const produce = async () => {
-      if (!c.topic) return setStatus(status, "✗ Enter or pick a topic", "err");
-      setStatus(status, "Producing…", "dim");
+      if (!c.topic) return setStatus(status2, "✗ Enter or pick a topic", "err");
+      const t0 = Date.now();
+      busy2("Producing…", 0);
+      const tick = setInterval(() => busy2("Producing…", Date.now() - t0), 100);
       try {
         const headers = (c.prodHeaders || []).filter((h) => h.k.trim()).map((h) => ({ key: h.k.trim(), value: h.v }));
         await api("POST", "/api/kafka/produce", { conn: kconn(), topic: c.topic, key: c.prodKey || "", value: c.prodValue || "", headers });
-        setStatus(status, `✓ Message produced to ${c.topic}${headers.length ? " with " + headers.length + " header(s)" : ""}`, "ok");
+        clearInterval(tick);
+        setStatus(status2, `✓ Produced to ${c.topic}${headers.length ? " with " + headers.length + " header(s)" : ""} · ${fmtSecs(Date.now() - t0)}`, "ok");
       } catch (e) {
-        setStatus(status, "✗ " + e.message, "err");
+        clearInterval(tick);
+        setStatus(status2, "✗ " + e.message + ` · ${fmtSecs(Date.now() - t0)}`, "err");
       }
     };
 
@@ -3327,7 +3358,9 @@
       }
     };
 
-    body.append(
+    // Consume and Produce are separate modes: each is a full workflow and
+    // showing both at once left neither enough room.
+    const consumePane = el("div", { class: "console-controls" }, [
       el("div", { class: "toolbar" }, [
         el("button", { class: "btn", text: "List topics", onclick: listTopics }),
         topicSel,
@@ -3336,19 +3369,42 @@
         startWrap,
         endWrap,
         el("label", { class: "inline" }, ["Max", max, "msgs"]),
-        el("button", { class: "btn primary", text: "Consume", onclick: consume }),
+        el("button", { class: "btn primary", text: "▶ Consume", onclick: consume }),
       ]),
       el("div", { class: "toolbar" }, [
         el("span", { class: "pane-label", text: "Search" }),
         keyQ, valQ,
       ]),
-      produceBox,
       status,
-      out
-    );
+    ]);
+    const producePane = el("div", { class: "console-controls" }, [
+      el("div", { class: "toolbar" }, [
+        el("button", { class: "btn", text: "List topics", onclick: listTopics }),
+        topicSel2,
+        el("label", { class: "inline" }, ["or", topic2]),
+      ]),
+      produceBox,
+      status2,
+    ]);
+
+    const modeBar = el("div", { class: "subtabs" });
+    const applyMode = () => {
+      const producing = c.mode === "produce";
+      modeBar.replaceChildren(
+        el("button", { class: producing ? "" : "active", text: "Consume", onclick: () => { c.mode = "consume"; ctx.save(); applyMode(); } }),
+        el("button", { class: producing ? "active" : "", text: "Produce", onclick: () => { c.mode = "produce"; ctx.save(); applyMode(); } }),
+      );
+      consumePane.style.display = producing ? "none" : "";
+      producePane.style.display = producing ? "" : "none";
+      out.style.display = producing ? "none" : "";
+      if (producing) syncTopicInputs();
+    };
+
+    body.append(modeBar, consumePane, producePane, out);
     syncFrom();
     fillTopics();
     renderProduce();
+    applyMode();
     draw();
   }
 
