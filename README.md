@@ -75,6 +75,7 @@ built on macOS/Windows.
 | Tool | What it does |
 |---|---|
 | **JSON Tools** | Pretty-format, minify, validate (with line/col errors), sort keys, escape ⇄ unescape JSON strings |
+| **JSONPath** | Evaluate JSONPath expressions against a JSON document, live as you type. Supports `$`, `.key`, `['key']`, recursive descent `..key` / `..*`, wildcards, indexes incl. negative (`[-1]`), unions (`[0,2]`), slices with a step (`[1:3]`, `[::2]`), `.length`, and **filters** — `[?(@.isbn)]`, `[?(@.price < 10)]`, `==` `!=` `<` `<=` `>` `>=`, regex `=~ /re/i`, and `&&` / `||` with parentheses. Output as **matched values**, their **normalised paths**, or both; ships with a sample document and one-click examples. Pure-browser, no `eval()` and no dependencies |
 | **XML ⇄ JSON** | Convert XML to JSON and back — attributes (`@attr`), text nodes (`#text`), nested elements and repeated tags (arrays) preserved; round-trips cleanly. Pure-browser, no dependencies |
 | **Base64** | Encode/decode, unicode-safe, URL-safe variant, live conversion |
 | **URL Tools** | Encode/decode components or full URIs, plus a URL/query-param breakdown table |

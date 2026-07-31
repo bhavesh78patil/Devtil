@@ -186,6 +186,428 @@
   });
 
   // ======================================================================
+  // JSONPath
+  // ======================================================================
+  // A dependency-free evaluator for the common JSONPath subset:
+  //   $  .key  ['key']  ..key  ..*  *  [*]  [n]  [-n]  [a,b]  [start:end:step]
+  //   [?(@.k > 1 && (@.j == 'x' || @.z))]  filters with == != < <= > >= =~
+  //   .length on arrays/strings
+  // Evaluation returns both the matched values and their normalised paths.
+
+  function jpParse(expr) {
+    const s = String(expr).trim();
+    if (!s) throw new Error("expression is empty");
+    let i = 0;
+    const steps = [];
+    const isNameChar = (ch) => /[A-Za-z0-9_$\-À-￿]/.test(ch);
+    const readName = () => {
+      const start = i;
+      while (i < s.length && isNameChar(s[i])) i++;
+      if (i === start) throw new Error(`expected a property name at position ${start}`);
+      return s.slice(start, i);
+    };
+    const readQuoted = () => {
+      const q = s[i++];
+      let out = "";
+      while (i < s.length && s[i] !== q) {
+        if (s[i] === "\\") i++;
+        out += s[i++];
+      }
+      if (s[i] !== q) throw new Error("unterminated quoted name");
+      i++;
+      return out;
+    };
+
+    if (s[i] === "$") i++;
+    else if (s[i] === "@") i++;
+
+    while (i < s.length) {
+      if (s[i] === ".") {
+        if (s[i + 1] === ".") { // recursive descent
+          i += 2;
+          steps.push({ t: "descend" });
+          if (s[i] === "[") continue;         // ..[...] — the bracket handles it
+          if (s[i] === "*") { steps.push({ t: "wild" }); i++; continue; }
+          steps.push({ t: "child", names: [readName()] });
+          continue;
+        }
+        i++;
+        if (s[i] === "*") { steps.push({ t: "wild" }); i++; continue; }
+        steps.push({ t: "child", names: [readName()] });
+        continue;
+      }
+      if (s[i] === "[") {
+        i++;
+        while (s[i] === " ") i++;
+        if (s[i] === "*") {
+          i++;
+          steps.push({ t: "wild" });
+        } else if (s[i] === "?") {
+          i++;
+          if (s[i] !== "(") throw new Error("expected '(' after '?'");
+          const start = ++i;
+          let depth = 1;
+          while (i < s.length && depth > 0) {
+            if (s[i] === "(") depth++;
+            else if (s[i] === ")") depth--;
+            if (depth > 0) i++;
+          }
+          if (depth !== 0) throw new Error("unterminated filter expression");
+          steps.push({ t: "filter", pred: jpCompileFilter(s.slice(start, i)) });
+          i++; // past ')'
+        } else if (s[i] === "'" || s[i] === '"') {
+          const names = [readQuoted()];
+          while (s[i] === "," || s[i] === " ") {
+            i++;
+            while (s[i] === " ") i++;
+            if (s[i] === "'" || s[i] === '"') names.push(readQuoted());
+          }
+          steps.push({ t: "child", names });
+        } else {
+          // indices, unions and slices
+          const start = i;
+          while (i < s.length && s[i] !== "]") i++;
+          const body = s.slice(start, i).trim();
+          if (body.includes(":")) {
+            const [a, b, c] = body.split(":");
+            steps.push({
+              t: "slice",
+              start: a.trim() === "" ? null : Number(a),
+              end: b === undefined || b.trim() === "" ? null : Number(b),
+              step: c === undefined || c.trim() === "" ? 1 : Number(c),
+            });
+          } else if (body === "") {
+            throw new Error("empty []");
+          } else {
+            const idx = body.split(",").map((x) => {
+              const n = Number(x.trim());
+              if (!Number.isInteger(n)) throw new Error(`"${x.trim()}" is not an array index`);
+              return n;
+            });
+            steps.push({ t: "index", idx });
+          }
+        }
+        while (s[i] === " ") i++;
+        if (s[i] !== "]") throw new Error("expected ']'");
+        i++;
+        continue;
+      }
+      if (i === 0 || steps.length === 0) { // tolerate "store.book" without a leading $
+        steps.push({ t: "child", names: [readName()] });
+        continue;
+      }
+      throw new Error(`unexpected "${s[i]}" at position ${i}`);
+    }
+    return steps;
+  }
+
+  // ---- filter expressions -------------------------------------------------
+  // Recursive descent over: or := and ('||' and)*, and := cmp ('&&' cmp)*,
+  // cmp := '(' or ')' | operand [op operand]. No eval() anywhere.
+  function jpCompileFilter(src) {
+    let i = 0;
+    const s = src;
+    const ws = () => { while (i < s.length && /\s/.test(s[i])) i++; };
+
+    const parseOperand = () => {
+      ws();
+      if (s[i] === "@" || s[i] === "$") {
+        const start = i;
+        i++;
+        while (i < s.length && /[.\[\]'"A-Za-z0-9_$\-]/.test(s[i])) {
+          if (s[i] === "]" ) { i++; break; }
+          i++;
+        }
+        const path = s.slice(start, i);
+        const steps = jpParse(path);
+        return (node) => {
+          const hits = jpEval(node, steps);
+          return hits.length ? hits[0].value : undefined;
+        };
+      }
+      if (s[i] === "'" || s[i] === '"') {
+        const q = s[i++];
+        let out = "";
+        while (i < s.length && s[i] !== q) { if (s[i] === "\\") i++; out += s[i++]; }
+        i++;
+        return () => out;
+      }
+      if (s[i] === "/") { // regex literal for =~
+        const start = ++i;
+        while (i < s.length && s[i] !== "/") { if (s[i] === "\\") i++; i++; }
+        const body = s.slice(start, i);
+        i++;
+        let flags = "";
+        while (i < s.length && /[a-z]/.test(s[i])) flags += s[i++];
+        const re = new RegExp(body, flags);
+        return () => re;
+      }
+      const start = i;
+      while (i < s.length && /[^\s&|)=!<>~]/.test(s[i])) i++;
+      const lit = s.slice(start, i).trim();
+      if (lit === "true") return () => true;
+      if (lit === "false") return () => false;
+      if (lit === "null") return () => null;
+      const n = Number(lit);
+      if (lit !== "" && !isNaN(n)) return () => n;
+      return () => lit;
+    };
+
+    const parseCmp = () => {
+      ws();
+      if (s[i] === "(") {
+        i++;
+        const inner = parseOr();
+        ws();
+        if (s[i] !== ")") throw new Error("expected ')' in filter");
+        i++;
+        return inner;
+      }
+      const left = parseOperand();
+      ws();
+      const ops = ["==", "!=", "<=", ">=", "=~", "<", ">"];
+      const op = ops.find((o) => s.startsWith(o, i));
+      if (!op) return (node) => { // bare @.field — an existence test
+        const v = left(node);
+        return v !== undefined && v !== false && v !== null;
+      };
+      i += op.length;
+      const right = parseOperand();
+      return (node) => {
+        const a = left(node), b = right(node);
+        switch (op) {
+          case "==": return a == b; // eslint-disable-line eqeqeq — JSONPath is loose
+          case "!=": return a != b; // eslint-disable-line eqeqeq
+          case "<": return a < b;
+          case "<=": return a <= b;
+          case ">": return a > b;
+          case ">=": return a >= b;
+          case "=~": return b instanceof RegExp && typeof a === "string" && b.test(a);
+        }
+        return false;
+      };
+    };
+
+    const parseAnd = () => {
+      let left = parseCmp();
+      for (;;) {
+        ws();
+        if (!s.startsWith("&&", i)) return left;
+        i += 2;
+        const right = parseCmp();
+        const l = left;
+        left = (node) => l(node) && right(node);
+      }
+    };
+    const parseOr = () => {
+      let left = parseAnd();
+      for (;;) {
+        ws();
+        if (!s.startsWith("||", i)) return left;
+        i += 2;
+        const right = parseAnd();
+        const l = left;
+        left = (node) => l(node) || right(node);
+      }
+    };
+
+    const pred = parseOr();
+    ws();
+    if (i < s.length) throw new Error(`unexpected "${s[i]}" in filter`);
+    return pred;
+  }
+
+  const jpSeg = (key) => (typeof key === "number" ? `[${key}]` : `['${key}']`);
+
+  /** Run parsed steps over a document; returns [{value, path}]. */
+  function jpEval(doc, steps) {
+    let cur = [{ value: doc, path: "$" }];
+    for (const step of steps) {
+      const next = [];
+      for (const node of cur) {
+        const v = node.value;
+        switch (step.t) {
+          case "child":
+            for (const name of step.names) {
+              if (v && typeof v === "object" && name in v) {
+                next.push({ value: v[name], path: node.path + jpSeg(name) });
+              } else if (name === "length" && (Array.isArray(v) || typeof v === "string")) {
+                next.push({ value: v.length, path: node.path + jpSeg("length") });
+              }
+            }
+            break;
+          case "wild":
+            if (Array.isArray(v)) v.forEach((x, k) => next.push({ value: x, path: node.path + jpSeg(k) }));
+            else if (v && typeof v === "object") for (const k of Object.keys(v)) next.push({ value: v[k], path: node.path + jpSeg(k) });
+            break;
+          case "index":
+            if (Array.isArray(v)) {
+              for (const raw of step.idx) {
+                const k = raw < 0 ? v.length + raw : raw;
+                if (k >= 0 && k < v.length) next.push({ value: v[k], path: node.path + jpSeg(k) });
+              }
+            }
+            break;
+          case "slice":
+            if (Array.isArray(v)) {
+              const len = v.length;
+              const stp = step.step || 1;
+              let a = step.start == null ? (stp > 0 ? 0 : len - 1) : (step.start < 0 ? len + step.start : step.start);
+              let b = step.end == null ? (stp > 0 ? len : -1) : (step.end < 0 ? len + step.end : step.end);
+              if (stp > 0) for (let k = Math.max(0, a); k < Math.min(len, b); k += stp) next.push({ value: v[k], path: node.path + jpSeg(k) });
+              else for (let k = Math.min(len - 1, a); k > Math.max(-1, b); k += stp) next.push({ value: v[k], path: node.path + jpSeg(k) });
+            }
+            break;
+          case "filter": {
+            const test = (val, path) => { try { if (step.pred(val)) next.push({ value: val, path }); } catch { /* skip */ } };
+            if (Array.isArray(v)) v.forEach((x, k) => test(x, node.path + jpSeg(k)));
+            else if (v && typeof v === "object") for (const k of Object.keys(v)) test(v[k], node.path + jpSeg(k));
+            break;
+          }
+          case "descend": {
+            // self and every descendant, document order
+            const walk = (val, path) => {
+              next.push({ value: val, path });
+              if (Array.isArray(val)) val.forEach((x, k) => walk(x, path + jpSeg(k)));
+              else if (val && typeof val === "object") for (const k of Object.keys(val)) walk(val[k], path + jpSeg(k));
+            };
+            walk(v, node.path);
+            break;
+          }
+        }
+      }
+      cur = next;
+    }
+    return cur;
+  }
+
+  /** Evaluate a JSONPath against a parsed document. */
+  function jsonPath(doc, expr) {
+    return jpEval(doc, jpParse(expr));
+  }
+  Devtil.jsonPath = jsonPath; // exported for reuse and tests
+
+  const JSONPATH_SAMPLE = JSON.stringify({
+    store: {
+      book: [
+        { category: "reference", author: "Nigel Rees", title: "Sayings of the Century", price: 8.95 },
+        { category: "fiction", author: "Evelyn Waugh", title: "Sword of Honour", price: 12.99 },
+        { category: "fiction", author: "Herman Melville", title: "Moby Dick", isbn: "0-553-21311-3", price: 8.99 },
+        { category: "fiction", author: "J. R. R. Tolkien", title: "The Lord of the Rings", isbn: "0-395-19395-8", price: 22.99 },
+      ],
+      bicycle: { color: "red", price: 19.95 },
+    },
+    expensive: 10,
+  }, null, 2);
+
+  const JSONPATH_EXAMPLES = [
+    ["$.store.book[*].author", "authors of all books"],
+    ["$..author", "all authors, at any depth"],
+    ["$.store.*", "everything in the store"],
+    ["$.store..price", "every price"],
+    ["$..book[2]", "the third book"],
+    ["$..book[-1]", "the last book"],
+    ["$..book[0,1]", "the first two books"],
+    ["$..book[:2]", "the first two books (slice)"],
+    ["$..book[?(@.isbn)]", "books that have an ISBN"],
+    ["$..book[?(@.price < 10)]", "books cheaper than 10"],
+    ["$..book[?(@.category == 'fiction' && @.price > 10)]", "combined filter"],
+    ["$..book[?(@.author =~ /tolkien/i)]", "regex on the author"],
+    ["$..book.length", "how many books"],
+  ];
+
+  registerTool({
+    type: "jsonpath",
+    icon: "$·",
+    name: "JSONPath",
+    desc: "Evaluate JSONPath expressions against a JSON document — filters, slices, wildcards and recursive descent, with matched values or their paths.",
+    // a new tab opens on the sample document with a filter already applied,
+    // so the tool demonstrates itself
+    defaults: () => ({ input: JSONPATH_SAMPLE, path: "$..book[?(@.price < 10)]", mode: "values", output: "" }),
+    render(root, tab, ctx) {
+      const d = tab.data;
+      if (!d.input) d.input = JSONPATH_SAMPLE;
+      if (!d.path) d.path = "$";
+
+      const status = el("div", { class: "status-line dim" });
+      const output = el("textarea", { class: "grow", spellcheck: "false", readonly: "" });
+      const input = boundArea(d, "input", ctx, {}, () => run());
+
+      const pathIn = el("input", { type: "text", class: "jp-path", placeholder: "$.store.book[?(@.price < 10)].title", value: d.path });
+      const modeSel = el("select", {}, [
+        el("option", { value: "values", text: "Matched values" }),
+        el("option", { value: "paths", text: "Matched paths" }),
+        el("option", { value: "both", text: "Paths + values" }),
+      ]);
+      modeSel.value = d.mode || "values";
+
+      const run = () => {
+        const src = d.input || "";
+        if (!src.trim()) { output.value = ""; d.output = ""; return setStatus(status, "Paste some JSON to start", "dim"); }
+        let doc;
+        try {
+          doc = JSON.parse(src);
+        } catch (e) {
+          output.value = "";
+          d.output = "";
+          return setStatus(status, "✗ Invalid JSON: " + e.message, "err");
+        }
+        let hits;
+        try {
+          hits = jsonPath(doc, d.path || "$");
+        } catch (e) {
+          output.value = "";
+          d.output = "";
+          return setStatus(status, "✗ Invalid JSONPath: " + e.message, "err");
+        }
+        let text;
+        if (d.mode === "paths") text = hits.map((h) => h.path).join("\n");
+        else if (d.mode === "both") text = hits.map((h) => h.path + "  →  " + JSON.stringify(h.value)).join("\n");
+        else text = JSON.stringify(hits.map((h) => h.value), null, 2);
+        output.value = text;
+        d.output = text;
+        ctx.save();
+        setStatus(status, hits.length ? `✓ ${hits.length} match(es)` : "No matches", hits.length ? "ok" : "err");
+      };
+
+      pathIn.addEventListener("input", () => { d.path = pathIn.value; ctx.save(); run(); });
+      pathIn.addEventListener("keydown", (e) => { if (e.key === "Enter") run(); });
+      modeSel.addEventListener("change", () => { d.mode = modeSel.value; ctx.save(); run(); });
+
+      const examples = el("details", { class: "section" }, [
+        el("summary", { text: "Examples — click one to try it" }),
+        el("div", { class: "jp-examples" }, JSONPATH_EXAMPLES.map(([ex, why]) =>
+          el("button", {
+            class: "btn chip", text: ex, title: why,
+            onclick: () => { d.path = ex; pathIn.value = ex; ctx.save(); run(); },
+          })
+        )),
+      ]);
+
+      root.append(
+        el("div", { class: "toolbar" }, [
+          el("span", { class: "pane-label", text: "JSONPath" }),
+          pathIn,
+          el("button", { class: "btn primary", text: "Evaluate", onclick: run }),
+          modeSel,
+          copyBtn(() => output.value, "Copy result"),
+          el("button", {
+            class: "btn", text: "Load sample",
+            onclick: () => { d.input = JSONPATH_SAMPLE; input.value = JSONPATH_SAMPLE; ctx.save(); run(); },
+          }),
+        ]),
+        examples,
+        status,
+        el("div", { class: "split" }, [
+          el("div", {}, [el("span", { class: "pane-label", text: "JSON" }), input]),
+          el("div", {}, [el("span", { class: "pane-label", text: "Result" }), output]),
+        ])
+      );
+      run();
+    },
+  });
+
+  // ======================================================================
   // XML ⇄ JSON
   // ======================================================================
   // Dependency-free conversion using the browser's DOMParser. Convention:
