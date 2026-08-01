@@ -22,4 +22,5 @@ require (
 	github.com/pierrec/lz4/v4 v4.1.15 // indirect
 	golang.org/x/sys v0.47.0 // indirect
 	gopkg.in/inf.v0 v0.9.1 // indirect
+	gopkg.in/yaml.v3 v3.0.1 // indirect
 )

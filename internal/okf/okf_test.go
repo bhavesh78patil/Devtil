@@ -1,0 +1,460 @@
+package okf
+
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+func newBundle(t *testing.T) *Bundle {
+	t.Helper()
+	b, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+func write(t *testing.T, b *Bundle, path, typ, body string) *Doc {
+	t.Helper()
+	d, err := b.Write(WriteOptions{
+		Path:        path,
+		Frontmatter: map[string]any{"type": typ},
+		Body:        body,
+	})
+	if err != nil {
+		t.Fatalf("write %s: %v", path, err)
+	}
+	return d
+}
+
+func TestNormalize(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"tables/orders", "/tables/orders.md"},
+		{"/tables/orders.md", "/tables/orders.md"},
+		{"tables\\orders.md", "/tables/orders.md"},
+		{"  /a/b.md  ", "/a/b.md"},
+		{"./a.md", "/a.md"},
+		// path.Clean drops leading "..", so a traversal attempt is clamped
+		// to the bundle root rather than escaping it
+		{"../../etc/passwd.md", "/etc/passwd.md"},
+		{"a/../../b.md", "/b.md"},
+	}
+	for _, c := range cases {
+		got, err := Normalize(c.in)
+		if err != nil {
+			t.Errorf("Normalize(%q): %v", c.in, err)
+			continue
+		}
+		if got != c.want {
+			t.Errorf("Normalize(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+	if _, err := Normalize("   "); err == nil {
+		t.Error("an empty path should be rejected")
+	}
+}
+
+// A concept path must never resolve to a file outside the bundle, however it
+// is spelled — this is the one hard security property of the store.
+func TestWriteStaysInsideBundle(t *testing.T) {
+	root := t.TempDir()
+	b, err := Open(filepath.Join(root, "bundle"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sentinel := filepath.Join(root, "escaped.md")
+
+	for _, p := range []string{
+		"../escaped.md",
+		"../../escaped.md",
+		"a/../../../escaped.md",
+		"/../escaped.md",
+	} {
+		if _, err := b.Write(WriteOptions{
+			Path:        p,
+			Frontmatter: map[string]any{"type": "Test"},
+			Body:        "x",
+		}); err != nil {
+			continue // refusing outright is fine too
+		}
+		if _, err := os.Stat(sentinel); err == nil {
+			t.Fatalf("writing %q escaped the bundle: %s exists", p, sentinel)
+		}
+	}
+}
+
+func TestWriteRequiresType(t *testing.T) {
+	b := newBundle(t)
+	_, err := b.Write(WriteOptions{Path: "/a.md", Body: "no type"})
+	if err == nil {
+		t.Fatal(`a concept without "type" should be rejected — it is the spec's only required field`)
+	}
+	if !strings.Contains(err.Error(), "type") {
+		t.Errorf("error should name the missing field, got: %v", err)
+	}
+	// reserved filenames carry structure, not a concept, so they are exempt
+	if _, err := b.Write(WriteOptions{Path: "/" + IndexFile, Body: "# Bundle"}); err != nil {
+		t.Errorf("index.md should not require a type: %v", err)
+	}
+}
+
+func TestRootIndexDeclaresVersion(t *testing.T) {
+	b := newBundle(t)
+	doc, err := b.Write(WriteOptions{Path: "/" + IndexFile, Body: "# Bundle"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := doc.Frontmatter["okf_version"]; got != Version {
+		t.Errorf("root index okf_version = %v, want %s", got, Version)
+	}
+	// only the bundle root may declare it
+	nested, err := b.Write(WriteOptions{Path: "/tables/" + IndexFile, Body: "# Tables"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := nested.Frontmatter["okf_version"]; ok {
+		t.Error("a nested index.md must not declare okf_version")
+	}
+}
+
+func TestRoundTripPreservesUnknownFields(t *testing.T) {
+	b := newBundle(t)
+	_, err := b.Write(WriteOptions{
+		Path: "/m.md",
+		Frontmatter: map[string]any{
+			"type":            "Metric",
+			"title":           "Revenue",
+			"owning_team":     "finance", // a producer-specific key
+			"custom_nesting":  map[string]any{"a": []any{"x", "y"}},
+			"usage_count_avg": 12.5,
+		},
+		Body: "Body text.",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc, err := b.Read("/m.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Consumers must preserve unknown keys, so a read-modify-write cycle
+	// cannot be allowed to drop them.
+	if doc.Frontmatter["owning_team"] != "finance" {
+		t.Errorf("unknown key was lost: %#v", doc.Frontmatter)
+	}
+	if doc.Frontmatter["usage_count_avg"] != 12.5 {
+		t.Errorf("numeric key was lost or retyped: %#v", doc.Frontmatter["usage_count_avg"])
+	}
+	nested, ok := doc.Frontmatter["custom_nesting"].(map[string]any)
+	if !ok || len(nested["a"].([]any)) != 2 {
+		t.Errorf("nested key was lost: %#v", doc.Frontmatter["custom_nesting"])
+	}
+	if doc.Body != "Body text.\n" {
+		t.Errorf("body = %q", doc.Body)
+	}
+}
+
+func TestMergeKeepsExistingFrontmatter(t *testing.T) {
+	b := newBundle(t)
+	if _, err := b.Write(WriteOptions{
+		Path:        "/m.md",
+		Frontmatter: map[string]any{"type": "Metric", "title": "Revenue", "curated_by": "human:alice"},
+		Body:        "first",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// An agent updating only the body must not wipe curation it never saw.
+	doc, err := b.Write(WriteOptions{Path: "/m.md", Body: "second", Merge: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if doc.Frontmatter["curated_by"] != "human:alice" || doc.Title() != "Revenue" {
+		t.Errorf("merge dropped fields: %#v", doc.Frontmatter)
+	}
+	if doc.Body != "second\n" {
+		t.Errorf("body = %q", doc.Body)
+	}
+	// Without merge, the caller's frontmatter is the whole story.
+	if _, err := b.Write(WriteOptions{
+		Path:        "/m.md",
+		Frontmatter: map[string]any{"type": "Metric"},
+		Body:        "third",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	doc, _ = b.Read("/m.md")
+	if _, ok := doc.Frontmatter["curated_by"]; ok {
+		t.Error("a non-merge write should replace frontmatter wholesale")
+	}
+}
+
+func TestGeneratedProvenance(t *testing.T) {
+	b := newBundle(t)
+	doc, err := b.Write(WriteOptions{
+		Path:        "/a.md",
+		Frontmatter: map[string]any{"type": "Note"},
+		Body:        "x",
+		GeneratedBy: "devtil/mcp",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	gen, ok := doc.Frontmatter["generated"].(map[string]any)
+	if !ok || gen["by"] != "devtil/mcp" || gen["at"] == "" {
+		t.Errorf("generated provenance not stamped: %#v", doc.Frontmatter["generated"])
+	}
+}
+
+func TestLinkResolution(t *testing.T) {
+	b := newBundle(t)
+	doc := write(t, b, "/tables/orders.md", "Table", strings.Join([]string{
+		"Absolute [customers](/tables/customers.md).",
+		"Relative [items](items.md).",
+		"Up one [runbook](../runbooks/r.md).",
+		"With anchor [x](/tables/customers.md#schema).",
+		"External [docs](https://example.com/page.md).",
+		"Anchor only [top](#top).",
+		"Not markdown [img](/assets/a.png).",
+	}, "\n"))
+
+	want := map[string]string{
+		"customers": "/tables/customers.md",
+		"items":     "/tables/items.md",
+		"runbook":   "/runbooks/r.md",
+		"x":         "/tables/customers.md",
+		"docs":      "",
+		"top":       "",
+		"img":       "",
+	}
+	if len(doc.Links) != len(want) {
+		t.Fatalf("found %d links, want %d: %#v", len(doc.Links), len(want), doc.Links)
+	}
+	for _, l := range doc.Links {
+		if got := want[l.Text]; got != l.Resolved {
+			t.Errorf("link %q resolved to %q, want %q", l.Text, l.Resolved, got)
+		}
+	}
+}
+
+func TestGraphEdgesBrokenAndOrphans(t *testing.T) {
+	b := newBundle(t)
+	write(t, b, "/tables/orders.md", "Table", "See [customers](/tables/customers.md) and [gone](/tables/gone.md).")
+	write(t, b, "/tables/customers.md", "Table", "Nothing here.")
+	write(t, b, "/notes/loner.md", "Note", "No links at all.")
+
+	g, err := b.Graph()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(g.Nodes) != 3 {
+		t.Errorf("nodes = %d, want 3", len(g.Nodes))
+	}
+	if len(g.Edges) != 1 || g.Edges[0].From != "/tables/orders.md" || g.Edges[0].To != "/tables/customers.md" {
+		t.Errorf("edges = %#v", g.Edges)
+	}
+	// A broken link is reported, never silently dropped — the spec tells
+	// consumers to tolerate them, and surfacing beats pretending.
+	if len(g.Broken) != 1 || g.Broken[0].To != "/tables/gone.md" {
+		t.Errorf("broken = %#v", g.Broken)
+	}
+	if len(g.Orphans) != 1 || g.Orphans[0] != "/notes/loner.md" {
+		t.Errorf("orphans = %#v", g.Orphans)
+	}
+	if g.Version != Version {
+		t.Errorf("version = %q, want %q", g.Version, Version)
+	}
+}
+
+func TestNeighborsFollowsLinksBothWays(t *testing.T) {
+	b := newBundle(t)
+	write(t, b, "/a.md", "Note", "to [b](/b.md)")
+	write(t, b, "/b.md", "Note", "to [c](/c.md)")
+	write(t, b, "/c.md", "Note", "leaf")
+	write(t, b, "/far.md", "Note", "unrelated")
+
+	nodes, _, err := b.Neighbors("/b.md", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// b links to c and is linked from a: one hop reaches both.
+	if got := paths(nodes); got != "/a.md,/b.md,/c.md" {
+		t.Errorf("depth 1 = %s, want /a.md,/b.md,/c.md", got)
+	}
+
+	nodes, _, err = b.Neighbors("/a.md", 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := paths(nodes); got != "/a.md,/b.md,/c.md" {
+		t.Errorf("depth 2 from a = %s", got)
+	}
+	if _, _, err := b.Neighbors("/nope.md", 1); err == nil {
+		t.Error("neighbors of a missing concept should error")
+	}
+}
+
+func paths(nodes []Node) string {
+	var out []string
+	for _, n := range nodes {
+		out = append(out, n.Path)
+	}
+	return strings.Join(out, ",")
+}
+
+func TestSearch(t *testing.T) {
+	b := newBundle(t)
+	if _, err := b.Write(WriteOptions{
+		Path: "/tables/orders.md",
+		Frontmatter: map[string]any{
+			"type": "Table", "title": "Orders",
+			"description": "One row per completed order.",
+			"tags":        []any{"sales", "revenue"},
+		},
+		Body: "Joined with customers.",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.Write(WriteOptions{
+		Path:        "/runbooks/latency.md",
+		Frontmatter: map[string]any{"type": "Runbook", "title": "Latency", "tags": []any{"oncall"}},
+		Body:        "Page the on-call.",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	cases := []struct {
+		name string
+		opt  SearchOptions
+		want int
+	}{
+		{"everything", SearchOptions{}, 2},
+		{"body text", SearchOptions{Query: "customers"}, 1},
+		{"description text", SearchOptions{Query: "COMPLETED"}, 1},
+		{"by type", SearchOptions{Type: "runbook"}, 1}, // type match is case-insensitive
+		{"by tag", SearchOptions{Tags: []string{"sales"}}, 1},
+		{"tags must all match", SearchOptions{Tags: []string{"sales", "oncall"}}, 0},
+		{"limit", SearchOptions{Limit: 1}, 1},
+		{"no hits", SearchOptions{Query: "zzz"}, 0},
+	}
+	for _, c := range cases {
+		got, err := b.Search(c.opt)
+		if err != nil {
+			t.Fatalf("%s: %v", c.name, err)
+		}
+		if len(got) != c.want {
+			t.Errorf("%s: got %d, want %d", c.name, len(got), c.want)
+		}
+	}
+}
+
+func TestValidate(t *testing.T) {
+	b := newBundle(t)
+	write(t, b, "/ok.md", "Note", "links to [ok](/ok.md)")
+	problems, err := b.Validate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(problems) != 0 {
+		t.Fatalf("a clean bundle reported problems: %v", problems)
+	}
+
+	// A file written outside the API — no frontmatter at all.
+	if err := os.WriteFile(filepath.Join(b.Root(), "raw.md"), []byte("# Just markdown\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	write(t, b, "/dangling.md", "Note", "see [gone](/gone.md)")
+	problems, err = b.Validate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(problems) != 2 {
+		t.Fatalf("want 2 problems, got %v", problems)
+	}
+}
+
+func TestParseTolerantOfMalformedFrontmatter(t *testing.T) {
+	b := newBundle(t)
+	// A consumer must not reject a document outright; an unparseable header
+	// yields an untyped concept rather than an error.
+	for name, content := range map[string]string{
+		"no-fm.md":    "# Heading\n\nBody.",
+		"unclosed.md": "---\ntype: Note\n\nBody with no closing fence.",
+		"bad-yaml.md": "---\ntype: [unclosed\n---\n\nBody.",
+		"empty-fm.md": "---\n---\n\nBody.",
+		"windows.md":  "---\r\ntype: Note\r\ntitle: CRLF\r\n---\r\n\r\nBody.\r\n",
+	} {
+		if err := os.WriteFile(filepath.Join(b.Root(), name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		doc, err := b.Read("/" + name)
+		if err != nil {
+			t.Errorf("%s: read failed: %v", name, err)
+			continue
+		}
+		if !strings.Contains(doc.Body, "Body") {
+			t.Errorf("%s: body = %q", name, doc.Body)
+		}
+	}
+	doc, err := b.Read("/windows.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if doc.Type() != "Note" || doc.Title() != "CRLF" {
+		t.Errorf("CRLF frontmatter not parsed: %#v", doc.Frontmatter)
+	}
+	// Listing must survive files it cannot fully understand.
+	docs, err := b.List()
+	if err != nil {
+		t.Fatalf("List failed on a messy bundle: %v", err)
+	}
+	if len(docs) != 5 {
+		t.Errorf("List returned %d docs, want 5", len(docs))
+	}
+}
+
+func TestTitleFallsBackToFilename(t *testing.T) {
+	b := newBundle(t)
+	doc := write(t, b, "/tables/order-items.md", "Table", "x")
+	if doc.Title() != "order-items" {
+		t.Errorf("title = %q, want the filename", doc.Title())
+	}
+}
+
+func TestAppendLog(t *testing.T) {
+	b := newBundle(t)
+	if err := b.AppendLog("first entry", "human:alice"); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.AppendLog("second entry", ""); err != nil {
+		t.Fatal(err)
+	}
+	doc, err := b.Read("/" + LogFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !doc.Reserved {
+		t.Error("log.md should be marked reserved")
+	}
+	if !strings.Contains(doc.Body, "first entry") || !strings.Contains(doc.Body, "second entry") {
+		t.Errorf("log lost an entry: %q", doc.Body)
+	}
+	if !strings.Contains(doc.Body, "human:alice") {
+		t.Errorf("log lost the actor: %q", doc.Body)
+	}
+}
+
+func TestDelete(t *testing.T) {
+	b := newBundle(t)
+	write(t, b, "/a.md", "Note", "x")
+	if err := b.Delete("/a.md"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.Read("/a.md"); err == nil {
+		t.Error("read after delete should fail")
+	}
+	if err := b.Delete("/a.md"); err == nil {
+		t.Error("deleting a missing concept should report it")
+	}
+}
