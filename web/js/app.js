@@ -5,6 +5,8 @@
   const { el, uid, debounce, api, getTool, tools, confirmDialog, promptDialog } = Devtil;
 
   let state = null;
+  // sidebar tab filter — a view concern, deliberately not persisted
+  let tabQuery = "";
 
   // ---- autosave ----
 
@@ -97,7 +99,16 @@
     list.replaceChildren();
     for (const ws of state.workspaces) {
       const nameSpan = el("span", { class: "ws-name", text: ws.name, title: "Double-click to rename" });
-      const item = el("li", { class: ws.id === state.activeWorkspaceId ? "active" : "" }, [
+      const isActive = ws.id === state.activeWorkspaceId;
+      // collapse the tree to get the workspace list back to one line each
+      const caret = el("button", {
+        class: "icon-btn ws-caret",
+        text: ws.treeCollapsed ? "▸" : "▾",
+        title: ws.treeCollapsed ? "Show tabs" : "Hide tabs",
+        onclick: (e) => { e.stopPropagation(); ws.treeCollapsed = !ws.treeCollapsed; save(); renderSidebar(); },
+      });
+      const item = el("li", { class: isActive ? "active" : "" }, [
+        isActive && ws.tabs.length ? caret : null,
         nameSpan,
         el("button", {
           class: "icon-btn ws-del", text: "×", title: "Delete workspace",
@@ -144,15 +155,25 @@
       });
       // tab tree: every tab (open and closed) with its sub-tabs, under the
       // active workspace — open on click, rename, or delete permanently
-      if (ws.id === state.activeWorkspaceId && ws.tabs.length) item.append(buildTabTree(ws));
+      if (isActive && ws.tabs.length && !ws.treeCollapsed) item.append(buildTabTree(ws));
       list.append(item);
+    }
+    // a search with no hits anywhere is worth saying out loud
+    if (tabQuery && !list.querySelector(".tt-row")) {
+      list.append(el("li", { class: "tt-empty" }, [el("span", { text: `No tabs match “${tabQuery}”` })]));
     }
   }
 
   function buildTabTree(ws) {
     const tree = el("div", { class: "tab-tree" });
+    const q = tabQuery.toLowerCase();
     for (const tab of ws.tabs) {
       const tool = getTool(tab.type);
+      // when searching, keep a tab if it matches, or if any of its sub-tabs do
+      const subsAll = tool && tool.subTabs ? (tool.subTabs(tab.data || {}, tab) || []) : [];
+      const hitSubs = q ? subsAll.filter((s) => s.label.toLowerCase().includes(q)) : subsAll;
+      const tabHit = !q || tab.title.toLowerCase().includes(q) || tab.type.toLowerCase().includes(q);
+      if (q && !tabHit && !hitSubs.length) continue;
       const title = el("span", {
         class: "tt-title",
         text: (tool ? tool.icon + " " : "") + tab.title,
@@ -193,7 +214,9 @@
       title.addEventListener("dblclick", (e) => { e.stopPropagation(); startRename(); });
       tree.append(row);
 
-      const subs = tool && tool.subTabs ? (tool.subTabs(tab.data || {}, tab) || []) : [];
+      // while searching show only the matching sub-tabs (unless the tab name
+      // itself is the hit, in which case show all of them)
+      const subs = q && !tabHit ? hitSubs : subsAll;
       for (const s of subs) {
         const srow = el("div", { class: "tt-row tt-sub" }, [
           el("span", { class: "tt-title", text: s.label, title: "Click to open" }),
@@ -321,6 +344,22 @@
   overlay.addEventListener("click", (e) => { if (e.target === overlay) overlay.classList.add("hidden"); });
   document.getElementById("picker-close").addEventListener("click", () => overlay.classList.add("hidden"));
   document.getElementById("add-tab").addEventListener("click", openPicker);
+  // sidebar tab search: filters tabs and sub-tabs of the active workspace,
+  // and temporarily forces its tree open so hits are visible
+  const tabSearch = document.getElementById("tab-search");
+  tabSearch.addEventListener("input", () => {
+    tabQuery = tabSearch.value.trim();
+    if (tabQuery) {
+      const ws = activeWorkspace();
+      if (ws) ws.treeCollapsed = false;
+    }
+    renderSidebar();
+  });
+  tabSearch.addEventListener("keydown", (e) => {
+    e.stopPropagation(); // don't trigger the app-level shortcuts while typing
+    if (e.key === "Escape") { tabSearch.value = ""; tabQuery = ""; renderSidebar(); }
+  });
+
   document.getElementById("add-workspace").addEventListener("click", async () => {
     const name = await promptDialog("Workspace name:", "Workspace " + (state.workspaces.length + 1));
     if (name !== null) newWorkspace(name.trim() || undefined);

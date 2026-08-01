@@ -87,6 +87,16 @@ body {
   color: var(--text-dim);
 }
 
+.sidebar-search { padding: 0 12px 6px; }
+.sidebar-search input {
+  width: 100%;
+  font-family: var(--sans);
+  font-size: 12.5px;
+  padding: 5px 8px;
+}
+.ws-caret { padding: 0 2px; font-size: 11px; }
+.tt-empty { color: var(--text-dim); font-size: 12.5px; padding: 6px 10px; font-style: italic; }
+
 #workspace-list { list-style: none; overflow-y: auto; flex: 1; padding: 4px 8px; }
 
 #workspace-list li {
