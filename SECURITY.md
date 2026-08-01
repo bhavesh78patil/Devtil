@@ -37,6 +37,37 @@ or delete the connection/session, which removes it from state. A future
 option to keep credentials out of the state file (prompt-per-use, or OS
 keychain integration) is tracked as an enhancement.
 
+## Giving an AI agent access (`devtil mcp`)
+
+`devtil mcp` hands the toolbox to whatever agent launches it. Be deliberate
+about that — it is a real grant of capability, not a read-only integration.
+
+What the agent **can** do: everything the tools do. Run SQL, produce to a
+Kafka topic, `kubectl exec` into a pod, run a command over SSH, send an HTTP
+request from your machine to any host you can reach.
+
+What the agent **cannot** do: read your credentials. When it references a
+saved connection by name, devtil looks the credentials up from your local
+state file, uses them, and returns only the result. Passwords, tokens and
+SASL secrets are never included in a tool's response, and `devtil_connections`
+lists names and hosts only. An agent that passes connection fields *inline*
+is, of course, using whatever it was given.
+
+Devtil marks tools that only observe with MCP's `readOnlyHint` so a host can
+auto-approve them. `kafka_produce`, `db_query`, `cassandra_query`,
+`kube_exec`, `ssh_exec`, `http_request` and the `okf_*` writers are **not**
+marked read-only — keep the approval prompt on for those, and point the agent
+at non-production connections while you are getting a feel for it.
+
+The MCP server speaks over stdio to the process that launched it. It opens no
+port and accepts no network connections.
+
+**Knowledge bundles.** `okf_*` tools read and write markdown under the bundle
+directory only; concept paths are normalised and clamped to the bundle root,
+so a path containing `../` cannot write elsewhere on disk. Treat the bundle as
+agent-authored content: review it before committing it, the same as any other
+generated file.
+
 ## Logs
 
 Devtil writes a diagnostic log (`<data dir>/devtil.log`, viewable in the **App

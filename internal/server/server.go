@@ -32,10 +32,13 @@ const maxStateBytes = 50 << 20 // 50 MiB of workspace state is plenty
 type Server struct {
 	store *store.Store
 	web   fs.FS
+	// okfDir is the Open Knowledge Format bundle the Knowledge Graph tool
+	// reads and writes — the same bundle `devtil mcp` gives agents.
+	okfDir string
 }
 
-func New(st *store.Store, web fs.FS) *Server {
-	return &Server{store: st, web: web}
+func New(st *store.Store, web fs.FS, okfDir string) *Server {
+	return &Server{store: st, web: web, okfDir: okfDir}
 }
 
 func (s *Server) Handler() http.Handler {
@@ -64,6 +67,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/kube/pods", s.kubePods)
 	mux.HandleFunc("POST /api/kube/logs", s.kubeLogs)
 	mux.HandleFunc("POST /api/kube/exec", s.kubeExec)
+
+	mux.HandleFunc("GET /api/okf/list", s.okfList)
+	mux.HandleFunc("GET /api/okf/doc", s.okfRead)
+	mux.HandleFunc("PUT /api/okf/doc", s.okfWrite)
+	mux.HandleFunc("DELETE /api/okf/doc", s.okfDelete)
+	mux.HandleFunc("GET /api/okf/graph", s.okfGraph)
 
 	mux.HandleFunc("GET /api/logs", s.getLogs)
 	mux.HandleFunc("POST /api/logs/client", s.clientLog)

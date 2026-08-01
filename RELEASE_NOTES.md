@@ -48,10 +48,29 @@ single dependency-free binary (with an optional native desktop app).
   **broadcast typing** to all, **saved hosts**, copy/paste
 - **SFTP / Files**: WinSCP-style browser — list directories and download files
 
+**Use it from an AI agent (MCP)**
+- `devtil mcp` speaks the **Model Context Protocol** on stdio, exposing all
+  **34 tools** to any agent host: the offline utilities, the HTTP client,
+  Kafka, Oracle/MySQL/PostgreSQL, Cassandra, Elasticsearch, Kubernetes and SSH
+- Agents reference a **saved connection by name** — devtil reads the
+  credentials from your local state file and never returns them to the model
+- Tools that only observe are annotated read-only, so a host can auto-approve
+  them while still asking before anything writes
+
+**Knowledge Graph (OKF)**
+- A new tool for **Open Knowledge Format** bundles (v0.2): knowledge as plain
+  markdown files with YAML frontmatter, where the file path is a concept's
+  identity and markdown links form the graph
+- Force-directed graph view with type-coloured nodes, plus a concept editor
+  showing what each one links to and is linked from
+- Agents read and write the **same bundle** over MCP, so what one records
+  while it works is there for you to read, correct and commit
+
 **Workspaces & UX**
 - Workspaces + tabs, all **autosaved**; rename tabs/workspaces; collapsible
-  sidebar; **light & dark** themes (warm cream + orange / coffee-ink dark); an
-  **App Logs** tool for debugging
+  sidebar; **search your tabs** from the sidebar and collapse a workspace's
+  tab tree; **light & dark** themes (warm cream + orange / coffee-ink dark);
+  an **App Logs** tool for debugging
 
 ## Install
 

@@ -78,7 +78,7 @@ func main() {
 	if !*noBrowser {
 		openBrowser(url)
 	}
-	log.Fatal(http.Serve(ln, server.New(st, web).Handler()))
+	log.Fatal(http.Serve(ln, server.New(st, web, filepath.Join(dir, "knowledge")).Handler()))
 }
 
 func usage() {

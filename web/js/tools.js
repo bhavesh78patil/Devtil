@@ -3,7 +3,7 @@
 "use strict";
 
 (() => {
-  const { registerTool, el, escapeHtml, debounce, uid, fmtBytes, copyBtn, setStatus, api, confirmDialog, onSessionSweep } = Devtil;
+  const { registerTool, el, escapeHtml, debounce, uid, fmtBytes, copyBtn, setStatus, api, confirmDialog, promptDialog, onSessionSweep } = Devtil;
 
   // How long a tool keeps a tab's live sessions (SSH PTYs, Kube tail loops)
   // alive after that tab is closed, before tearing them down.
@@ -4562,6 +4562,436 @@
         out
       );
       diff();
+    },
+  });
+
+  // ======================================================================
+  // Knowledge Graph — an Open Knowledge Format bundle
+  // ======================================================================
+  // OKF (https://github.com/GoogleCloudPlatform/knowledge-catalog) stores
+  // knowledge as plain markdown with YAML frontmatter: one file per concept,
+  // the file path as its identity, and ordinary markdown links between files
+  // as the graph. This tool is a reader/editor for the same bundle that
+  // `devtil mcp` hands to AI agents, so what an agent records while it works
+  // shows up here, and what you write here is there for the agent to find.
+
+  const SVG_NS = "http://www.w3.org/2000/svg";
+
+  function svg(tag, attrs = {}, children = []) {
+    const node = document.createElementNS(SVG_NS, tag);
+    for (const [k, v] of Object.entries(attrs)) {
+      if (v === null || v === undefined) continue;
+      if (k === "text") node.textContent = v;
+      else if (k.startsWith("on") && typeof v === "function") node.addEventListener(k.slice(2), v);
+      else node.setAttribute(k, v);
+    }
+    for (const c of [].concat(children)) if (c) node.append(c);
+    return node;
+  }
+
+  /** Force-directed layout, settled up front so the SVG renders static. */
+  function layoutGraph(nodes, edges, width, height) {
+    const n = nodes.length;
+    if (!n) return [];
+    const pts = nodes.map((node, i) => {
+      // start on a circle: a deterministic seed keeps the picture stable
+      // between renders instead of reshuffling on every refresh
+      const a = (2 * Math.PI * i) / n;
+      return { node, x: width / 2 + Math.cos(a) * width * 0.3, y: height / 2 + Math.sin(a) * height * 0.3, vx: 0, vy: 0 };
+    });
+    const index = new Map(pts.map((p, i) => [p.node.path, i]));
+    const links = edges
+      .map((e) => [index.get(e.from), index.get(e.to)])
+      .filter(([a, b]) => a !== undefined && b !== undefined);
+
+    const ideal = Math.min(width, height) / Math.max(2, Math.sqrt(n));
+    for (let step = 0; step < 320; step++) {
+      const cool = 1 - step / 320;
+      for (let i = 0; i < n; i++) {
+        for (let j = i + 1; j < n; j++) {
+          let dx = pts[i].x - pts[j].x, dy = pts[i].y - pts[j].y;
+          let d2 = dx * dx + dy * dy;
+          if (d2 < 1) { dx = (i - j) || 1; dy = 1; d2 = 2; }
+          const f = (ideal * ideal) / d2;
+          const d = Math.sqrt(d2);
+          pts[i].vx += (dx / d) * f; pts[i].vy += (dy / d) * f;
+          pts[j].vx -= (dx / d) * f; pts[j].vy -= (dy / d) * f;
+        }
+      }
+      for (const [a, b] of links) {
+        const dx = pts[b].x - pts[a].x, dy = pts[b].y - pts[a].y;
+        const d = Math.max(1, Math.hypot(dx, dy));
+        const f = (d * d) / ideal / 12;
+        pts[a].vx += (dx / d) * f; pts[a].vy += (dy / d) * f;
+        pts[b].vx -= (dx / d) * f; pts[b].vy -= (dy / d) * f;
+      }
+      for (const p of pts) {
+        p.vx += (width / 2 - p.x) * 0.008;
+        p.vy += (height / 2 - p.y) * 0.008;
+        p.x += Math.max(-25, Math.min(25, p.vx * cool));
+        p.y += Math.max(-25, Math.min(25, p.vy * cool));
+        p.vx *= 0.6; p.vy *= 0.6;
+        p.x = Math.max(40, Math.min(width - 40, p.x));
+        p.y = Math.max(28, Math.min(height - 28, p.y));
+      }
+    }
+
+    // The simulation settles at whatever scale the forces balance at, which
+    // often leaves the graph huddled in one corner of a wide panel. Stretch
+    // the settled bounding box to fill the canvas so the space is used.
+    const padX = 60, padY = 34;
+    const xs = pts.map((p) => p.x), ys = pts.map((p) => p.y);
+    const minX = Math.min(...xs), maxX = Math.max(...xs);
+    const minY = Math.min(...ys), maxY = Math.max(...ys);
+    const sx = maxX - minX > 1 ? (width - 2 * padX) / (maxX - minX) : 1;
+    const sy = maxY - minY > 1 ? (height - 2 * padY) / (maxY - minY) : 1;
+    // one scale for both axes, so the layout is not sheared out of shape
+    const scale = Math.min(sx, sy);
+    const offX = (width - (maxX - minX) * scale) / 2 - minX * scale;
+    const offY = (height - (maxY - minY) * scale) / 2 - minY * scale;
+    for (const p of pts) {
+      p.x = p.x * scale + offX;
+      p.y = p.y * scale + offY;
+    }
+    return pts;
+  }
+
+  // A stable colour per concept type, so the same kind of thing looks the
+  // same across renders without anyone maintaining a palette mapping.
+  const KG_COLORS = ["#ff4f00", "#2b7fff", "#12a150", "#a855f7", "#e11d48", "#0891b2", "#ca8a04", "#7c3aed"];
+  function typeColor(type) {
+    if (!type) return "#8b8580";
+    let h = 0;
+    for (let i = 0; i < type.length; i++) h = (h * 31 + type.charCodeAt(i)) >>> 0;
+    return KG_COLORS[h % KG_COLORS.length];
+  }
+
+  const OKF_TEMPLATE = [
+    "# Overview",
+    "",
+    "What this is, and when someone would need it.",
+    "",
+    "# Related",
+    "",
+    "- [another concept](/path/to/concept.md)",
+  ].join("\n");
+
+  registerTool({
+    type: "knowledge",
+    icon: "🕸",
+    name: "Knowledge Graph",
+    desc: "Browse and edit an Open Knowledge Format bundle — markdown concepts linked into a graph. The same bundle AI agents read and write over MCP.",
+    defaults: () => ({ view: "graph", path: "", query: "", typeFilter: "" }),
+    render(root, tab, ctx) {
+      const d = tab.data;
+      const status = el("div", { class: "status-line dim" });
+      const sideBox = el("div", { class: "api-side" });
+      const mainBox = el("div", { class: "api-main" });
+
+      let concepts = [];   // metadata for the list
+      let graph = null;    // { nodes, edges, broken, orphans }
+      let problems = [];
+      let bundleRoot = "";
+
+      const search = el("input", { type: "search", placeholder: "Search concepts…", value: d.query || "", style: "min-width:200px" });
+      const typeSel = el("select", {});
+
+      // ---- data -----------------------------------------------------------
+      async function load(keepStatus) {
+        try {
+          const [list, g] = await Promise.all([
+            api("GET", "/api/okf/list"),
+            api("GET", "/api/okf/graph"),
+          ]);
+          concepts = list.concepts || [];
+          bundleRoot = list.root || "";
+          graph = g.graph || null;
+          problems = g.problems || [];
+          if (!keepStatus) {
+            const bits = [`${concepts.length} concept${concepts.length === 1 ? "" : "s"}`];
+            if (graph) bits.push(`${(graph.edges || []).length} links`);
+            if (problems.length) bits.push(`${problems.length} issue${problems.length === 1 ? "" : "s"}`);
+            bits.push(`OKF v${list.okfVersion}`);
+            setStatus(status, (problems.length ? "⚠ " : "✓ ") + bits.join(" · ") + "  ·  " + bundleRoot, problems.length ? "err" : "ok");
+          }
+        } catch (e) {
+          concepts = []; graph = null;
+          setStatus(status, "✗ " + e.message, "err");
+        }
+        renderTypes();
+        renderSide();
+        renderMain();
+      }
+
+      function renderTypes() {
+        const types = [...new Set(concepts.map((c) => c.type).filter(Boolean))].sort();
+        typeSel.replaceChildren(
+          el("option", { value: "", text: "All types" }),
+          ...types.map((t) => el("option", { value: t, text: t }))
+        );
+        typeSel.value = types.includes(d.typeFilter) ? d.typeFilter : "";
+        if (typeSel.value !== d.typeFilter) { d.typeFilter = typeSel.value; ctx.save(); }
+      }
+
+      function visible() {
+        const q = (d.query || "").toLowerCase();
+        return concepts.filter((c) =>
+          (!d.typeFilter || c.type === d.typeFilter) &&
+          (!q || (c.path + " " + c.title + " " + (c.description || "") + " " + (c.tags || []).join(" ")).toLowerCase().includes(q))
+        );
+      }
+
+      // ---- concept list ---------------------------------------------------
+      function renderSide() {
+        const list = el("div", { class: "kg-list" });
+        const shown = visible();
+        if (!shown.length) {
+          list.append(el("div", { class: "kg-empty", text: concepts.length ? "Nothing matches that filter." : "No concepts yet. Create one, or let an agent write the first." }));
+        }
+        const byType = new Map();
+        for (const c of shown) {
+          const key = c.type || "Untyped";
+          if (!byType.has(key)) byType.set(key, []);
+          byType.get(key).push(c);
+        }
+        for (const [type, items] of [...byType].sort((a, b) => a[0].localeCompare(b[0]))) {
+          list.append(el("div", { class: "kg-group" }, [
+            el("span", { class: "kg-dot", style: `background:${typeColor(type)}` }),
+            el("span", { text: `${type} (${items.length})` }),
+          ]));
+          for (const c of items) {
+            list.append(el("div", {
+              class: "kg-item" + (c.path === d.path ? " active" : ""),
+              title: c.path + (c.description ? "\n" + c.description : ""),
+              onclick: () => open(c.path),
+            }, [
+              el("span", { class: "kg-item-title", text: c.title }),
+              el("span", { class: "kg-item-path", text: c.path }),
+            ]));
+          }
+        }
+        sideBox.replaceChildren(
+          el("div", { class: "toolbar" }, [search, typeSel]),
+          el("div", { class: "api-side-content" }, [list])
+        );
+      }
+
+      // ---- main pane ------------------------------------------------------
+      function renderMain() {
+        mainBox.replaceChildren(
+          el("div", { class: "toolbar" }, [
+            el("span", { class: "pane-label", text: "View" }),
+            viewBtn("graph", "🕸 Graph"),
+            viewBtn("doc", "📄 Concept"),
+            el("span", { class: "spacer" }),
+            el("button", { class: "btn primary", text: "+ New concept", onclick: newConcept }),
+            el("button", { class: "btn", text: "↻ Refresh", onclick: () => load() }),
+          ]),
+          d.view === "doc" ? docPane() : graphPane()
+        );
+      }
+
+      function viewBtn(view, label) {
+        return el("button", {
+          class: "btn" + (d.view === view ? " active" : ""), text: label,
+          onclick: () => { d.view = view; ctx.save(); renderMain(); },
+        });
+      }
+
+      function graphPane() {
+        const box = el("div", { class: "kg-graph" });
+        if (!graph || !graph.nodes || !graph.nodes.length) {
+          box.append(el("div", { class: "kg-empty", text: "The bundle is empty. Concepts appear here once they exist, and the links between them become edges." }));
+          return box;
+        }
+        // Lay out once the box has real dimensions, otherwise every node
+        // lands on top of the others in a zero-width viewport.
+        requestAnimationFrame(() => {
+          const w = Math.max(320, box.clientWidth), h = Math.max(260, box.clientHeight);
+          const real = graph.nodes.filter((n) => !n.reserved);
+          const broken = graph.broken || [];
+          // A link to a concept that doesn't exist yet is worth seeing, so
+          // give each missing target a placeholder node rather than dropping
+          // the edge and quietly showing a smaller graph than the bundle has.
+          const known = new Set(real.map((n) => n.path));
+          const missing = [...new Set(broken.map((e) => e.to))]
+            .filter((p) => !known.has(p))
+            .map((p) => ({ path: p, title: p.split("/").pop(), type: "", missing: true }));
+          const nodes = real.concat(missing);
+          const edges = (graph.edges || []).concat(broken);
+          const pts = layoutGraph(nodes, edges, w, h);
+          const at = new Map(pts.map((p) => [p.node.path, p]));
+
+          const canvas = svg("svg", { class: "kg-svg", viewBox: `0 0 ${w} ${h}`, preserveAspectRatio: "xMidYMid meet" });
+          canvas.append(svg("defs", {}, [
+            svg("marker", { id: "kg-arrow", viewBox: "0 0 10 10", refX: "10", refY: "5", markerWidth: "6", markerHeight: "6", orient: "auto-start-reverse" },
+              [svg("path", { d: "M 0 0 L 10 5 L 0 10 z", class: "kg-arrow-head" })]),
+          ]));
+          const brokenSet = new Set((graph.broken || []).map((e) => e.from + " " + e.to));
+          for (const e of edges) {
+            const a = at.get(e.from), b = at.get(e.to);
+            if (!a || !b) continue;
+            canvas.append(svg("line", {
+              x1: a.x, y1: a.y, x2: b.x, y2: b.y,
+              class: "kg-edge" + (brokenSet.has(e.from + " " + e.to) ? " broken" : ""),
+              "marker-end": "url(#kg-arrow)",
+            }, [svg("title", { text: `${e.from} → ${e.to}${brokenSet.has(e.from + " " + e.to) ? " (broken link)" : ""}` })]));
+          }
+          for (const p of pts) {
+            const isMissing = !!p.node.missing;
+            const g = svg("g", {
+              class: "kg-node" + (isMissing ? " missing" : "") + (p.node.path === d.path ? " active" : ""),
+              onclick: () => {
+                if (isMissing) return setStatus(status, `${p.node.path} is linked to but does not exist yet — create it to close the gap.`, "err");
+                open(p.node.path);
+              },
+            });
+            g.append(svg("circle", {
+              cx: p.x, cy: p.y, r: 9,
+              fill: isMissing ? "transparent" : typeColor(p.node.type),
+            }));
+            g.append(svg("text", { x: p.x, y: p.y - 15, "text-anchor": "middle", text: p.node.title }));
+            g.append(svg("title", {
+              text: isMissing
+                ? `${p.node.path}\nlinked to, but this concept does not exist`
+                : `${p.node.title}\n${p.node.type || "untyped"}\n${p.node.path}`,
+            }));
+            canvas.append(g);
+          }
+          box.replaceChildren(canvas);
+          if (graph.orphans && graph.orphans.length) {
+            box.append(el("div", { class: "kg-legend", text: `${graph.orphans.length} unlinked concept(s) — link them from a related concept so they are discoverable.` }));
+          }
+        });
+        return box;
+      }
+
+      function docPane() {
+        const wrap = el("div", { class: "tool", style: "flex:1;min-height:0" });
+        if (!d.path) {
+          wrap.append(el("div", { class: "kg-empty", text: "Pick a concept on the left, or create one. Every concept is a markdown file with YAML frontmatter; the only required field is its type." }));
+          return wrap;
+        }
+        const docStatus = el("div", { class: "status-line dim", text: "Loading…" });
+        wrap.append(docStatus);
+        const form = el("div", { style: "flex:1;min-height:0;display:flex;flex-direction:column;gap:8px" });
+        wrap.append(form);
+
+        api("GET", "/api/okf/doc?path=" + encodeURIComponent(d.path)).then((doc) => {
+          const fm = doc.frontmatter || {};
+          const fields = {};
+          const textField = (key, label, placeholder) => {
+            const input = el("input", { type: "text", value: fm[key] == null ? "" : String(fm[key]), placeholder: placeholder || "", style: "width:100%" });
+            fields[key] = input;
+            return el("div", { class: "field" }, [el("span", { class: "pane-label", text: label }), input]);
+          };
+          const tagsInput = el("input", { type: "text", value: (Array.isArray(fm.tags) ? fm.tags : []).join(", "), placeholder: "sales, revenue", style: "width:100%" });
+          const body = el("textarea", { class: "grow", spellcheck: "false", style: "min-height:200px" });
+          body.value = doc.body || "";
+
+          const save = async () => {
+            const front = {};
+            for (const [k, input] of Object.entries(fields)) {
+              const v = input.value.trim();
+              // Sending null deletes a key, so clearing a field in the UI
+              // removes it from the file rather than leaving an empty string.
+              front[k] = v === "" ? null : v;
+            }
+            const tags = tagsInput.value.split(",").map((t) => t.trim()).filter(Boolean);
+            front.tags = tags.length ? tags : null;
+            try {
+              await api("PUT", "/api/okf/doc", { path: d.path, frontmatter: front, body: body.value, merge: true });
+              setStatus(docStatus, "✓ Saved " + d.path, "ok");
+              load(true);
+            } catch (e) {
+              setStatus(docStatus, "✗ " + e.message, "err");
+            }
+          };
+
+          const remove = async () => {
+            if (!(await confirmDialog(`Delete ${d.path}? Concepts linking to it will show a broken link.`, { okLabel: "Delete", danger: true }))) return;
+            try {
+              await api("DELETE", "/api/okf/doc?path=" + encodeURIComponent(d.path));
+              d.path = ""; ctx.save();
+              await load();
+            } catch (e) {
+              setStatus(docStatus, "✗ " + e.message, "err");
+            }
+          };
+
+          // Incoming links matter as much as outgoing ones: they are how you
+          // find what depends on this concept.
+          const incoming = (graph && graph.edges || []).filter((e) => e.to === doc.path);
+          const linkChips = (items, get) => items.length
+            ? items.map((it) => el("button", { class: "btn chip", text: get(it), onclick: () => open(get(it)) }))
+            : [el("span", { class: "dim", text: "none" })];
+
+          form.replaceChildren(
+            el("div", { class: "toolbar" }, [
+              el("span", { class: "pane-label", text: doc.path }),
+              el("span", { class: "spacer" }),
+              el("button", { class: "btn primary", text: "Save", onclick: save }),
+              copyBtn(() => body.value, "Copy body"),
+              el("button", { class: "btn danger", text: "Delete", onclick: remove }),
+            ]),
+            el("div", { class: "kg-fields" }, [
+              textField("type", "Type (required)", "Runbook · Database Table · Kafka Topic"),
+              textField("title", "Title", "Orders"),
+              textField("status", "Status", "draft · stable · deprecated"),
+              textField("resource", "Resource URI", "https://console…"),
+            ]),
+            textField("description", "Description", "One sentence: what this is."),
+            el("div", { class: "field" }, [el("span", { class: "pane-label", text: "Tags (comma-separated)" }), tagsInput]),
+            el("div", { class: "field", style: "flex:1;min-height:0;display:flex;flex-direction:column" }, [
+              el("span", { class: "pane-label", text: "Body (markdown — link concepts with [text](/path/to/concept.md))" }),
+              body,
+            ]),
+            el("details", { class: "section" }, [
+              el("summary", { text: `Links — ${(doc.links || []).filter((l) => l.resolved).length} out, ${incoming.length} in` }),
+              el("div", {}, [
+                el("span", { class: "pane-label", text: "Links to" }),
+                el("div", {}, linkChips((doc.links || []).filter((l) => l.resolved), (l) => l.resolved)),
+                el("span", { class: "pane-label", text: "Linked from" }),
+                el("div", {}, linkChips(incoming, (e) => e.from)),
+              ]),
+            ])
+          );
+          setStatus(docStatus, `Last modified ${doc.modTime || "—"} · ${fmtBytes(doc.size || 0)}`, "dim");
+        }).catch((e) => setStatus(docStatus, "✗ " + e.message, "err"));
+
+        return wrap;
+      }
+
+      // ---- actions --------------------------------------------------------
+      function open(path) {
+        d.path = path;
+        d.view = "doc";
+        ctx.save();
+        renderSide();
+        renderMain();
+      }
+
+      async function newConcept() {
+        const path = await promptDialog("Path for the new concept (e.g. /runbooks/checkout.md):", "/notes/new-concept.md");
+        if (!path) return;
+        const type = await promptDialog("Concept type — the one field OKF requires:", "Note");
+        if (!type) return;
+        try {
+          const doc = await api("PUT", "/api/okf/doc", {
+            path, frontmatter: { type }, body: OKF_TEMPLATE, merge: false,
+          });
+          d.path = doc.path; d.view = "doc"; ctx.save();
+          await load();
+        } catch (e) {
+          setStatus(status, "✗ " + e.message, "err");
+        }
+      }
+
+      search.addEventListener("input", debounce(() => { d.query = search.value; ctx.save(); renderSide(); }, 150));
+      typeSel.addEventListener("change", () => { d.typeFilter = typeSel.value; ctx.save(); renderSide(); });
+
+      root.append(status, el("div", { class: "api-layout" }, [sideBox, mainBox]));
+      load();
     },
   });
 })();

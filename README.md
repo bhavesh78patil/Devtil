@@ -94,6 +94,99 @@ built on macOS/Windows.
 | **Timestamps** | Auto-detects epoch seconds/millis/date strings; converts to ISO, local, relative |
 | **Regex Tester** | Live match highlighting, capture groups, match list |
 | **Text Diff** | Line-by-line LCS diff with added/removed counts |
+| **Knowledge Graph** | Browse and edit an **Open Knowledge Format** bundle — markdown concepts with YAML frontmatter, linked into a graph. Concepts are grouped by type in a searchable, filterable list; the **graph view** lays them out force-directed with type-coloured nodes, arrows for links, and dashed red placeholders for links that point at concepts which don't exist yet. Open any concept to edit its type, title, description, tags, status and markdown body, and to see what it **links to and is linked from**. This is the same bundle `devtil mcp` gives AI agents, so what an agent records while it works shows up here |
+
+## MCP — give the toolbox to an AI agent
+
+The same binary speaks the [Model Context Protocol](https://modelcontextprotocol.io)
+on stdio, so any agent host can launch it and use every tool above while you
+work. Point your agent at it with a stdio server entry:
+
+```json
+{
+  "mcpServers": {
+    "devtil": { "command": "devtil", "args": ["mcp"] }
+  }
+}
+```
+
+**34 tools**, in three groups:
+
+- **Offline utilities** — `json_format`, `jsonpath_query`, `xml_to_json`,
+  `json_to_xml`, `base64`, `url_encode`, `jwt_decode`, `hash_text`,
+  `uuid_generate`, `timestamp_convert`, `regex_test`. No network, no
+  credentials, no side effects.
+- **Infrastructure** — `http_request`, `kafka_topics`, `kafka_consume`,
+  `kafka_produce`, `db_query` (Oracle/MySQL/PostgreSQL), `cassandra_query`,
+  `elastic_request`, `kube_contexts`, `kube_namespaces`, `kube_pods`,
+  `kube_logs`, `kube_exec`, `ssh_exec`, `sftp_list`.
+- **Knowledge** — `okf_search`, `okf_read`, `okf_write`, `okf_delete`,
+  `okf_graph`, `okf_neighbors`, `okf_log`, `okf_validate`.
+
+**Connections without handing over credentials.** Infrastructure tools accept
+either inline connection fields or a `connection` name that resolves against
+the connections you already saved in the Devtil UI. The agent names the
+cluster; devtil reads the credentials from your local state file and never
+returns them. `devtil_connections` lists what's available.
+
+Tools that only observe are annotated `readOnlyHint`, so a host can
+auto-approve them while still prompting for `kafka_produce`, `db_query`,
+`kube_exec` and `ssh_exec`. A tool that fails reports the message in its
+result rather than as a protocol error, so the model can read it and adjust.
+
+```
+devtil mcp [-data <dir>] [-okf <dir>]
+  -data   data directory, used to resolve saved connections
+          (default: <user config dir>/devtil)
+  -okf    knowledge bundle directory (default: <data dir>/knowledge)
+```
+
+## Knowledge bundles (OKF)
+
+[Open Knowledge Format](https://github.com/GoogleCloudPlatform/knowledge-catalog/tree/main/okf)
+is Google Cloud's vendor-neutral spec for representing knowledge as plain
+markdown files with YAML frontmatter. Devtil implements **OKF v0.2**.
+
+A bundle is just a directory:
+
+```
+knowledge/
+  index.md                  optional root listing (declares okf_version)
+  log.md                    optional chronological history
+  tables/orders.md          one file per concept
+  runbooks/checkout.md
+```
+
+Each concept is markdown with a frontmatter block. The **only required field
+is `type`**; everything else is the producer's choice:
+
+```markdown
+---
+type: Database Table
+title: Orders
+description: One row per completed customer order.
+tags: [sales, revenue]
+generated:
+  by: devtil/mcp
+  at: 2026-08-01T09:14:00Z
+---
+# Schema
+
+| Column | Type | Description |
+|---|---|---|
+| `order_id` | STRING | Globally unique order identifier. |
+| `customer_id` | STRING | FK to [customers](/tables/customers.md). |
+```
+
+The file path is the concept's identity, and **ordinary markdown links are
+the graph** — no database, no query language, no SDK. Because it is just
+markdown, a bundle renders on GitHub, diffs in a PR, and can be committed
+alongside the code it describes.
+
+Why it's here: an agent that figures out what a table means, why a topic is
+partitioned the way it is, or how to recover a stuck consumer group can write
+that down once instead of rediscovering it every session — and you can read,
+correct and commit what it wrote.
 
 ## Navigation
 
@@ -220,7 +313,10 @@ Actions tab, where artifacts are downloadable from the run page.
 │  – spawns the Go backend   │      │  – /api/state  autosave store  │
 └────────────────────────────┘      │  – /api/proxy  HTTP client     │
         or just a browser ─────────▶│  – /api/kube/* kubectl wrapper │
-                                    └────────────────────────────────┘
+                                    │  – /api/okf/*  knowledge bundle│
+┌────────────────────────────┐      │                                │
+│ AI agent (any MCP host)    │─────▶│  – `devtil mcp` on stdio       │
+└────────────────────────────┘      └────────────────────────────────┘
 ```
 
 - **Backend** (`main.go`, `internal/`): net/http only, binds to
@@ -228,6 +324,13 @@ Actions tab, where artifacts are downloadable from the run page.
   never exposed to the network.
 - **Frontend** (`web/`): dependency-free vanilla JS/CSS embedded with
   `go:embed`; each tool is a small module registered in `web/js/tools.js`.
+- **MCP server** (`internal/mcp/`): JSON-RPC 2.0 over stdio, calling the same
+  `internal/` packages the HTTP API does — so an agent and the UI cannot
+  drift apart. `internal/jsonpath/` is a Go port of the browser engine, kept
+  expression-for-expression identical.
+- **Knowledge bundle** (`internal/okf/`): reads and writes OKF v0.2 markdown
+  bundles. Concept paths are clamped to the bundle root, so no `../` in a
+  path an agent supplies can write outside it.
 - **Kube integration** shells out to `kubectl`, so it honours existing
   kubeconfigs, contexts and auth plugins. Two ways to reach a cluster that
   your machine can't talk to directly:
