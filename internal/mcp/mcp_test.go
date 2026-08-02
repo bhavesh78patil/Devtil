@@ -7,23 +7,23 @@ import (
 	"testing"
 )
 
-// session drives a server the way an agent host does: newline-delimited
+// client drives a server the way an agent host does: newline-delimited
 // JSON-RPC in, one response line out.
-type session struct {
+type client struct {
 	t   *testing.T
 	srv *Server
 	out *bytes.Buffer
 	id  int
 }
 
-func newSession(t *testing.T, opt Options) *session {
+func newClient(t *testing.T, opt Options) *client {
 	t.Helper()
 	out := &bytes.Buffer{}
-	return &session{t: t, out: out, srv: NewServer(strings.NewReader(""), out, opt)}
+	return &client{t: t, out: out, srv: NewServer(strings.NewReader(""), out, opt)}
 }
 
 // send runs one request through the dispatcher and returns the decoded reply.
-func (s *session) send(method string, params any) map[string]any {
+func (s *client) send(method string, params any) map[string]any {
 	s.t.Helper()
 	s.id++
 	msg := map[string]any{"jsonrpc": "2.0", "id": s.id, "method": method}
@@ -48,7 +48,7 @@ func (s *session) send(method string, params any) map[string]any {
 }
 
 // call invokes a tool and returns its text content plus whether it errored.
-func (s *session) call(name string, args map[string]any) (string, bool) {
+func (s *client) call(name string, args map[string]any) (string, bool) {
 	s.t.Helper()
 	reply := s.send("tools/call", map[string]any{"name": name, "arguments": args})
 	if e, ok := reply["error"]; ok {
@@ -66,7 +66,7 @@ func (s *session) call(name string, args map[string]any) (string, bool) {
 	return text.String(), isErr
 }
 
-func (s *session) mustCall(name string, args map[string]any) string {
+func (s *client) mustCall(name string, args map[string]any) string {
 	s.t.Helper()
 	text, isErr := s.call(name, args)
 	if isErr {
@@ -76,7 +76,7 @@ func (s *session) mustCall(name string, args map[string]any) string {
 }
 
 func TestInitializeHandshake(t *testing.T) {
-	s := newSession(t, Options{})
+	s := newClient(t, Options{})
 	reply := s.send("initialize", map[string]any{
 		"protocolVersion": ProtocolVersion,
 		"clientInfo":      map[string]any{"name": "test", "version": "1"},
@@ -99,7 +99,7 @@ func TestInitializeHandshake(t *testing.T) {
 
 // A host that speaks an older revision must get that revision back, not ours.
 func TestInitializeNegotiatesVersion(t *testing.T) {
-	s := newSession(t, Options{})
+	s := newClient(t, Options{})
 	res := s.send("initialize", map[string]any{"protocolVersion": "2024-11-05"})["result"].(map[string]any)
 	if res["protocolVersion"] != "2024-11-05" {
 		t.Errorf("got %v, want the client's version echoed back", res["protocolVersion"])
@@ -112,7 +112,7 @@ func TestInitializeNegotiatesVersion(t *testing.T) {
 }
 
 func TestToolsListIsWellFormed(t *testing.T) {
-	s := newSession(t, Options{})
+	s := newClient(t, Options{})
 	res := s.send("tools/list", nil)["result"].(map[string]any)
 	tools := res["tools"].([]any)
 	if len(tools) < 20 {
@@ -170,7 +170,7 @@ func toStrings(v any) []string {
 // Read-only tools are the ones a host may auto-approve, so the annotation has
 // to be right: nothing that writes to real infrastructure may claim it.
 func TestReadOnlyAnnotations(t *testing.T) {
-	s := newSession(t, Options{})
+	s := newClient(t, Options{})
 	res := s.send("tools/list", nil)["result"].(map[string]any)
 	readOnly := map[string]bool{}
 	for _, item := range res["tools"].([]any) {
@@ -191,7 +191,7 @@ func TestReadOnlyAnnotations(t *testing.T) {
 }
 
 func TestUnknownMethodAndTool(t *testing.T) {
-	s := newSession(t, Options{})
+	s := newClient(t, Options{})
 	reply := s.send("no/such/method", nil)
 	e, ok := reply["error"].(map[string]any)
 	if !ok || e["code"].(float64) != codeMethodNotFound {
@@ -206,7 +206,7 @@ func TestUnknownMethodAndTool(t *testing.T) {
 // A failing tool reports the problem in its result so the model can read and
 // react to it; only protocol-level faults become JSON-RPC errors.
 func TestToolFailureIsAResultNotAnError(t *testing.T) {
-	s := newSession(t, Options{})
+	s := newClient(t, Options{})
 	text, isErr := s.call("json_format", map[string]any{"json": "{not json"})
 	if !isErr {
 		t.Fatalf("expected an error result, got %q", text)
@@ -217,7 +217,7 @@ func TestToolFailureIsAResultNotAnError(t *testing.T) {
 }
 
 func TestMissingRequiredArgument(t *testing.T) {
-	s := newSession(t, Options{})
+	s := newClient(t, Options{})
 	text, isErr := s.call("jsonpath_query", map[string]any{"json": "{}"})
 	if !isErr || !strings.Contains(text, "path") {
 		t.Errorf("want an error naming the missing argument, got %q (isErr=%v)", text, isErr)
@@ -279,7 +279,7 @@ func TestServeReadsAStream(t *testing.T) {
 }
 
 func TestTextTools(t *testing.T) {
-	s := newSession(t, Options{})
+	s := newClient(t, Options{})
 
 	if got := s.mustCall("base64", map[string]any{"text": "hello devtil"}); got != "aGVsbG8gZGV2dGls" {
 		t.Errorf("base64 encode = %q", got)
@@ -354,7 +354,7 @@ func TestTextTools(t *testing.T) {
 // Models routinely send numbers and booleans as strings; coercion keeps a
 // call from failing on a formatting detail.
 func TestArgumentCoercion(t *testing.T) {
-	s := newSession(t, Options{})
+	s := newClient(t, Options{})
 	got := s.mustCall("uuid_generate", map[string]any{"count": "3"})
 	if strings.Count(got, "-") != 12 { // 4 hyphens per UUID
 		t.Errorf("string count not coerced: %s", got)
@@ -372,7 +372,7 @@ func TestArgumentCoercion(t *testing.T) {
 // Without a configured bundle the okf tools must explain themselves rather
 // than panicking or silently doing nothing.
 func TestOKFToolsWithoutBundle(t *testing.T) {
-	s := newSession(t, Options{})
+	s := newClient(t, Options{})
 	text, isErr := s.call("okf_search", map[string]any{})
 	if !isErr || !strings.Contains(text, "knowledge bundle") {
 		t.Errorf("want a clear 'no bundle configured' message, got %q", text)
@@ -380,7 +380,7 @@ func TestOKFToolsWithoutBundle(t *testing.T) {
 }
 
 func TestOKFToolsRoundTrip(t *testing.T) {
-	s := newSession(t, Options{OKFDir: t.TempDir()})
+	s := newClient(t, Options{OKFDir: t.TempDir()})
 
 	if _, isErr := s.call("okf_write", map[string]any{"path": "/a.md", "body": "x"}); !isErr {
 		t.Error(`okf_write without "type" should fail`)
@@ -434,7 +434,7 @@ func TestOKFToolsRoundTrip(t *testing.T) {
 // Connection resolution reads the UI's state file; a missing or unusable one
 // must degrade to "pass fields inline" rather than failing the server.
 func TestConnectionsWithoutStore(t *testing.T) {
-	s := newSession(t, Options{})
+	s := newClient(t, Options{})
 	got := s.mustCall("devtil_connections", map[string]any{})
 	if !strings.Contains(got, "No saved connections") {
 		t.Errorf("want a helpful empty listing, got %s", got)

@@ -37,10 +37,12 @@ or delete the connection/session, which removes it from state. A future
 option to keep credentials out of the state file (prompt-per-use, or OS
 keychain integration) is tracked as an enhancement.
 
-## Giving an AI agent access (`devtil mcp`)
+## Giving an AI agent access (MCP)
 
-`devtil mcp` hands the toolbox to whatever agent launches it. Be deliberate
-about that — it is a real grant of capability, not a read-only integration.
+Devtil's MCP server is **enabled by default** and served from the running app
+at `http://127.0.0.1:<port>/mcp` (Streamable HTTP). `devtil mcp` serves the
+same tools over stdio for hosts that need it. Either way this is a real grant
+of capability, not a read-only integration — be deliberate about it.
 
 What the agent **can** do: everything the tools do. Run SQL, produce to a
 Kafka topic, `kubectl exec` into a pod, run a command over SSH, send an HTTP
@@ -59,8 +61,25 @@ auto-approve them. `kafka_produce`, `db_query`, `cassandra_query`,
 marked read-only — keep the approval prompt on for those, and point the agent
 at non-production connections while you are getting a feel for it.
 
-The MCP server speaks over stdio to the process that launched it. It opens no
-port and accepts no network connections.
+**What you control.** Settings → MCP server switches the whole server off,
+hides individual tool groups or single tools, and restricts which saved
+connections agents may name. A hidden tool is refused even if an agent asks
+for it from a cached list, and an unshared connection is invisible rather
+than merely unusable. Changes apply to the agent's next call.
+
+**How the HTTP endpoint is protected.** It rides on the same
+localhost-only listener as the rest of Devtil, so it is not reachable from
+your network. It also validates the `Origin` header and rejects anything that
+did not come from this machine — that is the DNS-rebinding protection the MCP
+spec requires, and it stops a page on the internet from driving your tools
+through your browser.
+
+**What it does not have** is authentication: any process already running as
+you on your machine can call it, exactly as it could already call
+`/api/ssh/exec` or read `state.json`. That is the same trust boundary the rest
+of Devtil has always had. If you don't want that surface at all, switch the
+server off in Settings — the stdio transport (`devtil mcp`) opens no port and
+talks only to the process that launched it.
 
 **Knowledge bundles.** `okf_*` tools read and write markdown under the bundle
 directory only; concept paths are normalised and clamped to the bundle root,

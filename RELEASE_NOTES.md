@@ -49,13 +49,30 @@ single dependency-free binary (with an optional native desktop app).
 - **SFTP / Files**: WinSCP-style browser — list directories and download files
 
 **Use it from an AI agent (MCP)**
-- `devtil mcp` speaks the **Model Context Protocol** on stdio, exposing all
-  **34 tools** to any agent host: the offline utilities, the HTTP client,
-  Kafka, Oracle/MySQL/PostgreSQL, Cassandra, Elasticsearch, Kubernetes and SSH
+- Devtil speaks the **Model Context Protocol**, exposing all **34 tools** to
+  any agent host: the offline utilities, the HTTP client, Kafka,
+  Oracle/MySQL/PostgreSQL, Cassandra, Elasticsearch, Kubernetes and SSH
+- **On by default**, served from the running app over the **Streamable HTTP**
+  transport at `http://127.0.0.1:8347/mcp` — nothing extra to start. Point an
+  agent at it with `{"type": "http", "url": "…/mcp"}`, or run `devtil mcp` for
+  a host that only speaks stdio
 - Agents reference a **saved connection by name** — devtil reads the
   credentials from your local state file and never returns them to the model
 - Tools that only observe are annotated read-only, so a host can auto-approve
   them while still asking before anything writes
+
+**Settings panel**
+- New **⚙ Settings** in the sidebar: turn the MCP server on or off, copy the
+  endpoint and a ready-made agent config, and control exactly what is exposed
+- **Per-group and per-tool switches** — let an agent read Kafka but never
+  produce, hide SSH entirely, and so on. A hidden tool is refused even if an
+  agent asks for it from a cached list
+- **Per-connection sharing** — an unshared connection is invisible to agents,
+  not merely unusable
+- Changes apply to the agent's next call; nothing needs restarting
+- Ships with a copy-paste **agent rules** block (also in `AGENT_RULES.md`)
+  that gets agents searching the knowledge bundle before they investigate and
+  writing down what they learn
 
 **Knowledge Graph (OKF)**
 - A new tool for **Open Knowledge Format** bundles (v0.2): knowledge as plain

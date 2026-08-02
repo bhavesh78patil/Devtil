@@ -98,17 +98,25 @@ built on macOS/Windows.
 
 ## MCP — give the toolbox to an AI agent
 
-The same binary speaks the [Model Context Protocol](https://modelcontextprotocol.io)
-on stdio, so any agent host can launch it and use every tool above while you
-work. Point your agent at it with a stdio server entry:
+Devtil speaks the [Model Context Protocol](https://modelcontextprotocol.io),
+so any agent host can use every tool above while you work.
+
+**It is on by default.** While Devtil is running, the MCP server is served
+from the app itself over the **Streamable HTTP** transport — nothing extra to
+start, no second process:
 
 ```json
 {
   "mcpServers": {
-    "devtil": { "command": "devtil", "args": ["mcp"] }
+    "devtil": { "type": "http", "url": "http://127.0.0.1:8347/mcp" }
   }
 }
 ```
+
+**Settings → MCP server** (the ⚙ button in the sidebar) shows the exact URL
+for your port with a copy button, and is where you turn the server off or
+narrow what it exposes. For a host that only speaks stdio, run `devtil mcp`
+instead.
 
 **34 tools**, in three groups:
 
@@ -134,8 +142,30 @@ auto-approve them while still prompting for `kafka_produce`, `db_query`,
 `kube_exec` and `ssh_exec`. A tool that fails reports the message in its
 result rather than as a protocol error, so the model can read it and adjust.
 
+### Controlling what agents can reach
+
+Settings → MCP server gives you three levels of control, and every change
+takes effect on the agent's next call — nothing to restart:
+
+- **The master switch.** Off means the endpoint refuses every request.
+- **Tool groups.** Untick *SSH & SFTP* and those tools vanish from
+  `tools/list`; expand a group to switch off a single tool (letting an agent
+  read Kafka but never produce is a one-click change). Anything hidden is
+  also **refused if an agent asks for it anyway** from a cached list.
+- **Connections.** Share every saved connection, or pick them individually.
+  A connection you don't share is *invisible* — an agent can't even learn it
+  exists, let alone use it.
+
+### Making agents actually use it
+
+Connecting Devtil gives an agent the **ability** to use the knowledge bundle,
+not the **habit**. See [AGENT_RULES.md](AGENT_RULES.md) for a drop-in block to
+paste into `CLAUDE.md`, `AGENTS.md`, `.cursor/rules` or your host's equivalent
+— it tells the agent to search the bundle before investigating and to write
+down what it learns. The same text is in Settings with a copy button.
+
 ```
-devtil mcp [-data <dir>] [-okf <dir>]
+devtil mcp [-data <dir>] [-okf <dir>]     # stdio transport
   -data   data directory, used to resolve saved connections
           (default: <user config dir>/devtil)
   -okf    knowledge bundle directory (default: <data dir>/knowledge)

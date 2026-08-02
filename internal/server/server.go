@@ -22,6 +22,7 @@ import (
 	"github.com/bhavesh78patil/devtil/internal/clients"
 	"github.com/bhavesh78patil/devtil/internal/kube"
 	"github.com/bhavesh78patil/devtil/internal/logging"
+	"github.com/bhavesh78patil/devtil/internal/mcp"
 	"github.com/bhavesh78patil/devtil/internal/proxy"
 	"github.com/bhavesh78patil/devtil/internal/sshx"
 	"github.com/bhavesh78patil/devtil/internal/store"
@@ -35,10 +36,16 @@ type Server struct {
 	// okfDir is the Open Knowledge Format bundle the Knowledge Graph tool
 	// reads and writes — the same bundle `devtil mcp` gives agents.
 	okfDir string
+	// mcp serves the Streamable HTTP transport at /mcp, so an agent can use
+	// the toolbox while devtil is running without launching a second process.
+	mcp *mcp.Server
 }
 
 func New(st *store.Store, web fs.FS, okfDir string) *Server {
-	return &Server{store: st, web: web, okfDir: okfDir}
+	return &Server{
+		store: st, web: web, okfDir: okfDir,
+		mcp: mcp.NewHTTPServer(mcp.Options{Store: st, OKFDir: okfDir}),
+	}
 }
 
 func (s *Server) Handler() http.Handler {
@@ -67,6 +74,15 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/kube/pods", s.kubePods)
 	mux.HandleFunc("POST /api/kube/logs", s.kubeLogs)
 	mux.HandleFunc("POST /api/kube/exec", s.kubeExec)
+
+	// The MCP endpoint is always mounted; whether it answers is decided per
+	// request from the policy in settings, so toggling it in the UI takes
+	// effect immediately instead of needing a restart.
+	if s.mcp != nil {
+		mux.Handle("/mcp", s.mcp.Handler())
+		mux.Handle("/mcp/", s.mcp.Handler())
+		mux.HandleFunc("GET /api/mcp/info", s.mcpInfo)
+	}
 
 	mux.HandleFunc("GET /api/okf/list", s.okfList)
 	mux.HandleFunc("GET /api/okf/doc", s.okfRead)

@@ -35,7 +35,7 @@ func (s *Server) registerInfra() {
 				"kafka", "elastic", "cassandra", "oracle", "kube", "putty"),
 		}),
 		Run: func(a Args) (any, error) {
-			idx := loadConnections(s.store)
+			idx := loadConnections(s.store).filter(a.policy)
 			filter := strings.TrimSpace(a.Str("tool"))
 			out := map[string]any{}
 			total := 0

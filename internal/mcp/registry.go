@@ -30,11 +30,14 @@ func (s *Server) register(t *Tool) {
 	s.order = append(s.order, t.Name)
 }
 
-func (s *Server) toolDescriptors() []map[string]any {
+func (s *Server) toolDescriptors(p Policy) []map[string]any {
 	names := append([]string(nil), s.order...)
 	sort.Strings(names)
 	out := make([]map[string]any, 0, len(names))
 	for _, n := range names {
+		if !p.AllowsTool(n) {
+			continue
+		}
 		t := s.tools[n]
 		schema := t.Schema
 		if schema == nil {
@@ -55,7 +58,7 @@ func (s *Server) toolDescriptors() []map[string]any {
 	return out
 }
 
-func (s *Server) callTool(params json.RawMessage) (any, *rpcError) {
+func (s *Server) callTool(params json.RawMessage, policy Policy) (any, *rpcError) {
 	var p struct {
 		Name      string         `json:"name"`
 		Arguments map[string]any `json:"arguments"`
@@ -69,11 +72,20 @@ func (s *Server) callTool(params json.RawMessage) (any, *rpcError) {
 	if !ok {
 		return nil, &rpcError{Code: codeInvalidParams, Message: "unknown tool " + p.Name}
 	}
+	// A tool the developer has switched off is not listed, but a client
+	// working from a cached list can still ask for it — refuse in the result
+	// so the model learns why rather than seeing a transport failure.
+	if !policy.AllowsTool(p.Name) {
+		return map[string]any{
+			"content": []any{textContent(p.Name + " is turned off in Devtil's MCP settings. Ask the developer to enable it if you need it.")},
+			"isError": true,
+		}, nil
+	}
 	if p.Arguments == nil {
 		p.Arguments = map[string]any{}
 	}
 
-	result, err := t.Run(Args{m: p.Arguments})
+	result, err := t.Run(Args{m: p.Arguments, policy: policy})
 	if err != nil {
 		// A tool that fails reports it in the result, not as a protocol
 		// error: the model needs to see the message and decide what to do.
@@ -115,8 +127,12 @@ func textContent(s string) map[string]any {
 
 // Args wraps a tool's decoded arguments with typed accessors that coerce the
 // way JSON-RPC clients actually send values — models routinely send "50" for
-// a number and "true" for a boolean.
-type Args struct{ m map[string]any }
+// a number and "true" for a boolean. It also carries the policy in force for
+// this call, so a tool can filter what it exposes.
+type Args struct {
+	m      map[string]any
+	policy Policy
+}
 
 func (a Args) Has(key string) bool {
 	v, ok := a.m[key]

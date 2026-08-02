@@ -116,7 +116,10 @@ type Bundle struct {
 	root string
 }
 
-// Open returns a bundle rooted at dir, creating the directory if needed.
+// Open returns a bundle rooted at dir, creating the directory if needed and
+// seeding a root index.md the first time. An empty directory gives an agent
+// nothing to orient by; the seeded index states the conventions so the first
+// concept written lands in the right shape.
 func Open(dir string) (*Bundle, error) {
 	if strings.TrimSpace(dir) == "" {
 		return nil, errors.New("okf: bundle directory is required")
@@ -128,8 +131,45 @@ func Open(dir string) (*Bundle, error) {
 	if err := os.MkdirAll(abs, 0o755); err != nil {
 		return nil, fmt.Errorf("okf: create bundle dir: %w", err)
 	}
-	return &Bundle{root: abs}, nil
+	b := &Bundle{root: abs}
+	if _, err := os.Stat(filepath.Join(abs, IndexFile)); errors.Is(err, os.ErrNotExist) {
+		if _, err := b.Write(WriteOptions{Path: "/" + IndexFile, Body: seedIndex}); err != nil {
+			// A bundle that cannot be seeded is still perfectly usable.
+			return b, nil
+		}
+	}
+	return b, nil
 }
+
+const seedIndex = `# Knowledge bundle
+
+This is an [Open Knowledge Format](https://github.com/GoogleCloudPlatform/knowledge-catalog/tree/main/okf)
+bundle: one markdown file per concept, with YAML frontmatter. Devtil and any
+AI agent connected to it read and write these files.
+
+## Conventions
+
+- Every concept needs a **` + "`type`" + `** — a short free-form string such as
+  ` + "`Database Table`" + `, ` + "`Kafka Topic`" + `, ` + "`Runbook`" + `, ` + "`Service`" + ` or ` + "`Incident`" + `.
+- The **file path is the concept's identity**. Group related concepts in
+  folders: ` + "`/tables/orders.md`" + `, ` + "`/runbooks/checkout-latency.md`" + `.
+- **Link concepts with ordinary markdown links** to their bundle paths —
+  ` + "`[orders](/tables/orders.md)`" + `. Those links are the graph.
+- Record what is **durable and non-obvious**: what a table means, why a topic
+  is partitioned the way it is, how to recover a stuck consumer group. Not
+  transient state, and not anything already obvious from the code.
+
+## Suggested layout
+
+	/services/<name>.md      what it does, who owns it, how to reach it
+	/tables/<name>.md        schema, meaning, joins, gotchas
+	/topics/<name>.md        payload shape, partitioning, consumers
+	/runbooks/<name>.md      symptom → diagnosis → fix
+	/decisions/<name>.md     why something is the way it is
+
+Delete this file once the bundle has concepts of its own, or replace it with a
+real index of what lives here.
+`
 
 func (b *Bundle) Root() string { return b.root }
 
@@ -412,13 +452,20 @@ func (b *Bundle) Graph() (*Graph, error) {
 		present[d.Path] = true
 	}
 	for _, d := range docs {
+		// index.md and log.md carry the bundle's structure and history, not
+		// concepts, so they are not part of the knowledge graph.
+		if d.Reserved {
+			continue
+		}
 		g.Nodes = append(g.Nodes, Node{
 			Path: d.Path, Title: d.Title(), Type: d.Type(),
 			Description: d.Description(), Tags: d.Tags(),
 			Status: d.str("status"), Reserved: d.Reserved,
 		})
 		for _, l := range d.Links {
-			if l.Resolved == "" || l.Resolved == d.Path {
+			// self-links and links into the reserved files are not edges
+			// between concepts
+			if l.Resolved == "" || l.Resolved == d.Path || isReserved(l.Resolved) {
 				continue
 			}
 			e := Edge{From: d.Path, To: l.Resolved, Text: l.Text}
@@ -582,6 +629,29 @@ func isReserved(bundlePath string) bool {
 
 var linkRe = regexp.MustCompile(`\[([^\]]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)`)
 
+var (
+	fenceRe    = regexp.MustCompile("(?s)```.*?```|~~~.*?~~~")
+	codeSpanRe = regexp.MustCompile("`[^`\n]*`")
+)
+
+// stripCode blanks out fenced blocks and inline code spans before links are
+// extracted. A document that *documents* the link syntax — a style guide, a
+// runbook quoting a snippet — must not gain edges from its own examples.
+// Runs are replaced with spaces so no other offsets shift.
+func stripCode(body string) string {
+	blank := func(s string) string {
+		out := []rune(s)
+		for i, r := range out {
+			if r != '\n' {
+				out[i] = ' '
+			}
+		}
+		return string(out)
+	}
+	body = fenceRe.ReplaceAllStringFunc(body, blank)
+	return codeSpanRe.ReplaceAllStringFunc(body, blank)
+}
+
 func parseDoc(bundlePath, raw string) *Doc {
 	fm, body := splitFrontmatter(raw)
 	d := &Doc{
@@ -591,7 +661,7 @@ func parseDoc(bundlePath, raw string) *Doc {
 		Reserved:    isReserved(bundlePath),
 	}
 	dir := path.Dir(bundlePath)
-	for _, m := range linkRe.FindAllStringSubmatch(body, -1) {
+	for _, m := range linkRe.FindAllStringSubmatch(stripCode(body), -1) {
 		text, target := m[1], m[2]
 		d.Links = append(d.Links, Link{Text: text, Target: target, Resolved: resolveLink(dir, target)})
 	}

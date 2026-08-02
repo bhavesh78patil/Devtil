@@ -85,19 +85,28 @@ type Server struct {
 	in  io.Reader
 	out io.Writer
 
-	store  *store.Store
-	okfDir string
+	store    *store.Store
+	okfDir   string
+	sessions *sessions // Streamable HTTP transport only
 
 	mu    sync.Mutex // serialises writes; one JSON message per line
 	tools map[string]*Tool
 	order []string
 }
 
-// NewServer builds a server with the full Devtil tool set registered.
+// NewServer builds a server with the full Devtil tool set registered, reading
+// and writing MCP over the given stream pair (the stdio transport).
 func NewServer(in io.Reader, out io.Writer, opt Options) *Server {
-	s := &Server{in: in, out: out, store: opt.Store, okfDir: opt.OKFDir, tools: map[string]*Tool{}}
+	s := &Server{in: in, out: out, store: opt.Store, okfDir: opt.OKFDir,
+		tools: map[string]*Tool{}, sessions: newSessions()}
 	s.registerAll()
 	return s
+}
+
+// NewHTTPServer builds a server for the Streamable HTTP transport, which has
+// no stream pair — every exchange is a request/response on the endpoint.
+func NewHTTPServer(opt Options) *Server {
+	return NewServer(strings.NewReader(""), io.Discard, opt)
 }
 
 // Serve reads requests until the input stream closes.
@@ -133,7 +142,7 @@ func (s *Server) handleLine(line []byte) {
 	// A request without an id is a notification: act on it, answer nothing.
 	isNotification := len(req.ID) == 0 || string(req.ID) == "null"
 
-	result, rpcErr := s.dispatch(req)
+	result, rpcErr := s.dispatch(req, s.loadPolicy())
 	if isNotification {
 		return
 	}
@@ -144,7 +153,7 @@ func (s *Server) handleLine(line []byte) {
 	s.write(response{JSONRPC: "2.0", ID: req.ID, Result: result})
 }
 
-func (s *Server) dispatch(req request) (any, *rpcError) {
+func (s *Server) dispatch(req request, policy Policy) (any, *rpcError) {
 	switch req.Method {
 	case "initialize":
 		return s.initialize(req.Params), nil
@@ -156,10 +165,10 @@ func (s *Server) dispatch(req request) (any, *rpcError) {
 		return map[string]any{}, nil
 
 	case "tools/list":
-		return map[string]any{"tools": s.toolDescriptors()}, nil
+		return map[string]any{"tools": s.toolDescriptors(policy)}, nil
 
 	case "tools/call":
-		return s.callTool(req.Params)
+		return s.callTool(req.Params, policy)
 
 	case "resources/list":
 		return map[string]any{"resources": []any{}}, nil

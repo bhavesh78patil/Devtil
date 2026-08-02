@@ -135,6 +135,21 @@ func connFallbackName(toolType string, m map[string]any) string {
 	}
 }
 
+// filter returns a view holding only the connections the policy shares, so a
+// connection the developer kept private is invisible rather than merely
+// unusable — an agent should not learn that a "prod-payments" cluster exists.
+func (idx *connIndex) filter(p Policy) *connIndex {
+	out := &connIndex{byTool: map[string][]savedConn{}}
+	for toolType, list := range idx.byTool {
+		for _, c := range list {
+			if p.AllowsConnection(toolType, c.Name) {
+				out.byTool[toolType] = append(out.byTool[toolType], c)
+			}
+		}
+	}
+	return out
+}
+
 // find resolves a connection by name for a tool type. Matching is
 // case-insensitive and accepts a unique prefix, because model-supplied names
 // are rarely byte-exact.
@@ -205,7 +220,10 @@ func toolLabel(t string) string {
 func (s *Server) resolve(toolType string, a Args, inlineKeys []string) (map[string]any, error) {
 	fields := map[string]any{}
 	if name := strings.TrimSpace(a.Str("connection")); name != "" {
-		saved, err := loadConnections(s.store).find(toolType, name)
+		if !a.policy.AllowsConnection(toolType, name) {
+			return nil, fmt.Errorf("the %s connection %q is not shared with agents — the developer can enable it in Devtil's MCP settings", toolLabel(toolType), name)
+		}
+		saved, err := loadConnections(s.store).filter(a.policy).find(toolType, name)
 		if err != nil {
 			return nil, err
 		}

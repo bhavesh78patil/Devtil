@@ -26,6 +26,18 @@ func splitCSV(s string) []string {
 
 func (s *Server) bundle() (*okf.Bundle, error) { return okf.Open(s.okfDir) }
 
+// mcpInfo tells the Settings panel what it can offer: the tool groups and
+// their tools, and the saved connections that can be shared with agents.
+// Keeping this server-side means Settings never holds a stale copy of the
+// tool list.
+func (s *Server) mcpInfo(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, map[string]any{
+		"groups":      s.mcp.GroupsForUI(),
+		"connections": s.mcp.ConnectionsForUI(),
+		"bundle":      s.okfDir,
+	})
+}
+
 func (s *Server) okfList(w http.ResponseWriter, r *http.Request) {
 	b, err := s.bundle()
 	if err != nil {

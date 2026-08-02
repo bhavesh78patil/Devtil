@@ -7,11 +7,17 @@ import (
 	"testing"
 )
 
+// newBundle returns an empty bundle. Open seeds a root index.md for real
+// users; tests that are counting concepts start from nothing so the numbers
+// mean what they say.
 func newBundle(t *testing.T) *Bundle {
 	t.Helper()
 	b, err := Open(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
+	}
+	if err := b.Delete("/" + IndexFile); err != nil {
+		t.Fatalf("removing the seeded index: %v", err)
 	}
 	return b
 }
@@ -97,6 +103,105 @@ func TestWriteRequiresType(t *testing.T) {
 	// reserved filenames carry structure, not a concept, so they are exempt
 	if _, err := b.Write(WriteOptions{Path: "/" + IndexFile, Body: "# Bundle"}); err != nil {
 		t.Errorf("index.md should not require a type: %v", err)
+	}
+}
+
+// A brand-new bundle is seeded with a root index so an agent opening it has
+// the conventions in front of it instead of an empty directory.
+func TestOpenSeedsAnIndex(t *testing.T) {
+	dir := t.TempDir()
+	b, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc, err := b.Read("/" + IndexFile)
+	if err != nil {
+		t.Fatalf("a new bundle should have a seeded index: %v", err)
+	}
+	if !strings.Contains(doc.Body, "type") || !strings.Contains(doc.Body, "markdown links") {
+		t.Errorf("seed does not explain the conventions: %q", doc.Body)
+	}
+	// The seed documents the link syntax in code spans; that must not turn
+	// into edges pointing at concepts nobody wrote.
+	for _, l := range doc.Links {
+		if l.Resolved != "" {
+			t.Errorf("the seeded index created a link to %s", l.Resolved)
+		}
+	}
+	g, err := b.Graph()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(g.Nodes) != 0 || len(g.Broken) != 0 {
+		t.Errorf("a freshly seeded bundle should have an empty graph: %#v", g)
+	}
+
+	// Re-opening must not overwrite an index the user has since edited.
+	if _, err := b.Write(WriteOptions{Path: "/" + IndexFile, Body: "my own index"}); err != nil {
+		t.Fatal(err)
+	}
+	b2, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc, _ = b2.Read("/" + IndexFile)
+	if !strings.Contains(doc.Body, "my own index") {
+		t.Errorf("re-opening clobbered the index: %q", doc.Body)
+	}
+}
+
+// Links inside code spans and fenced blocks are examples, not edges.
+func TestLinksInsideCodeAreIgnored(t *testing.T) {
+	b := newBundle(t)
+	doc := write(t, b, "/guide.md", "Note", strings.Join([]string{
+		"Write links like `[orders](/tables/orders.md)` in the body.",
+		"",
+		"```markdown",
+		"[customers](/tables/customers.md)",
+		"```",
+		"",
+		"A real link to [products](/tables/products.md).",
+	}, "\n"))
+
+	if len(doc.Links) != 1 {
+		t.Fatalf("want only the real link, got %#v", doc.Links)
+	}
+	if doc.Links[0].Resolved != "/tables/products.md" {
+		t.Errorf("resolved %q", doc.Links[0].Resolved)
+	}
+}
+
+// The reserved files describe the bundle; they are not concepts in the graph.
+func TestReservedFilesAreNotGraphNodes(t *testing.T) {
+	b := newBundle(t)
+	write(t, b, "/a.md", "Note", "see the [index](/index.md) and [b](/b.md)")
+	write(t, b, "/b.md", "Note", "leaf")
+	if _, err := b.Write(WriteOptions{Path: "/" + IndexFile, Body: "root"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.AppendLog("something happened", "human:test"); err != nil {
+		t.Fatal(err)
+	}
+
+	g, err := b.Graph()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range g.Nodes {
+		if n.Path == "/"+IndexFile || n.Path == "/"+LogFile {
+			t.Errorf("%s should not be a graph node", n.Path)
+		}
+	}
+	if len(g.Nodes) != 2 {
+		t.Errorf("nodes = %d, want 2", len(g.Nodes))
+	}
+	// The link to the index resolves, so it is not broken — it is simply not
+	// an edge between concepts.
+	if len(g.Edges) != 1 || g.Edges[0].To != "/b.md" {
+		t.Errorf("edges = %#v", g.Edges)
+	}
+	if len(g.Broken) != 0 {
+		t.Errorf("broken = %#v", g.Broken)
 	}
 }
 
