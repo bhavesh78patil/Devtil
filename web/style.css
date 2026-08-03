@@ -843,6 +843,19 @@ a.sftp-dir:hover, a.sftp-file:hover { color: var(--accent); text-decoration: und
   border-radius: 999px; padding: 0 6px;
 }
 
+.set-conn-group {
+  font-size: 11px; font-weight: 500; text-transform: uppercase;
+  letter-spacing: 0.08em; color: var(--text-dim); padding: 12px 0 4px;
+}
+.set-conn { display: flex; align-items: center; gap: 9px; padding: 4px 0; font-size: 12.5px; }
+.set-conn input[type=checkbox] { width: 14px; height: 14px; flex-shrink: 0; }
+.set-conn-spacer { width: 14px; flex-shrink: 0; }
+.set-conn-name { min-width: 130px; color: var(--text); }
+.set-conn-sum { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.set-env { font-size: 11.5px; padding: 2px 6px; }
+.set-default { padding: 2px 9px; font-size: 11.5px; white-space: nowrap; }
+.set-default.active { border-color: var(--accent); color: var(--accent); }
+
 /* Knowledge Graph (OKF bundle) */
 .spacer { flex: 1; }
 .btn.active { background: var(--bg3); border-color: var(--text); }

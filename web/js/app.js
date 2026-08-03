@@ -444,16 +444,31 @@ In the body, link related concepts with ordinary markdown links to their
 bundle paths, e.g. a link to /tables/customers.md. Those links are the graph.
 When you add a concept, also link to it from the closest existing one.
 
-### Prefer saved connections
+### Target the right system
 
-Infrastructure tools take a \`connection\` name resolving against what the
-developer saved in Devtil — call \`devtil_connections\` to see them. Use the
-name. Never ask for a password, and never write credentials into a concept.
+The developer has several clusters and databases — dev, staging, production.
+They are different systems, not copies. Reading the wrong one wastes a minute;
+writing to the wrong one does not.
+
+Call \`devtil_connections\` before infrastructure work: it gives each
+connection's name, environment and which is the default. Then:
+
+- If the developer named a system, use it.
+- If they did not and more than one could fit, **ask them**. Do not guess.
+  Devtil refuses an ambiguous request anyway and tells you to ask.
+- Anything marked \`production\` must be named explicitly, and only after the
+  developer confirms they mean production. Devtil never selects it for you.
+- Every result carries a \`connection\` block saying which system was used and
+  how it was chosen. Read it, and name the system when you report back.
+
+Use the connection name — never ask for a password, and never write
+credentials into a concept.
 
 ### Be careful with the writes
 
 \`kafka_produce\`, mutating \`db_query\`, \`kube_exec\` and \`ssh_exec\` act on
-real systems. Say what you are about to run, and get agreement first.`;
+real systems. Say what you are about to run, on which connection, and get
+agreement first.`;
 
   function mcpSettings() {
     if (!state.settings) state.settings = {};
@@ -596,29 +611,93 @@ real systems. Say what you are about to run, and get agreement first.`;
       ]));
 
       // ---- connections ------------------------------------------------
+      // Picking the wrong cluster is the expensive mistake, so this section
+      // is about targeting as much as it is about access: which systems an
+      // agent may reach, which one it gets when it doesn't say, and which are
+      // production and must always be named explicitly.
+      if (!m.defaults) m.defaults = {};
+      if (!m.env) m.env = {};
+
       const connNodes = [];
       if (!info.connections.length) {
         connNodes.push(el("p", { class: "set-note", text: "No saved connections yet. Add them in the Kafka, database or Elastic tools and they will appear here." }));
-      } else if (mcpAllConns()) {
-        connNodes.push(el("p", { class: "set-note", text: `All ${info.connections.length} saved connection(s) can be referenced by name.` }));
       } else {
+        const byTool = new Map();
         for (const c of info.connections) {
-          connNodes.push(el("label", { class: "set-tool" }, [
-            checkbox(!!m.connections[c.key], (on) => { m.connections[c.key] = on; save(); render(); }),
-            el("span", { class: "set-tool-title", text: c.name }),
-            el("code", { text: c.toolLabel }),
-            el("span", { class: "set-note", text: c.summary }),
-          ]));
+          if (!byTool.has(c.tool)) byTool.set(c.tool, []);
+          byTool.get(c.tool).push(c);
+        }
+        for (const [tool, list] of byTool) {
+          connNodes.push(el("div", { class: "set-conn-group", text: list[0].toolLabel }));
+          for (const c of list) {
+            const shared = mcpAllConns() || !!m.connections[c.key];
+            const isDefault = (m.defaults[tool] || "") === c.name;
+
+            const envSel = el("select", { class: "set-env", title: "How agents should treat this system" }, [
+              el("option", { value: "", text: "unlabelled" }),
+              el("option", { value: "development", text: "development" }),
+              el("option", { value: "staging", text: "staging" }),
+              el("option", { value: "production", text: "production" }),
+            ]);
+            envSel.value = m.env[c.key] || "";
+            envSel.addEventListener("change", () => {
+              if (envSel.value) m.env[c.key] = envSel.value;
+              else delete m.env[c.key];
+              // production is never handed out automatically, so it cannot
+              // also be the default — drop the pairing rather than keep a
+              // setting that silently does nothing
+              if (envSel.value === "production" && (m.defaults[tool] || "") === c.name) delete m.defaults[tool];
+              save();
+              render();
+            });
+
+            const isProd = (m.env[c.key] || "") === "production";
+            const defBtn = el("button", {
+              class: "btn set-default" + (isDefault ? " active" : ""),
+              text: isDefault ? "★ default" : "make default",
+              title: isProd
+                ? "A production connection is never selected automatically — an agent must name it"
+                : "Agents get this one when they don't name a connection",
+              onclick: () => {
+                if (isProd) return;
+                if (isDefault) delete m.defaults[tool];
+                else m.defaults[tool] = c.name;
+                save();
+                render();
+              },
+            });
+            if (isProd) defBtn.disabled = true;
+
+            connNodes.push(el("div", { class: "set-conn" + (shared ? "" : " set-dim") }, [
+              mcpAllConns()
+                ? el("span", { class: "set-conn-spacer" })
+                : checkbox(!!m.connections[c.key], (on) => { m.connections[c.key] = on; save(); render(); }),
+              el("span", { class: "set-conn-name", text: c.name }),
+              el("span", { class: "set-note set-conn-sum", text: c.summary }),
+              envSel,
+              defBtn,
+            ]));
+          }
+        }
+        // Say plainly what happens for each tool that has no default set.
+        const undecided = [...byTool.entries()]
+          .filter(([tool, list]) => list.length > 1 && !(m.defaults[tool] || ""))
+          .map(([, list]) => list[0].toolLabel);
+        if (undecided.length) {
+          connNodes.push(el("p", { class: "set-note", text:
+            `No default set for: ${undecided.join(", ")}. An agent that doesn't name a connection will be refused and told to ask you — which is usually what you want.` }));
         }
       }
+
       sections.push(el("section", { class: "set-section" }, [
-        el("h3", { text: "Connections shared with agents" }),
-        el("p", { class: "set-lead", text: "An agent names a connection and Devtil supplies the credentials itself — they are never returned to the model. A connection you do not share is invisible: the agent cannot even learn it exists." }),
+        el("h3", { text: "Connections agents can use" }),
+        el("p", { class: "set-lead", text: "An agent names a connection and Devtil supplies the credentials itself — they are never returned to the model. A connection you don't share is invisible: the agent can't even learn it exists." }),
         settingsRow(
           "Share every saved connection",
           mcpAllConns() ? "Including any you add later." : "Only the ones ticked below.",
           checkbox(mcpAllConns(), (on) => { m.connectionsAll = on; save(); render(); })
         ),
+        el("p", { class: "set-lead", text: "Label each system so an agent targets the right one. Devtil never picks between several clusters on its own — with no default it refuses and makes the agent ask you, and a production system is never selected automatically at all." }),
         ...connNodes,
       ]));
 

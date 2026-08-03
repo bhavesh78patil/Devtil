@@ -103,6 +103,39 @@ type Policy struct {
 	// Connections is the allowlist used when ConnectionsAll is false, keyed
 	// "<toolType>/<connection name>".
 	Connections map[string]bool `json:"connections"`
+	// Defaults names the connection an agent gets when it does not say which
+	// one it wants, keyed by tool type. Without one, an ambiguous request is
+	// refused rather than guessed at.
+	Defaults map[string]string `json:"defaults"`
+	// Env labels a connection's environment, keyed like Connections. A
+	// production connection is never selected automatically — an agent has
+	// to name it, which means a human decided.
+	Env map[string]string `json:"env"`
+}
+
+// Environment labels. The distinction that actually matters is
+// "production or not"; the rest is for the developer's own orientation.
+const (
+	EnvProduction  = "production"
+	EnvStaging     = "staging"
+	EnvDevelopment = "development"
+)
+
+// DefaultConnection returns the connection an agent should use for a tool
+// type when it did not name one, or "" if the developer has not chosen.
+func (p Policy) DefaultConnection(toolType string) string {
+	return strings.TrimSpace(p.Defaults[toolType])
+}
+
+// EnvOf returns the environment label for a connection, or "".
+func (p Policy) EnvOf(toolType, name string) string {
+	return strings.TrimSpace(p.Env[connKey(toolType, name)])
+}
+
+// IsProduction reports whether a connection is labelled production, which
+// bars it from being picked automatically.
+func (p Policy) IsProduction(toolType, name string) bool {
+	return strings.EqualFold(p.EnvOf(toolType, name), EnvProduction)
 }
 
 // DefaultPolicy is what an unconfigured devtil uses: everything available.
@@ -188,7 +221,8 @@ func (s *Server) GroupsForUI() []map[string]any {
 	return out
 }
 
-// ConnectionsForUI lists saved connections so Settings can offer an allowlist.
+// ConnectionsForUI lists saved connections so Settings can offer an allowlist,
+// an environment label and a per-tool default.
 func (s *Server) ConnectionsForUI() []map[string]any {
 	idx := loadConnections(s.store)
 	var out []map[string]any

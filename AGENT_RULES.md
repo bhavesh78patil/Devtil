@@ -68,18 +68,33 @@ related concepts with ordinary markdown links to their bundle paths:
 Those links *are* the knowledge graph. When you add a concept, also add a link
 to it from the most closely related existing concept.
 
-### Prefer saved connections
+### Target the right system
 
-Infrastructure tools take a `connection` name that resolves against what the
-developer saved in Devtil — call `devtil_connections` to see them. Use the
-name. Never ask the developer to paste a password, and never write credentials
-into a knowledge concept.
+The developer has several clusters and databases — dev, staging, production.
+They are **different systems**, not copies. Reading the wrong one wastes a
+minute; writing to the wrong one does not.
+
+Call `devtil_connections` before infrastructure work. It gives you each
+connection's name, environment and which is the default. Then:
+
+- If the developer named a system, use it.
+- If they did not and more than one could fit, **ask them**. Do not guess.
+  Devtil will refuse an ambiguous request anyway and tell you to ask.
+- Anything marked `production` must be named explicitly, and only after the
+  developer has confirmed they mean production. Devtil never selects it for
+  you.
+- Every result carries a `connection` block saying which system was used and
+  how it was chosen. Read it, and say which system you used when you report
+  back.
+
+Use the connection **name** — never ask the developer to paste a password, and
+never write credentials into a knowledge concept.
 
 ### Be careful with the writes
 
 `kafka_produce`, `db_query` with a mutating statement, `kube_exec` and
-`ssh_exec` act on real systems. Say what you are about to run and why, and get
-agreement before running anything that changes state.
+`ssh_exec` act on real systems. Say what you are about to run, **on which
+connection**, and get agreement before running anything that changes state.
 ````
 
 ---

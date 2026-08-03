@@ -212,11 +212,19 @@ encoders, an HTTP client, Kafka, relational and Cassandra databases,
 Elasticsearch/OpenSearch, Kubernetes and SSH — plus an OKF knowledge bundle
 for recording what you learn.
 
-Connections: infrastructure tools take either inline connection fields or a
-"connection" name that resolves against the connections the user has already
-saved in the Devtil UI. Prefer the saved name — Devtil holds the credentials
-locally and never returns them to you. Call devtil_connections first to see
-what is available.
+Connections: infrastructure tools take a "connection" name that resolves
+against the systems the user has saved in the Devtil UI. Prefer the saved name
+— Devtil holds the credentials locally and never returns them to you.
+
+Targeting the right system matters more than anything else here. A user
+typically has several clusters and databases — dev, staging, production — and
+they are different systems, not interchangeable copies. Call
+devtil_connections first: it reports each connection's environment and which
+is the default. If the user did not say which one they meant and more than one
+could fit, ASK THEM. Do not guess. Devtil enforces this too: it refuses an
+ambiguous request rather than picking for you, and it never auto-selects a
+connection marked production. Every result tells you which connection was
+used — check it.
 
 Knowledge: okf_* tools read and write an Open Knowledge Format bundle
 (markdown + YAML frontmatter, linked into a graph). Record durable findings

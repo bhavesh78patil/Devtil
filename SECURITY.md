@@ -67,6 +67,14 @@ connections agents may name. A hidden tool is refused even if an agent asks
 for it from a cached list, and an unshared connection is invisible rather
 than merely unusable. Changes apply to the agent's next call.
 
+**Which system gets touched.** Devtil does not let an agent pick between your
+clusters. If it doesn't name one, devtil uses the default you set, or the only
+candidate — and otherwise refuses, listing the options and telling the agent
+to ask you. Label a connection **production** and it is never selected
+automatically, even as the sole candidate: an agent must name it explicitly,
+which means a human decided. Every tool result records which connection was
+used and how it was chosen, so a transcript shows what was actually touched.
+
 **How the HTTP endpoint is protected.** It rides on the same
 localhost-only listener as the rest of Devtil, so it is not reachable from
 your network. It also validates the `Origin` header and rejects anything that

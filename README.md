@@ -137,6 +137,21 @@ the connections you already saved in the Devtil UI. The agent names the
 cluster; devtil reads the credentials from your local state file and never
 returns them. `devtil_connections` lists what's available.
 
+**Devtil never guesses which cluster you meant.** You typically have dev,
+staging and prod side by side — different systems, not copies. So when an
+agent doesn't say which one it wants:
+
+- it gets the **default** you picked for that tool, if you set one;
+- or the single connection, if there's only one;
+- otherwise the call is **refused**, with the candidates listed and an
+  instruction to ask you. The agent comes back to you rather than picking.
+
+A connection you label **production** is never selected automatically, even
+when it's the only one — an agent has to name it explicitly, which means a
+human decided. Environments and the default are set per connection in
+Settings, and **every result says which connection it used and how it was
+chosen**, so you can see what the agent actually touched.
+
 Tools that only observe are annotated `readOnlyHint`, so a host can
 auto-approve them while still prompting for `kafka_produce`, `db_query`,
 `kube_exec` and `ssh_exec`. A tool that fails reports the message in its
@@ -154,7 +169,9 @@ takes effect on the agent's next call — nothing to restart:
   also **refused if an agent asks for it anyway** from a cached list.
 - **Connections.** Share every saved connection, or pick them individually.
   A connection you don't share is *invisible* — an agent can't even learn it
-  exists, let alone use it.
+  exists, let alone use it. Label each one `development` / `staging` /
+  `production`, and mark one per tool as the default an agent gets when it
+  doesn't name a system.
 
 ### Making agents actually use it
 

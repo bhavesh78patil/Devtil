@@ -69,6 +69,11 @@ single dependency-free binary (with an optional native desktop app).
   agent asks for it from a cached list
 - **Per-connection sharing** — an unshared connection is invisible to agents,
   not merely unusable
+- **Environment labels and a default per tool** — devtil never guesses which
+  of your clusters an agent meant. With several and no default it refuses and
+  tells the agent to ask you; a connection labelled **production** is never
+  selected automatically at all. Every result reports which connection was
+  used and how it was chosen
 - Changes apply to the agent's next call; nothing needs restarting
 - Ships with a copy-paste **agent rules** block (also in `AGENT_RULES.md`)
   that gets agents searching the knowledge bundle before they investigate and

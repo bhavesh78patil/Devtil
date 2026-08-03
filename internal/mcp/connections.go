@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/bhavesh78patil/devtil/internal/store"
@@ -213,33 +214,207 @@ func toolLabel(t string) string {
 	return t
 }
 
-// resolve merges a saved connection (looked up by the "connection" argument)
-// with any inline fields the caller supplied. Inline fields win, so an agent
-// can point a saved cluster at a different topic or database without
-// re-entering credentials.
-func (s *Server) resolve(toolType string, a Args, inlineKeys []string) (map[string]any, error) {
-	fields := map[string]any{}
-	if name := strings.TrimSpace(a.Str("connection")); name != "" {
-		if !a.policy.AllowsConnection(toolType, name) {
-			return nil, fmt.Errorf("the %s connection %q is not shared with agents — the developer can enable it in Devtil's MCP settings", toolLabel(toolType), name)
+// resolved is the outcome of picking a connection for one tool call.
+type resolved struct {
+	Fields map[string]any
+	// Name is the saved connection used, or "" when the caller passed the
+	// fields inline.
+	Name string
+	Env  string
+	// SelectedBy records how the choice was made, so it can be echoed back
+	// in the result: the developer needs to see which cluster an agent
+	// actually touched, especially when it did not name one.
+	SelectedBy string
+}
+
+const (
+	selectedByAgent   = "named by the agent"
+	selectedByDefault = "devtil default for this tool"
+	selectedByOnly    = "the only connection available"
+	selectedInline    = "connection fields supplied inline"
+)
+
+// describe renders the choice for a tool result.
+func (r resolved) describe() map[string]any {
+	out := map[string]any{"selectedBy": r.SelectedBy}
+	if r.Name != "" {
+		out["name"] = r.Name
+	}
+	if r.Env != "" {
+		out["environment"] = r.Env
+	}
+	return out
+}
+
+// withConnection stamps every infrastructure result with the connection it
+// came from. Without this, a developer reading the transcript cannot tell
+// which of three clusters the agent actually touched — and neither can the
+// agent, when devtil picked for it.
+func withConnection(result any, r resolved) any {
+	out := map[string]any{}
+	switch v := result.(type) {
+	case map[string]any:
+		for k, val := range v {
+			out[k] = val
 		}
-		saved, err := loadConnections(s.store).filter(a.policy).find(toolType, name)
+	default:
+		// Typed results (query grids, consume responses) go through JSON so
+		// the caller sees exactly the shape it always saw, plus the stamp.
+		data, err := json.Marshal(result)
 		if err != nil {
-			return nil, err
+			return result
 		}
-		for k, v := range saved {
-			fields[k] = v
+		if err := json.Unmarshal(data, &out); err != nil {
+			return result // not an object — leave it alone
 		}
 	}
+	out["connection"] = r.describe()
+	return out
+}
+
+// resolve picks the connection for a call and merges in any inline fields.
+//
+// Choosing the wrong cluster is the expensive mistake here — reading dev when
+// the developer meant prod wastes a minute, writing to prod when they meant
+// dev does not. So the rule is: use what the agent named; fall back to a
+// default the developer set; use the only candidate if there is exactly one
+// and it is not production; otherwise refuse and make the agent ask. Devtil
+// never picks between several plausible clusters on the agent's behalf.
+func (s *Server) resolve(toolType string, a Args, inlineKeys []string) (resolved, error) {
+	res := resolved{Fields: map[string]any{}}
+	shared := loadConnections(s.store).filter(a.policy)
+
+	inline := false
 	for _, k := range inlineKeys {
 		if a.Has(k) {
-			fields[k] = a.Raw(k)
+			inline = true
+			break
 		}
 	}
-	if len(fields) == 0 {
-		return nil, fmt.Errorf(`no connection: pass "connection" with a saved %s connection name (see devtil_connections), or supply the fields inline`, toolLabel(toolType))
+
+	name := strings.TrimSpace(a.Str("connection"))
+	switch {
+	case name != "":
+		if !a.policy.AllowsConnection(toolType, name) {
+			return res, fmt.Errorf("the %s connection %q is not shared with agents — the developer can enable it in Devtil's MCP settings", toolLabel(toolType), name)
+		}
+		saved, err := shared.find(toolType, name)
+		if err != nil {
+			return res, err
+		}
+		res.Name = shared.canonicalName(toolType, name)
+		res.SelectedBy = selectedByAgent
+		for k, v := range saved {
+			res.Fields[k] = v
+		}
+
+	case inline:
+		res.SelectedBy = selectedInline
+
+	default:
+		picked, err := s.autoSelect(toolType, a.policy, shared)
+		if err != nil {
+			return res, err
+		}
+		res = picked
 	}
-	return fields, nil
+
+	for _, k := range inlineKeys {
+		if a.Has(k) {
+			res.Fields[k] = a.Raw(k)
+		}
+	}
+	if len(res.Fields) == 0 {
+		return res, fmt.Errorf(`no connection: pass "connection" with a saved %s connection name (call devtil_connections to see them), or supply the fields inline`, toolLabel(toolType))
+	}
+	if res.Name != "" {
+		res.Env = a.policy.EnvOf(toolType, res.Name)
+	}
+	return res, nil
+}
+
+// autoSelect handles the case where the agent named nothing. It either finds
+// an unambiguous answer or returns an error written for the model to act on:
+// stop, ask the human, come back with a name.
+func (s *Server) autoSelect(toolType string, policy Policy, shared *connIndex) (resolved, error) {
+	res := resolved{Fields: map[string]any{}}
+	candidates := shared.byTool[toolType]
+	label := toolLabel(toolType)
+
+	if len(candidates) == 0 {
+		return res, fmt.Errorf(`no saved %s connections are available. Ask the developer to add one in Devtil (and share it under Settings → MCP server), or supply the connection fields inline`, label)
+	}
+
+	// A default the developer set is an explicit decision; honour it even if
+	// it points at production.
+	if def := policy.DefaultConnection(toolType); def != "" {
+		fields, err := shared.find(toolType, def)
+		if err != nil {
+			return res, fmt.Errorf("the default %s connection %q is no longer available (%v). Ask the developer which connection to use", label, def, err)
+		}
+		res.Fields = fields
+		res.Name = shared.canonicalName(toolType, def)
+		res.SelectedBy = selectedByDefault
+		return res, nil
+	}
+
+	if len(candidates) == 1 {
+		only := candidates[0]
+		// One candidate is unambiguous — unless it is production, where
+		// "unambiguous" is not the same as "intended".
+		if policy.IsProduction(toolType, only.Name) {
+			return res, fmt.Errorf(`the only %s connection, %q, is marked production. Confirm with the developer that they mean production, then pass connection: %q explicitly`, label, only.Name, only.Name)
+		}
+		res.Fields = only.Fields
+		res.Name = only.Name
+		res.SelectedBy = selectedByOnly
+		return res, nil
+	}
+
+	return res, fmt.Errorf("several %s connections are available and none was specified: %s. Ask the developer which one they mean, then pass it as \"connection\". Do not guess — these are different systems",
+		label, describeCandidates(policy, toolType, candidates))
+}
+
+// describeCandidates renders the choices for the "ask the human" message, so
+// the model can put the options in front of the developer without a second
+// round-trip.
+func describeCandidates(policy Policy, toolType string, list []savedConn) string {
+	parts := make([]string, 0, len(list))
+	for _, c := range list {
+		desc := strconv.Quote(c.Name)
+		var notes []string
+		if env := policy.EnvOf(toolType, c.Name); env != "" {
+			notes = append(notes, env)
+		}
+		if sum := summarizeConn(toolType, c.Fields); sum != "" {
+			notes = append(notes, sum)
+		}
+		if len(notes) > 0 {
+			desc += " (" + strings.Join(notes, ", ") + ")"
+		}
+		parts = append(parts, desc)
+	}
+	return strings.Join(parts, "; ")
+}
+
+// canonicalName maps whatever the agent typed back to the stored spelling,
+// so results report the real connection name rather than a prefix.
+func (idx *connIndex) canonicalName(toolType, typed string) string {
+	want := strings.ToLower(strings.TrimSpace(typed))
+	var prefix string
+	for _, c := range idx.byTool[toolType] {
+		got := strings.ToLower(strings.TrimSpace(c.Name))
+		if got == want {
+			return c.Name
+		}
+		if prefix == "" && strings.HasPrefix(got, want) {
+			prefix = c.Name
+		}
+	}
+	if prefix != "" {
+		return prefix
+	}
+	return typed
 }
 
 // decodeInto re-encodes a resolved field map into a typed connection struct.

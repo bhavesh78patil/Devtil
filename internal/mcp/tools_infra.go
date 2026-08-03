@@ -20,16 +20,22 @@ import (
 // connectionArg is offered by every tool that talks to saved infrastructure.
 func connectionArg(what string) map[string]any {
 	return map[string]any{
-		"connection": str("Name of a saved " + what + " connection from the Devtil UI. Call devtil_connections to list them. Inline fields below override individual values."),
+		"connection": str("Name of a saved " + what + " connection (call devtil_connections to list them). " +
+			"Omit it only when you are certain which system is meant: devtil will use the developer's default, " +
+			"or the single connection if there is only one, and will otherwise refuse and ask you to pick. " +
+			"Inline fields below override individual values."),
 	}
 }
 
 func (s *Server) registerInfra() {
 	s.register(&Tool{
-		Name:        "devtil_connections",
-		Title:       "List saved connections",
-		Description: "List the connections the developer has saved in the Devtil UI — Kafka clusters, databases, Elasticsearch clusters, Kube and SSH hosts — so you can reference one by name. Credentials are never returned.",
-		ReadOnly:    true,
+		Name:  "devtil_connections",
+		Title: "List saved connections",
+		Description: "List the systems the developer has configured — Kafka clusters, databases, Elasticsearch clusters, Kube and SSH hosts — " +
+			"with each one's environment (production / staging / development) and which is the default. " +
+			"Call this before any infrastructure work so you target the right system, and when several could match, " +
+			"ask the developer which one they mean instead of guessing. Credentials are never returned.",
+		ReadOnly: true,
 		Schema: obj(map[string]any{
 			"tool": enum("Filter to one tool: kafka, elastic, cassandra, oracle (relational databases), kube or putty (SSH).",
 				"kafka", "elastic", "cassandra", "oracle", "kube", "putty"),
@@ -38,29 +44,49 @@ func (s *Server) registerInfra() {
 			idx := loadConnections(s.store).filter(a.policy)
 			filter := strings.TrimSpace(a.Str("tool"))
 			out := map[string]any{}
-			total := 0
+			total, ambiguous := 0, false
 			for toolType, list := range idx.byTool {
 				if filter != "" && toolType != filter {
 					continue
 				}
+				def := a.policy.DefaultConnection(toolType)
 				entries := make([]any, 0, len(list))
 				for _, c := range list {
-					entries = append(entries, map[string]any{
+					entry := map[string]any{
 						"name":      c.Name,
 						"workspace": c.Workspace,
 						"summary":   summarizeConn(toolType, c.Fields),
-					})
+					}
+					if env := a.policy.EnvOf(toolType, c.Name); env != "" {
+						entry["environment"] = env
+					}
+					if strings.EqualFold(c.Name, def) {
+						entry["default"] = true
+					}
+					entries = append(entries, entry)
 				}
 				out[toolType] = entries
 				total += len(entries)
+				if len(entries) > 1 && def == "" {
+					ambiguous = true
+				}
 			}
 			if total == 0 {
 				return map[string]any{
 					"connections": out,
-					"note":        "No saved connections found. Add them in the Devtil UI, or pass connection fields inline to each tool.",
+					"note":        "No saved connections found. Ask the developer to add one in the Devtil UI, or pass connection fields inline to each tool.",
 				}, nil
 			}
-			return map[string]any{"connections": out, "count": total}, nil
+			res := map[string]any{"connections": out, "count": total}
+			// Spell out the rule rather than relying on the model to infer
+			// it: picking the wrong cluster is the costly mistake here.
+			guidance := `Pass the chosen name as "connection" on each tool call. ` +
+				`A connection marked "production" is never selected for you — name it explicitly, and only after the developer has confirmed they mean production.`
+			if ambiguous {
+				guidance += " Several connections exist for at least one tool with no default set: ask the developer which one they want before running anything."
+			}
+			res["guidance"] = guidance
+			return res, nil
 		},
 	})
 
@@ -176,19 +202,19 @@ var kafkaConnProps = map[string]any{
 	"timeoutMs": num("Dial/read timeout in milliseconds (default 1000)."),
 }
 
-func (s *Server) kafkaConn(a Args) (clients.KafkaConn, error) {
-	fields, err := s.resolve("kafka", a, kafkaConnKeys)
+func (s *Server) kafkaConn(a Args) (clients.KafkaConn, resolved, error) {
+	r, err := s.resolve("kafka", a, kafkaConnKeys)
 	if err != nil {
-		return clients.KafkaConn{}, err
+		return clients.KafkaConn{}, r, err
 	}
 	var c clients.KafkaConn
-	if err := decodeInto(fields, &c); err != nil {
-		return clients.KafkaConn{}, err
+	if err := decodeInto(r.Fields, &c); err != nil {
+		return clients.KafkaConn{}, r, err
 	}
 	if strings.TrimSpace(c.Brokers) == "" {
-		return clients.KafkaConn{}, fmt.Errorf("no brokers: set \"brokers\" or name a saved Kafka connection")
+		return clients.KafkaConn{}, r, fmt.Errorf("no brokers: set \"brokers\" or name a saved Kafka connection")
 	}
-	return c, nil
+	return c, r, nil
 }
 
 func (s *Server) registerKafka() {
@@ -199,7 +225,7 @@ func (s *Server) registerKafka() {
 		ReadOnly:    true,
 		Schema:      obj(merge(connectionArg("Kafka"), kafkaConnProps)),
 		Run: func(a Args) (any, error) {
-			conn, err := s.kafkaConn(a)
+			conn, chosen, err := s.kafkaConn(a)
 			if err != nil {
 				return nil, err
 			}
@@ -207,7 +233,7 @@ func (s *Server) registerKafka() {
 			if err != nil {
 				return nil, err
 			}
-			return map[string]any{"topics": topics, "count": len(topics)}, nil
+			return withConnection(map[string]any{"topics": topics, "count": len(topics)}, chosen), nil
 		},
 	})
 
@@ -227,7 +253,7 @@ func (s *Server) registerKafka() {
 			"valueQuery": str("Only return messages whose value contains this (case-insensitive)."),
 		}), "topic"),
 		Run: func(a Args) (any, error) {
-			conn, err := s.kafkaConn(a)
+			conn, chosen, err := s.kafkaConn(a)
 			if err != nil {
 				return nil, err
 			}
@@ -248,7 +274,7 @@ func (s *Server) registerKafka() {
 			if err != nil {
 				return nil, err
 			}
-			return resp, nil
+			return withConnection(resp, chosen), nil
 		},
 	})
 
@@ -263,7 +289,7 @@ func (s *Server) registerKafka() {
 			"headers": objArg("Message headers as a name/value object."),
 		}), "topic", "value"),
 		Run: func(a Args) (any, error) {
-			conn, err := s.kafkaConn(a)
+			conn, chosen, err := s.kafkaConn(a)
 			if err != nil {
 				return nil, err
 			}
@@ -278,7 +304,7 @@ func (s *Server) registerKafka() {
 			if err := clients.KafkaProduce(conn, topic, a.Str("key"), a.Str("value"), headers); err != nil {
 				return nil, err
 			}
-			return map[string]any{"ok": true, "topic": topic}, nil
+			return withConnection(map[string]any{"ok": true, "topic": topic}, chosen), nil
 		},
 	})
 }
@@ -301,16 +327,16 @@ var dbConnProps = map[string]any{
 	"insecure": boolean("Skip TLS (sslmode=disable / tls=false)."),
 }
 
-func (s *Server) dbConn(toolType string, a Args) (clients.DBConn, error) {
-	fields, err := s.resolve(toolType, a, dbConnKeys)
+func (s *Server) dbConn(toolType string, a Args) (clients.DBConn, resolved, error) {
+	r, err := s.resolve(toolType, a, dbConnKeys)
 	if err != nil {
-		return clients.DBConn{}, err
+		return clients.DBConn{}, r, err
 	}
 	var c clients.DBConn
-	if err := decodeInto(fields, &c); err != nil {
-		return clients.DBConn{}, err
+	if err := decodeInto(r.Fields, &c); err != nil {
+		return clients.DBConn{}, r, err
 	}
-	return c, nil
+	return c, r, nil
 }
 
 func (s *Server) registerDB() {
@@ -324,7 +350,7 @@ func (s *Server) registerDB() {
 			"maxRows": num("Maximum rows to return (default 200, max 10000)."),
 		}), "query"),
 		Run: func(a Args) (any, error) {
-			conn, err := s.dbConn("oracle", a)
+			conn, chosen, err := s.dbConn("oracle", a)
 			if err != nil {
 				return nil, err
 			}
@@ -340,7 +366,7 @@ func (s *Server) registerDB() {
 			if err != nil {
 				return nil, err
 			}
-			return res, nil
+			return withConnection(res, chosen), nil
 		},
 	})
 
@@ -353,7 +379,7 @@ func (s *Server) registerDB() {
 			"maxRows": num("Maximum rows to return (default 200, max 10000)."),
 		}), "query"),
 		Run: func(a Args) (any, error) {
-			conn, err := s.dbConn("cassandra", a)
+			conn, chosen, err := s.dbConn("cassandra", a)
 			if err != nil {
 				return nil, err
 			}
@@ -365,7 +391,7 @@ func (s *Server) registerDB() {
 			if err != nil {
 				return nil, err
 			}
-			return res, nil
+			return withConnection(res, chosen), nil
 		},
 	})
 }
@@ -388,7 +414,7 @@ func (s *Server) registerElastic() {
 			"body":     str("JSON request body, e.g. a query DSL document."),
 		}), "path"),
 		Run: func(a Args) (any, error) {
-			fields, err := s.resolve("elastic", a, []string{"baseUrl", "username", "password", "insecure"})
+			chosen, err := s.resolve("elastic", a, []string{"baseUrl", "username", "password", "insecure"})
 			if err != nil {
 				return nil, err
 			}
@@ -398,7 +424,7 @@ func (s *Server) registerElastic() {
 				Password string `json:"password"`
 				Insecure bool   `json:"insecure"`
 			}
-			if err := decodeInto(fields, &conn); err != nil {
+			if err := decodeInto(chosen.Fields, &conn); err != nil {
 				return nil, err
 			}
 			base := strings.TrimRight(strings.TrimSpace(conn.BaseURL), "/")
@@ -432,7 +458,7 @@ func (s *Server) registerElastic() {
 			} else {
 				out["body"] = resp.Body
 			}
-			return out, nil
+			return withConnection(out, chosen), nil
 		},
 	})
 }
@@ -452,21 +478,22 @@ var kubeConnProps = map[string]any{
 	"sshKey":      str("Path to an SSH identity file."),
 }
 
-func (s *Server) kubeConn(a Args) (kube.Conn, error) {
-	fields, err := s.resolve("kube", a, kubeConnKeys)
+func (s *Server) kubeConn(a Args) (kube.Conn, resolved, error) {
+	r, err := s.resolve("kube", a, kubeConnKeys)
 	if err != nil {
 		// A local kubeconfig is a perfectly normal setup, so an absent saved
-		// connection is not fatal here — fall through to plain kubectl.
+		// connection is not fatal here — fall through to plain kubectl, which
+		// uses the current context.
 		if !a.Has("connection") {
-			return kube.Conn{}, nil
+			return kube.Conn{}, resolved{SelectedBy: "the machine's current kubeconfig context"}, nil
 		}
-		return kube.Conn{}, err
+		return kube.Conn{}, r, err
 	}
 	var c kube.Conn
-	if err := decodeInto(fields, &c); err != nil {
-		return kube.Conn{}, err
+	if err := decodeInto(r.Fields, &c); err != nil {
+		return kube.Conn{}, r, err
 	}
-	return c, nil
+	return c, r, nil
 }
 
 func (s *Server) registerKube() {
@@ -477,7 +504,7 @@ func (s *Server) registerKube() {
 		ReadOnly:    true,
 		Schema:      obj(merge(connectionArg("Kube Console"), kubeConnProps)),
 		Run: func(a Args) (any, error) {
-			conn, err := s.kubeConn(a)
+			conn, chosen, err := s.kubeConn(a)
 			if err != nil {
 				return nil, err
 			}
@@ -485,7 +512,7 @@ func (s *Server) registerKube() {
 			if err != nil {
 				return nil, err
 			}
-			return map[string]any{"contexts": names, "current": current}, nil
+			return withConnection(map[string]any{"contexts": names, "current": current}, chosen), nil
 		},
 	})
 
@@ -496,7 +523,7 @@ func (s *Server) registerKube() {
 		ReadOnly:    true,
 		Schema:      obj(merge(connectionArg("Kube Console"), kubeConnProps)),
 		Run: func(a Args) (any, error) {
-			conn, err := s.kubeConn(a)
+			conn, chosen, err := s.kubeConn(a)
 			if err != nil {
 				return nil, err
 			}
@@ -504,7 +531,7 @@ func (s *Server) registerKube() {
 			if err != nil {
 				return nil, err
 			}
-			return map[string]any{"namespaces": names}, nil
+			return withConnection(map[string]any{"namespaces": names}, chosen), nil
 		},
 	})
 
@@ -518,7 +545,7 @@ func (s *Server) registerKube() {
 			"query":     str("Case-insensitive substring to match against pod names and labels."),
 		}), "namespace"),
 		Run: func(a Args) (any, error) {
-			conn, err := s.kubeConn(a)
+			conn, chosen, err := s.kubeConn(a)
 			if err != nil {
 				return nil, err
 			}
@@ -530,7 +557,7 @@ func (s *Server) registerKube() {
 			if err != nil {
 				return nil, err
 			}
-			return map[string]any{"pods": pods, "count": len(pods)}, nil
+			return withConnection(map[string]any{"pods": pods, "count": len(pods)}, chosen), nil
 		},
 	})
 
@@ -553,7 +580,7 @@ func (s *Server) registerKube() {
 			"filePath":     str("Path to the log file inside the container, when source=file."),
 		}), "namespace", "pods"),
 		Run: func(a Args) (any, error) {
-			conn, err := s.kubeConn(a)
+			conn, chosen, err := s.kubeConn(a)
 			if err != nil {
 				return nil, err
 			}
@@ -581,7 +608,7 @@ func (s *Server) registerKube() {
 			if err != nil {
 				return nil, err
 			}
-			return res, nil
+			return withConnection(res, chosen), nil
 		},
 	})
 
@@ -597,7 +624,7 @@ func (s *Server) registerKube() {
 			"timeoutMs": num("Timeout in milliseconds (default 60000)."),
 		}), "namespace", "pod", "command"),
 		Run: func(a Args) (any, error) {
-			conn, err := s.kubeConn(a)
+			conn, chosen, err := s.kubeConn(a)
 			if err != nil {
 				return nil, err
 			}
@@ -624,7 +651,7 @@ func (s *Server) registerKube() {
 			if err != nil {
 				return nil, err
 			}
-			return res, nil
+			return withConnection(res, chosen), nil
 		},
 	})
 }
@@ -640,19 +667,19 @@ var sshConnProps = map[string]any{
 	"password": str("Password."),
 }
 
-func (s *Server) sshConn(a Args) (sshx.Conn, error) {
-	fields, err := s.resolve("putty", a, sshConnKeys)
+func (s *Server) sshConn(a Args) (sshx.Conn, resolved, error) {
+	r, err := s.resolve("putty", a, sshConnKeys)
 	if err != nil {
-		return sshx.Conn{}, err
+		return sshx.Conn{}, r, err
 	}
 	var c sshx.Conn
-	if err := decodeInto(fields, &c); err != nil {
-		return sshx.Conn{}, err
+	if err := decodeInto(r.Fields, &c); err != nil {
+		return sshx.Conn{}, r, err
 	}
 	if strings.TrimSpace(c.Host) == "" {
-		return sshx.Conn{}, fmt.Errorf(`no host: set "host" or name a saved SSH connection`)
+		return sshx.Conn{}, r, fmt.Errorf(`no host: set "host" or name a saved SSH connection`)
 	}
-	return c, nil
+	return c, r, nil
 }
 
 func (s *Server) registerSSH() {
@@ -665,7 +692,7 @@ func (s *Server) registerSSH() {
 			"timeoutMs": num("Timeout in milliseconds (default 60000)."),
 		}), "command"),
 		Run: func(a Args) (any, error) {
-			conn, err := s.sshConn(a)
+			conn, chosen, err := s.sshConn(a)
 			if err != nil {
 				return nil, err
 			}
@@ -677,7 +704,7 @@ func (s *Server) registerSSH() {
 			if err != nil {
 				return nil, err
 			}
-			return res, nil
+			return withConnection(res, chosen), nil
 		},
 	})
 
@@ -690,15 +717,15 @@ func (s *Server) registerSSH() {
 			"path": str("Remote directory path. Empty means the login user's home."),
 		})),
 		Run: func(a Args) (any, error) {
-			conn, err := s.sshConn(a)
+			conn, chosen, err := s.sshConn(a)
 			if err != nil {
 				return nil, err
 			}
-			entries, resolved, err := sshx.SFTPList(conn, a.Str("path"))
+			entries, dir, err := sshx.SFTPList(conn, a.Str("path"))
 			if err != nil {
 				return nil, err
 			}
-			return map[string]any{"path": resolved, "entries": entries, "count": len(entries)}, nil
+			return withConnection(map[string]any{"path": dir, "entries": entries, "count": len(entries)}, chosen), nil
 		},
 	})
 }
