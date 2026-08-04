@@ -1097,76 +1097,144 @@
     type: "api",
     icon: "🚀",
     name: "API Client",
-    desc: "Postman-like client: request tabs, auth (Basic / Bearer / API key), a saved collection with global headers, Swagger/OpenAPI import, and history.",
+    desc: "Postman-like client: multiple collections with searchable request trees, per-request auth (Basic / Bearer / API key), global headers, Swagger/OpenAPI import and history.",
     defaults: () => ({
-      collection: { baseUrl: "", headers: [{ k: "", v: "" }], requests: [] },
-      history: [], swaggerUrl: "", reqTabs: [], activeReqId: null,
+      collections: [], activeColId: null,
+      history: [], swaggerUrl: "",
+      tabs: [], activeTabId: null,
     }),
-    subTabs: (d) => (d.reqTabs || []).map((r) => ({
-      id: r.id,
-      label: r.name || ((r.method || "GET") + " " + (r.url || "request")),
-      select: () => { d.activeReqId = r.id; },
+    subTabs: (d) => (d.tabs || []).map((t) => ({
+      id: t.id,
+      label: t.kind === "collection"
+        ? "📁 " + ((d.collections || []).find((c) => c.id === t.colId) || {}).name
+        : (t.name || ((t.method || "GET") + " " + (t.url || "request"))),
+      select: () => { d.activeTabId = t.id; },
       remove: () => {
-        const i = d.reqTabs.findIndex((x) => x.id === r.id);
-        if (i >= 0) d.reqTabs.splice(i, 1);
-        if (d.activeReqId === r.id) d.activeReqId = d.reqTabs[0]?.id ?? null;
+        const i = d.tabs.findIndex((x) => x.id === t.id);
+        if (i >= 0) d.tabs.splice(i, 1);
+        if (d.activeTabId === t.id) d.activeTabId = d.tabs[0]?.id ?? null;
       },
     })),
     render(root, tab, ctx) {
       const d = tab.data;
 
+      // ---- data model -----------------------------------------------------
+      // A collection owns a base URL, global headers, auth and a list of
+      // saved requests. A saved request is a *complete* request (headers,
+      // body, auth), not just a method+path, so opening one and editing it
+      // and saving it back round-trips properly.
+      const newCollection = (name) => ({
+        id: uid(), name: name || "New collection", baseUrl: "",
+        headers: [{ k: "", v: "" }], auth: { type: "none", in: "header" },
+        requests: [],
+      });
+      const newSavedRequest = (partial = {}) => ({
+        id: uid(), name: partial.name || "", method: partial.method || "GET",
+        path: partial.path || "",
+        headers: partial.headers && partial.headers.length ? partial.headers : [{ k: "", v: "" }],
+        body: partial.body || "", auth: partial.auth || { type: "inherit", in: "header" },
+      });
       const newReqTab = (partial = {}) => ({
-        id: uid(), name: partial.name || "New request", method: partial.method || "GET",
-        url: partial.url || "", headers: partial.headers && partial.headers.length ? partial.headers : [{ k: "", v: "" }],
+        id: uid(), kind: "request",
+        name: partial.name || "New request", method: partial.method || "GET",
+        url: partial.url || "",
+        headers: partial.headers && partial.headers.length ? partial.headers : [{ k: "", v: "" }],
         body: partial.body || "", insecure: !!partial.insecure, response: partial.response || null,
         auth: partial.auth || { type: "inherit", in: "header" },
+        // where this came from, so Save updates in place instead of duplicating
+        colId: partial.colId || null, reqId: partial.reqId || null,
       });
 
-      // ---- init & migration from the pre-inner-tabs data shape ----
-      if (!d.collection) d.collection = { baseUrl: "", headers: [], requests: [] };
-      const col = d.collection;
-      if (!col.auth) col.auth = { type: "none", in: "header" };
-      if (!Array.isArray(col.headers) || !col.headers.length) col.headers = [{ k: "", v: "" }];
-      if (!Array.isArray(col.requests)) col.requests = [];
-      if (!Array.isArray(d.history)) d.history = [];
-      if (!Array.isArray(d.reqTabs)) d.reqTabs = [];
-      if (d.method !== undefined || d.url !== undefined) {
-        d.reqTabs.push(newReqTab({
-          name: "Request", method: d.method, url: d.url, headers: d.headers,
-          body: d.body, insecure: d.insecure, response: d.response,
-        }));
-        delete d.method; delete d.url; delete d.headers;
-        delete d.body; delete d.insecure; delete d.response;
+      // ---- init & migration -----------------------------------------------
+      if (!Array.isArray(d.collections)) d.collections = [];
+      // the single unnamed collection this tool used to have
+      if (d.collection) {
+        const old = d.collection;
+        const col = newCollection("My Collection");
+        col.baseUrl = old.baseUrl || "";
+        if (Array.isArray(old.headers) && old.headers.length) col.headers = old.headers;
+        if (old.auth) col.auth = old.auth;
+        col.requests = (old.requests || []).map((r) =>
+          newSavedRequest({ name: r.name, method: r.method, path: r.path }));
+        d.collections.push(col);
+        delete d.collection;
       }
-      if (!d.reqTabs.length) d.reqTabs.push(newReqTab());
-      if (!d.reqTabs.some((r) => r.id === d.activeReqId)) d.activeReqId = d.reqTabs[0].id;
-
-      const active = () => d.reqTabs.find((r) => r.id === d.activeReqId) || d.reqTabs[0];
-      const inCollection = (url) =>
-        !!col.baseUrl && (url || "").toLowerCase().startsWith(col.baseUrl.toLowerCase());
-      const resolveUrl = (path) => (/^https?:\/\//i.test(path) ? path : col.baseUrl + path);
-      const shortPath = (url) => { try { return new URL(url).pathname; } catch { return url; } };
-      const reqLabel = (r) => r.name || r.method + " " + (shortPath(r.url) || "…");
-
-      // open (or focus) an inner request tab
-      const openReqTab = (partial = {}) => {
-        const url = partial.url || "";
-        const existing = url && d.reqTabs.find((r) => r.method === (partial.method || "GET") && r.url === url);
-        if (existing) {
-          d.activeReqId = existing.id;
-        } else {
-          const t = newReqTab(partial);
-          d.reqTabs.push(t);
-          d.activeReqId = t.id;
+      if (!Array.isArray(d.tabs)) d.tabs = [];
+      if (Array.isArray(d.reqTabs)) { // pre-collections tab shape
+        for (const t of d.reqTabs) d.tabs.push(newReqTab(t));
+        delete d.reqTabs;
+        delete d.activeReqId;
+      }
+      if (!d.collections.length) d.collections.push(newCollection("My Collection"));
+      for (const c of d.collections) {
+        if (!Array.isArray(c.headers) || !c.headers.length) c.headers = [{ k: "", v: "" }];
+        if (!c.auth) c.auth = { type: "none", in: "header" };
+        if (!Array.isArray(c.requests)) c.requests = [];
+        for (const r of c.requests) {
+          if (!r.id) r.id = uid();
+          if (!Array.isArray(r.headers) || !r.headers.length) r.headers = [{ k: "", v: "" }];
+          if (!r.auth) r.auth = { type: "inherit", in: "header" };
+          if (r.body === undefined) r.body = "";
         }
-        ctx.save();
-        renderMain();
+      }
+      if (!Array.isArray(d.history)) d.history = [];
+      if (!d.collections.some((c) => c.id === d.activeColId)) d.activeColId = d.collections[0].id;
+      if (!d.tabs.length) d.tabs.push(newReqTab());
+      if (!d.tabs.some((t) => t.id === d.activeTabId)) d.activeTabId = d.tabs[0].id;
+
+      // ---- lookups ---------------------------------------------------------
+      const activeTab = () => d.tabs.find((t) => t.id === d.activeTabId) || d.tabs[0];
+      const colById = (id) => d.collections.find((c) => c.id === id) || null;
+      const trimBase = (u) => (u || "").trim().replace(/\/+$/, "");
+      const shortPath = (url) => { try { return new URL(url).pathname; } catch { return url; } };
+      const resolveUrl = (col, path) => (/^https?:\/\//i.test(path) ? path : trimBase(col.baseUrl) + path);
+
+      // Which collection's settings a request inherits: the one it was saved
+      // in, otherwise whichever collection's base URL the URL sits under.
+      const owningCollection = (t) => {
+        if (t.colId) { const c = colById(t.colId); if (c) return c; }
+        const url = (t.url || "").toLowerCase();
+        return d.collections.find((c) => c.baseUrl && url.startsWith(c.baseUrl.toLowerCase())) || null;
       };
 
-      // ---- key/value editor, used for request and collection headers ----
+      const reqLabel = (r) => r.name || (r.method + " " + (shortPath(r.path || r.url) || "…"));
+
+      // ---- open / focus tabs ------------------------------------------------
+      function openTab(t) {
+        d.tabs.push(t);
+        d.activeTabId = t.id;
+        ctx.save();
+        renderSide();
+        renderMain();
+      }
+      function openCollectionTab(colId) {
+        const existing = d.tabs.find((t) => t.kind === "collection" && t.colId === colId);
+        if (existing) { d.activeTabId = existing.id; ctx.save(); renderSide(); renderMain(); return; }
+        openTab({ id: uid(), kind: "collection", colId });
+      }
+      function openSavedRequest(col, r) {
+        const existing = d.tabs.find((t) => t.kind === "request" && t.reqId === r.id);
+        if (existing) { d.activeTabId = existing.id; ctx.save(); renderSide(); renderMain(); return; }
+        openTab(newReqTab({
+          name: reqLabel(r), method: r.method, url: resolveUrl(col, r.path),
+          // copy, so editing an open tab doesn't silently mutate the saved
+          // request before the user presses Save
+          headers: JSON.parse(JSON.stringify(r.headers)),
+          body: r.body, auth: JSON.parse(JSON.stringify(r.auth)),
+          colId: col.id, reqId: r.id,
+        }));
+      }
+      function openAdHoc(partial = {}) {
+        const existing = partial.url && d.tabs.find((t) =>
+          t.kind === "request" && !t.reqId && t.method === (partial.method || "GET") && t.url === partial.url);
+        if (existing) { d.activeTabId = existing.id; ctx.save(); renderSide(); renderMain(); return; }
+        openTab(newReqTab(partial));
+      }
+
+      // ---- key/value editor, shared by request and collection headers ------
       const headersEditor = (list) => {
         const box = el("div", { style: "display:flex;flex-direction:column;gap:6px" });
-        const render = () => {
+        const draw = () => {
           box.replaceChildren();
           list.forEach((h, i) => {
             const key = el("input", { type: "text", class: "hk", placeholder: "Header", value: h.k });
@@ -1177,221 +1245,211 @@
               key, val,
               el("button", {
                 class: "icon-btn", text: "×", title: "Remove header",
-                onclick: () => { list.splice(i, 1); if (!list.length) list.push({ k: "", v: "" }); ctx.save(); render(); },
+                onclick: () => { list.splice(i, 1); if (!list.length) list.push({ k: "", v: "" }); ctx.save(); draw(); },
               }),
             ]));
           });
           box.append(el("div", {}, [
-            el("button", { class: "btn", text: "+ Header", onclick: () => { list.push({ k: "", v: "" }); ctx.save(); render(); } }),
+            el("button", { class: "btn", text: "+ Header", onclick: () => { list.push({ k: "", v: "" }); ctx.save(); draw(); } }),
           ]));
         };
-        render();
+        draw();
         return box;
       };
 
-      // ---- layout: side panel (collection/history) + main (request tabs) ----
+      // ---- layout ------------------------------------------------------------
       const sideBox = el("div", { class: "api-side" });
       const mainBox = el("div", { class: "api-main" });
       root.append(el("div", { class: "api-layout" }, [sideBox, mainBox]));
-      let sideView = "requests";
-      // survives the renderSide() rebuild that an import triggers
-      let shareMsg = null;
+      let sideView = "collections";
+      let query = "";              // sidebar filter — a view concern, not persisted
+      let shareMsg = null;         // survives the renderSide() an import triggers
+      // An import or a save rebuilds the pane it was triggered from, which
+      // would take its own confirmation down with it. Park the message here
+      // so whichever pane renders next can show it.
+      let flash = null;
+      const setFlash = (text, kind) => { flash = { text, kind }; };
+      const showFlash = (node) => { if (flash) setStatus(node, flash.text, flash.kind); };
 
-      // ================= side panel =================
+      // ============================ side panel ============================
 
-      // The panel is split so each tab answers one question: what can I open
-      // (Requests), how is the collection configured (Setup), what did I run
-      // (History) — instead of stacking all of it in one column.
       function renderSide() {
-        const tab = (view, label) => el("button", {
+        const subtab = (view, label) => el("button", {
           class: sideView === view ? "active" : "",
           text: label,
           onclick: () => { sideView = view; renderSide(); },
         });
-        const panels = { requests: requestsPanel, setup: setupPanel, history: historyPanel };
+        const total = d.collections.reduce((n, c) => n + c.requests.length, 0);
         sideBox.replaceChildren(
           el("div", { class: "subtabs" }, [
-            tab("requests", `Requests (${col.requests.length})`),
-            tab("setup", "Setup"),
-            tab("history", "History"),
+            subtab("collections", `Collections (${total})`),
+            subtab("history", `History (${d.history.length})`),
           ]),
-          (panels[sideView] || requestsPanel)()
+          sideView === "history" ? historyPanel() : collectionsPanel()
         );
       }
 
-      // ---- Requests: what you can open ----
-      function requestsPanel() {
+      // ---- the collection tree ------------------------------------------
+      function collectionsPanel() {
         const box = el("div", { class: "api-side-content" });
-        if (!col.requests.length) {
-          box.append(el("div", { class: "status-line dim", text: "Nothing saved yet. Use “Save to collection” on a request, or import a Swagger/OpenAPI URL below." }));
-        }
-        col.requests.forEach((r, i) => {
-          box.append(el("div", {
-            class: "history-item", title: "Open in a request tab",
-            onclick: () => openReqTab({ name: r.name || r.method + " " + r.path, method: r.method, url: resolveUrl(r.path) }),
-          }, [
-            el("span", { text: r.method, style: "min-width:46px" }),
-            el("span", { class: "h-url", text: r.path + (r.name ? " — " + r.name : "") }),
-            el("button", {
-              class: "icon-btn", text: "×", title: "Remove from collection",
-              onclick: (e) => { e.stopPropagation(); col.requests.splice(i, 1); ctx.save(); renderSide(); },
-            }),
-          ]));
+
+        const search = el("input", {
+          type: "search", class: "api-search", placeholder: "Search requests…",
+          value: query, autocomplete: "off",
         });
-
-        const importBox = el("div", { style: "display:flex;flex-direction:column;gap:4px" });
-        const importStatus = el("div", { class: "status-line dim" });
-        const swaggerIn = el("input", { type: "text", placeholder: "https://api.example.com/swagger.json", value: d.swaggerUrl || "", style: "width:100%" });
-        swaggerIn.addEventListener("input", () => { d.swaggerUrl = swaggerIn.value; ctx.save(); });
-        box.append(el("details", { class: "section" }, [
-          el("summary", { text: "Import from Swagger / OpenAPI" }),
-          swaggerIn,
-          el("div", { style: "margin:6px 0" }, [
-            el("button", { class: "btn primary", text: "Load endpoints", onclick: () => loadSwagger(swaggerIn.value.trim(), importBox, importStatus) }),
-          ]),
-          importStatus,
-          importBox,
-        ]));
-        return box;
-      }
-
-      // ---- Setup: what every request under the base URL inherits ----
-      function setupPanel() {
-        const box = el("div", { class: "api-side-content" });
-
-        const baseInput = el("input", { type: "text", placeholder: "https://api.example.com", value: col.baseUrl, style: "width:100%" });
-        baseInput.addEventListener("input", () => { col.baseUrl = baseInput.value.trim().replace(/\/+$/, ""); ctx.save(); });
-        box.append(el("span", { class: "pane-label", text: "Base URL" }), baseInput);
-        box.append(el("div", { class: "status-line dim", text: "Requests starting with this URL inherit the headers and auth below." }));
-
-        const ghCount = col.headers.filter((h) => h.k.trim()).length;
-        const gh = el("details", { class: "section" }, [
-          el("summary", { text: `Global headers (${ghCount})` }),
-          headersEditor(col.headers),
-        ]);
-        if (ghCount) gh.open = true;
-        box.append(gh);
-
-        const ga = el("details", { class: "section" }, [
-          el("summary", { text: authSummary(col.auth) }),
-          authEditor(col, ctx, { onChange: () => { renderSide(); renderMain(); } }),
-        ]);
-        if (col.auth && col.auth.type && col.auth.type !== "none") ga.open = true;
-        box.append(ga);
-
-        box.append(sharePanel());
-        return box;
-      }
-
-      // ---- share: export / import the collection as a JSON file ----
-      function sharePanel() {
-        const shareStatus = el("div", { class: "status-line dim" });
-        const withSecrets = el("input", { type: "checkbox" });
-
-        const doExport = () => {
-          const include = withSecrets.checked;
-          const auth = JSON.parse(JSON.stringify(col.auth || { type: "none" }));
-          if (!include) {
-            // never write passwords/tokens into a file meant for sharing
-            // unless the user explicitly asked for it
-            for (const k of ["password", "token", "value"]) if (auth[k]) auth[k] = "";
-          }
-          const doc = {
-            devtil: "api-collection",
-            version: 1,
-            exportedAt: new Date().toISOString(),
-            containsCredentials: include,
-            collection: {
-              baseUrl: col.baseUrl || "",
-              headers: (col.headers || []).filter((h) => (h.k || "").trim()),
-              auth,
-              requests: col.requests || [],
-            },
-          };
-          const ts = new Date().toISOString().slice(0, 19).replaceAll(":", "-");
-          downloadFile(`devtil-collection-${ts}.json`, "application/json", JSON.stringify(doc, null, 2));
-          shareMsg = include
-            ? { text: "✓ Exported with credentials — treat the file as a secret", kind: "err" }
-            : { text: "✓ Exported — auth credentials left out; global header values are included, so review before sharing", kind: "ok" };
-          setStatus(shareStatus, shareMsg.text, shareMsg.kind);
-        };
+        search.addEventListener("input", () => { query = search.value.trim(); renderTree(); });
+        search.addEventListener("keydown", (e) => {
+          e.stopPropagation(); // don't fire the app-level shortcuts while typing
+          if (e.key === "Escape") { search.value = ""; query = ""; renderTree(); }
+        });
 
         const fileIn = el("input", { type: "file", accept: "application/json,.json", style: "display:none" });
-        fileIn.addEventListener("change", async () => {
-          const f = fileIn.files && fileIn.files[0];
-          if (!f) return;
-          try {
-            const doc = JSON.parse(await f.text());
-            const src = doc.collection || doc; // tolerate a bare collection object
-            if (!Array.isArray(src.requests)) throw new Error("no requests array — is this a Devtil collection export?");
+        fileIn.addEventListener("change", () => importCollectionFile(fileIn));
 
-            // merge, never clobber: existing settings win, new requests are added
-            const notes = [];
-            if ((src.baseUrl || "").trim()) {
-              if (!col.baseUrl) col.baseUrl = src.baseUrl.trim().replace(/\/+$/, "");
-              else if (col.baseUrl !== src.baseUrl.trim().replace(/\/+$/, "")) notes.push("kept your base URL");
-            }
-            let addedHeaders = 0;
-            for (const h of src.headers || []) {
-              const k = (h.k || "").trim();
-              if (!k) continue;
-              if ((col.headers || []).some((x) => (x.k || "").trim().toLowerCase() === k.toLowerCase())) continue;
-              col.headers.push({ k, v: h.v || "" });
-              addedHeaders++;
-            }
-            const curAuth = (col.auth && col.auth.type) || "none";
-            if (src.auth && src.auth.type && src.auth.type !== "none") {
-              if (curAuth === "none") col.auth = src.auth;
-              else notes.push("kept your auth");
-            }
-            let added = 0;
-            for (const r of src.requests) {
-              if (!r || !r.path) continue;
-              const method = (r.method || "GET").toUpperCase();
-              if (col.requests.some((q) => q.method === method && q.path === r.path)) continue;
-              col.requests.push({ method, path: r.path, name: r.name || "" });
-              added++;
-            }
-            // keep the blank "new header" row at the bottom
-            col.headers = (col.headers || []).filter((h) => (h.k || "").trim() || (h.v || "").trim());
-            col.headers.push({ k: "", v: "" });
+        box.append(el("div", { class: "api-tree-head" }, [
+          search,
+          el("button", {
+            class: "btn", text: "+ New", title: "New collection",
+            onclick: async () => {
+              const name = await promptDialog("Name for the new collection:", "New collection");
+              if (!name) return;
+              const c = newCollection(name.trim());
+              d.collections.push(c);
+              d.activeColId = c.id;
+              ctx.save();
+              renderSide();
+              openCollectionTab(c.id);
+            },
+          }),
+          el("button", { class: "btn", text: "Import", title: "Import a collection from a Devtil export file", onclick: () => fileIn.click() }),
+          fileIn,
+        ]));
 
-            if (doc.containsCredentials === false && col.auth && col.auth.type !== "none") {
-              notes.push("credentials weren't exported, so fill in the auth");
+        const tree = el("div", { class: "api-tree" });
+        box.append(tree);
+
+        function renderTree() {
+          tree.replaceChildren();
+          const q = query.toLowerCase();
+          let shown = 0;
+
+          for (const col of d.collections) {
+            const colHit = !q || col.name.toLowerCase().includes(q);
+            const hits = q
+              ? col.requests.filter((r) =>
+                  (r.name || "").toLowerCase().includes(q) ||
+                  (r.path || "").toLowerCase().includes(q) ||
+                  (r.method || "").toLowerCase().includes(q))
+              : col.requests;
+            if (q && !colHit && !hits.length) continue;
+            // when the collection name itself matched, show all of its
+            // requests rather than none
+            const visible = q && !colHit ? hits : col.requests;
+            shown += visible.length;
+
+            // searching implies "show me the matches", so force it open
+            const open = q ? true : !col.collapsed;
+            const caret = el("button", {
+              class: "icon-btn api-caret", text: open ? "▾" : "▸",
+              title: open ? "Collapse" : "Expand",
+              onclick: (e) => { e.stopPropagation(); col.collapsed = !col.collapsed; ctx.save(); renderTree(); },
+            });
+
+            const row = el("div", {
+              class: "api-col-row" + (col.id === d.activeColId ? " active" : ""),
+              title: "Open collection settings",
+              onclick: () => { d.activeColId = col.id; ctx.save(); openCollectionTab(col.id); },
+            }, [
+              caret,
+              el("span", { class: "api-col-name", text: col.name }),
+              el("span", { class: "api-col-count", text: String(col.requests.length) }),
+              el("button", {
+                class: "icon-btn", text: "✎", title: "Rename collection",
+                onclick: async (e) => {
+                  e.stopPropagation();
+                  const name = await promptDialog("Collection name:", col.name);
+                  if (name && name.trim()) { col.name = name.trim(); ctx.save(); renderSide(); renderMain(); }
+                },
+              }),
+              el("button", {
+                class: "icon-btn", text: "×", title: "Delete collection",
+                onclick: async (e) => {
+                  e.stopPropagation();
+                  if (!(await confirmDialog(`Delete collection “${col.name}” and its ${col.requests.length} request(s)?`, { okLabel: "Delete", danger: true }))) return;
+                  d.collections = d.collections.filter((c) => c.id !== col.id);
+                  if (!d.collections.length) d.collections.push(newCollection("My Collection"));
+                  if (d.activeColId === col.id) d.activeColId = d.collections[0].id;
+                  // close any tabs that belonged to it, and unlink open requests
+                  d.tabs = d.tabs.filter((t) => !(t.kind === "collection" && t.colId === col.id));
+                  for (const t of d.tabs) if (t.colId === col.id) { t.colId = null; t.reqId = null; }
+                  if (!d.tabs.length) d.tabs.push(newReqTab());
+                  if (!d.tabs.some((t) => t.id === d.activeTabId)) d.activeTabId = d.tabs[0].id;
+                  ctx.save();
+                  renderSide();
+                  renderMain();
+                },
+              }),
+            ]);
+            tree.append(row);
+
+            if (!open) continue;
+            if (!visible.length) {
+              tree.append(el("div", { class: "api-req-empty", text: q ? "no matches here" : "empty — save a request into it" }));
+              continue;
             }
-            const bits = [`${added} request(s)`];
-            if (addedHeaders) bits.push(`${addedHeaders} header(s)`);
-            shareMsg = {
-              text: `✓ Imported ${bits.join(", ")} — see the Requests tab` + (notes.length ? " · " + notes.join(", ") : ""),
-              kind: "ok",
-            };
-            ctx.save();
-            renderSide(); // rebuilds this panel; shareMsg carries the result across
-            renderMain();
-          } catch (e) {
-            shareMsg = { text: "✗ " + e.message, kind: "err" };
-            setStatus(shareStatus, shareMsg.text, shareMsg.kind);
+            for (const r of visible) {
+              tree.append(el("div", {
+                class: "api-req-row" + (d.tabs.some((t) => t.reqId === r.id && t.id === d.activeTabId) ? " active" : ""),
+                title: (r.path || "") + (r.name ? " — " + r.name : ""),
+                onclick: () => openSavedRequest(col, r),
+              }, [
+                el("span", { class: "api-method m" + (r.method || "GET"), text: r.method || "GET" }),
+                el("span", { class: "api-req-name", text: r.name || r.path || "(unnamed)" }),
+                el("button", {
+                  class: "icon-btn", text: "✎", title: "Rename request",
+                  onclick: async (e) => {
+                    e.stopPropagation();
+                    const name = await promptDialog("Request name:", r.name || r.path || "");
+                    if (name === null) return;
+                    r.name = name.trim();
+                    // keep an open tab's label in step with the rename
+                    for (const t of d.tabs) if (t.reqId === r.id) t.name = reqLabel(r);
+                    ctx.save();
+                    renderSide();
+                    renderMain();
+                  },
+                }),
+                el("button", {
+                  class: "icon-btn", text: "×", title: "Remove from collection",
+                  onclick: async (e) => {
+                    e.stopPropagation();
+                    if (!(await confirmDialog(`Remove “${reqLabel(r)}” from ${col.name}?`, { okLabel: "Remove", danger: true }))) return;
+                    col.requests = col.requests.filter((x) => x.id !== r.id);
+                    for (const t of d.tabs) if (t.reqId === r.id) { t.reqId = null; }
+                    ctx.save();
+                    renderSide();
+                    renderMain();
+                  },
+                }),
+              ]));
+            }
           }
-          fileIn.value = "";
-        });
 
-        const sec = el("details", { class: "section" }, [
-          el("summary", { text: "Share — export / import" }),
-          el("div", { class: "status-line dim", text: "Exports the base URL, global headers, auth and saved requests as a JSON file. Importing merges into this collection and never overwrites what you already set." }),
-          el("label", { class: "inline" }, [withSecrets, "Include credentials (passwords / tokens)"]),
-          el("div", { class: "toolbar" }, [
-            el("button", { class: "btn", text: "Export", onclick: doExport }),
-            el("button", { class: "btn", text: "Import", onclick: () => fileIn.click() }),
-            fileIn,
-          ]),
-          shareStatus,
-        ]);
-        // show (and keep open) the result of the last export/import
-        if (shareMsg) {
-          setStatus(shareStatus, shareMsg.text, shareMsg.kind);
-          sec.open = true;
+          if (q && !shown && !tree.querySelector(".api-col-row")) {
+            tree.append(el("div", { class: "status-line dim", text: `Nothing matches “${query}”` }));
+          }
+          if (!q && !d.collections.some((c) => c.requests.length)) {
+            tree.append(el("div", { class: "status-line dim", text: "No saved requests yet. Press Save on a request, or open a collection and import a Swagger/OpenAPI doc." }));
+          }
         }
-        return sec;
+
+        renderTree();
+        if (shareMsg) {
+          const line = el("div", { class: "status-line" });
+          setStatus(line, shareMsg.text, shareMsg.kind);
+          box.append(line);
+        }
+        return box;
       }
 
       function historyPanel() {
@@ -1401,7 +1459,7 @@
         d.history.forEach((h) => {
           box.append(el("div", {
             class: "history-item", title: h.url,
-            onclick: () => openReqTab({ name: h.method + " " + shortPath(h.url), method: h.method, url: h.url }),
+            onclick: () => openAdHoc({ name: h.method + " " + shortPath(h.url), method: h.method, url: h.url }),
           }, [
             el("span", { class: "badge s" + String(h.status)[0], text: h.status }),
             el("span", { text: h.method }),
@@ -1409,10 +1467,197 @@
             el("span", { text: h.durationMs + "ms" }),
           ]));
         });
+        if (d.history.length) {
+          box.append(el("div", { class: "toolbar" }, [
+            el("button", { class: "btn", text: "Clear history", onclick: () => { d.history = []; ctx.save(); renderSide(); } }),
+          ]));
+        }
         return box;
       }
 
-      async function loadSwagger(url, box, importStatus) {
+      // ---- import a collection file into a NEW collection -------------------
+      async function importCollectionFile(fileIn) {
+        const f = fileIn.files && fileIn.files[0];
+        if (!f) return;
+        try {
+          const doc = JSON.parse(await f.text());
+          const src = doc.collection || doc; // tolerate a bare collection object
+          if (!Array.isArray(src.requests)) throw new Error("no requests array — is this a Devtil collection export?");
+          const col = newCollection(src.name || doc.name || f.name.replace(/\.json$/i, ""));
+          col.baseUrl = trimBase(src.baseUrl || "");
+          col.headers = (src.headers || []).filter((h) => (h.k || "").trim());
+          col.headers.push({ k: "", v: "" });
+          if (src.auth && src.auth.type) col.auth = src.auth;
+          for (const r of src.requests) {
+            if (!r || !r.path) continue;
+            col.requests.push(newSavedRequest({
+              name: r.name, method: (r.method || "GET").toUpperCase(), path: r.path,
+              headers: r.headers, body: r.body, auth: r.auth,
+            }));
+          }
+          d.collections.push(col);
+          d.activeColId = col.id;
+          const notes = [];
+          if (doc.containsCredentials === false && col.auth.type !== "none") notes.push("credentials weren't exported, so fill in the auth");
+          shareMsg = {
+            text: `✓ Imported “${col.name}” with ${col.requests.length} request(s)` + (notes.length ? " · " + notes.join(", ") : ""),
+            kind: "ok",
+          };
+          ctx.save();
+          renderSide();
+          openCollectionTab(col.id);
+        } catch (e) {
+          shareMsg = { text: "✗ " + e.message, kind: "err" };
+          renderSide();
+        }
+        fileIn.value = "";
+      }
+
+      // ======================= main: tab bar + panes =======================
+
+      function renderMain(view = "body") {
+        mainBox.replaceChildren();
+
+        // tab bar: request tabs and collection tabs side by side
+        mainBox.append(el("div", { class: "req-tabs" }, [
+          ...d.tabs.map((t) => {
+            const isCol = t.kind === "collection";
+            const label = isCol ? "📁 " + ((colById(t.colId) || {}).name || "collection") : (t.name || "request");
+            return el("div", {
+              class: "req-tab" + (t.id === d.activeTabId ? " active" : ""),
+              title: isCol ? "Collection settings" : (t.url || ""),
+              onclick: () => {
+                if (d.activeTabId === t.id) return;
+                d.activeTabId = t.id;
+                flash = null;
+                ctx.save();
+                renderSide();
+                renderMain();
+              },
+            }, [
+              el("span", { text: label }),
+              el("button", {
+                class: "tab-close", text: "×", title: "Close tab",
+                onclick: (e) => {
+                  e.stopPropagation();
+                  const idx = d.tabs.findIndex((x) => x.id === t.id);
+                  d.tabs.splice(idx, 1);
+                  if (!d.tabs.length) d.tabs.push(newReqTab());
+                  if (d.activeTabId === t.id) d.activeTabId = d.tabs[Math.min(idx, d.tabs.length - 1)].id;
+                  ctx.save();
+                  renderSide();
+                  renderMain();
+                },
+              }),
+            ]);
+          }),
+          el("button", { class: "icon-btn", text: "+", title: "New request tab", onclick: () => openAdHoc() }),
+        ]));
+
+        const t = activeTab();
+        if (t.kind === "collection") renderCollectionPane(t);
+        else renderRequestPane(t, view);
+      }
+
+      // ---- collection pane: everything about one collection ---------------
+      function renderCollectionPane(t) {
+        const col = colById(t.colId);
+        if (!col) {
+          mainBox.append(el("div", { class: "status-line dim", text: "This collection was deleted." }));
+          return;
+        }
+        const status = el("div", { class: "status-line dim" });
+        showFlash(status);
+
+        const nameIn = el("input", { type: "text", value: col.name, style: "font-size:15px;font-weight:500" });
+        nameIn.addEventListener("input", () => { col.name = nameIn.value; ctx.save(); });
+        nameIn.addEventListener("change", () => { renderSide(); renderMain(); });
+
+        const baseIn = el("input", { type: "text", placeholder: "https://api.example.com", value: col.baseUrl, style: "width:100%" });
+        baseIn.addEventListener("input", () => { col.baseUrl = trimBase(baseIn.value); ctx.save(); });
+
+        mainBox.append(
+          el("div", { class: "col-head" }, [
+            el("span", { class: "pane-label", text: "Collection" }),
+            nameIn,
+            el("span", { class: "spacer" }),
+            el("button", {
+              class: "btn", text: "+ Request", title: "New request in this collection",
+              onclick: () => {
+                const r = newSavedRequest({ name: "New request", method: "GET", path: "/" });
+                col.requests.push(r);
+                ctx.save();
+                renderSide();
+                openSavedRequest(col, r);
+              },
+            }),
+          ]),
+          el("div", { class: "field" }, [
+            el("span", { class: "pane-label", text: "Base URL — requests under it inherit the headers and auth below" }),
+            baseIn,
+          ]),
+          status
+        );
+
+        const ghCount = col.headers.filter((h) => h.k.trim()).length;
+        const gh = el("details", { class: "section" }, [
+          el("summary", { text: `Global headers (${ghCount})` }),
+          headersEditor(col.headers),
+        ]);
+        if (ghCount) gh.open = true;
+        mainBox.append(gh);
+
+        const ga = el("details", { class: "section" }, [
+          el("summary", { text: authSummary(col.auth) }),
+          authEditor(col, ctx, { onChange: () => renderMain() }),
+        ]);
+        if (col.auth && col.auth.type && col.auth.type !== "none") ga.open = true;
+        mainBox.append(ga);
+
+        mainBox.append(swaggerSection(col, status));
+        mainBox.append(shareSection(col, status));
+
+        // the collection's own requests, listed and openable from here too
+        const list = el("div", { class: "col-req-list" });
+        if (!col.requests.length) {
+          list.append(el("div", { class: "status-line dim", text: "No requests yet — press “+ Request”, import a Swagger doc, or press Save on any request tab." }));
+        }
+        for (const r of col.requests) {
+          list.append(el("div", { class: "api-req-row", onclick: () => openSavedRequest(col, r) }, [
+            el("span", { class: "api-method m" + (r.method || "GET"), text: r.method || "GET" }),
+            el("span", { class: "api-req-name", text: r.name || "(unnamed)" }),
+            el("span", { class: "api-req-path", text: r.path }),
+          ]));
+        }
+        mainBox.append(el("details", { class: "section", open: "" }, [
+          el("summary", { text: `Requests (${col.requests.length})` }),
+          list,
+        ]));
+      }
+
+      // ---- Swagger / OpenAPI import, targeting this collection -------------
+      function swaggerSection(col, status) {
+        const listBox = el("div", { style: "display:flex;flex-direction:column;gap:2px" });
+        const importStatus = el("div", { class: "status-line dim" });
+        const urlIn = el("input", { type: "text", placeholder: "https://api.example.com/swagger.json", value: d.swaggerUrl || "", style: "width:100%" });
+        urlIn.addEventListener("input", () => { d.swaggerUrl = urlIn.value; ctx.save(); });
+
+        return el("details", { class: "section" }, [
+          el("summary", { text: "Import from Swagger / OpenAPI" }),
+          el("div", { class: "status-line dim", text: `Endpoints are imported into “${col.name}”.` }),
+          urlIn,
+          el("div", { style: "margin:6px 0" }, [
+            el("button", {
+              class: "btn primary", text: "Load endpoints",
+              onclick: () => loadSwagger(col, urlIn.value.trim(), listBox, importStatus),
+            }),
+          ]),
+          importStatus,
+          listBox,
+        ]);
+      }
+
+      async function loadSwagger(col, url, box, importStatus) {
         if (!url) return setStatus(importStatus, "✗ Enter the Swagger/OpenAPI doc URL", "err");
         setStatus(importStatus, "Fetching Swagger doc…", "dim");
         box.replaceChildren();
@@ -1438,70 +1683,117 @@
         selectAll.checked = true;
         selectAll.addEventListener("change", () => checks.forEach((c) => (c.checked = selectAll.checked)));
 
+        // A Swagger doc usually has a title — offer it as the collection name
+        // when the collection is still the untouched default.
+        const title = (doc.info && doc.info.title) ? String(doc.info.title).trim() : "";
+        const renameChk = el("input", { type: "checkbox" });
+        renameChk.checked = !!title && /^(new collection|my collection)$/i.test(col.name);
+
         box.append(
           el("div", { class: "toolbar" }, [
             el("label", { class: "inline" }, [selectAll, "Select all"]),
+            title ? el("label", { class: "inline" }, [renameChk, `Name the collection “${title}”`]) : null,
             el("button", {
               class: "btn primary", text: "Import selected",
               onclick: () => {
-                if (!col.baseUrl && baseUrl) col.baseUrl = baseUrl;
+                if (!col.baseUrl && baseUrl) col.baseUrl = trimBase(baseUrl);
+                if (title && renameChk.checked) col.name = title;
+                let added = 0, skipped = 0;
                 endpoints.forEach((ep, i) => {
                   if (!checks[i].checked) return;
-                  if (col.requests.some((r) => r.method === ep.method && r.path === ep.path)) return;
-                  col.requests.push({ method: ep.method, path: ep.path, name: ep.name });
+                  if (col.requests.some((r) => r.method === ep.method && r.path === ep.path)) { skipped++; return; }
+                  col.requests.push(newSavedRequest({ method: ep.method, path: ep.path, name: ep.name }));
+                  added++;
                 });
                 ctx.save();
+                setFlash(`✓ Added ${added} request(s) to “${col.name}”` + (skipped ? ` · ${skipped} already there` : ""), "ok");
                 renderSide();
+                renderMain();
               },
             }),
           ]),
           ...endpoints.map((ep, i) =>
             el("div", { class: "history-item", onclick: () => { checks[i].checked = !checks[i].checked; } }, [
               checks[i],
-              el("span", { text: ep.method, style: "min-width:46px" }),
+              el("span", { class: "api-method m" + ep.method, text: ep.method }),
               el("span", { class: "h-url", text: ep.path + (ep.name ? " — " + ep.name : "") }),
             ])
           )
         );
       }
 
-      // ================= main: inner request tabs + editor + response =================
+      // ---- export / import one collection ------------------------------------
+      function shareSection(col, status) {
+        const shareStatus = el("div", { class: "status-line dim" });
+        const withSecrets = el("input", { type: "checkbox" });
 
-      function renderMain(view = "body") {
-        const r = active();
-        mainBox.replaceChildren();
+        const doExport = () => {
+          const include = withSecrets.checked;
+          const auth = JSON.parse(JSON.stringify(col.auth || { type: "none" }));
+          if (!include) {
+            // never write passwords/tokens into a file meant for sharing
+            // unless the user explicitly asked for it
+            for (const k of ["password", "token", "value"]) if (auth[k]) auth[k] = "";
+          }
+          const scrub = (a) => {
+            const copy = JSON.parse(JSON.stringify(a || { type: "inherit" }));
+            if (!include) for (const k of ["password", "token", "value"]) if (copy[k]) copy[k] = "";
+            return copy;
+          };
+          const doc = {
+            devtil: "api-collection",
+            version: 2,
+            exportedAt: new Date().toISOString(),
+            containsCredentials: include,
+            collection: {
+              name: col.name,
+              baseUrl: col.baseUrl || "",
+              headers: (col.headers || []).filter((h) => (h.k || "").trim()),
+              auth,
+              requests: (col.requests || []).map((r) => ({
+                name: r.name, method: r.method, path: r.path,
+                headers: (r.headers || []).filter((h) => (h.k || "").trim()),
+                body: r.body, auth: scrub(r.auth),
+              })),
+            },
+          };
+          const slug = (col.name || "collection").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+          downloadFile(`devtil-${slug || "collection"}.json`, "application/json", JSON.stringify(doc, null, 2));
+          setStatus(shareStatus, include
+            ? "✓ Exported with credentials — treat the file as a secret"
+            : "✓ Exported — auth credentials left out; header values are included, so review before sharing",
+            include ? "err" : "ok");
+        };
 
-        // inner request tab bar
-        mainBox.append(el("div", { class: "req-tabs" }, [
-          ...d.reqTabs.map((t) =>
-            el("div", {
-              class: "req-tab" + (t.id === d.activeReqId ? " active" : ""),
-              onclick: () => {
-                if (d.activeReqId === t.id) return;
-                d.activeReqId = t.id;
-                ctx.save();
-                renderMain();
-              },
-            }, [
-              el("span", { text: reqLabel(t) }),
-              el("button", {
-                class: "tab-close", text: "×", title: "Close request tab",
-                onclick: (e) => {
-                  e.stopPropagation();
-                  const idx = d.reqTabs.findIndex((x) => x.id === t.id);
-                  d.reqTabs.splice(idx, 1);
-                  if (!d.reqTabs.length) d.reqTabs.push(newReqTab());
-                  if (d.activeReqId === t.id) d.activeReqId = d.reqTabs[Math.min(idx, d.reqTabs.length - 1)].id;
-                  ctx.save();
-                  renderMain();
-                },
-              }),
-            ])
-          ),
-          el("button", { class: "icon-btn", text: "+", title: "New request tab", onclick: () => openReqTab() }),
-        ]));
+        return el("details", { class: "section" }, [
+          el("summary", { text: "Export this collection" }),
+          el("div", { class: "status-line dim", text: "Writes the name, base URL, global headers, auth and every saved request to a JSON file. Import it from the Collections panel — it lands as a new collection." }),
+          el("label", { class: "inline" }, [withSecrets, "Include credentials (passwords / tokens)"]),
+          el("div", { class: "toolbar" }, [
+            el("button", { class: "btn", text: "Export", onclick: doExport }),
+          ]),
+          shareStatus,
+        ]);
+      }
+
+      // ---- request pane -------------------------------------------------------
+      function renderRequestPane(r, view) {
+        const col = owningCollection(r);
+        const savedIn = r.reqId ? colById(r.colId) : null;
+        const saved = savedIn ? savedIn.requests.find((x) => x.id === r.reqId) : null;
 
         const status = el("div", { class: "status-line dim" });
+        showFlash(status);
+
+        const nameIn = el("input", { type: "text", class: "req-name", value: r.name, title: "Request name" });
+        nameIn.addEventListener("input", () => { r.name = nameIn.value; ctx.save(); });
+        nameIn.addEventListener("change", () => renderMain(view));
+
+        const where = saved
+          ? el("span", { class: "req-origin", text: "in " + savedIn.name, title: "Saving updates this request in place" })
+          : el("span", { class: "req-origin dim", text: "unsaved" });
+
+        mainBox.append(el("div", { class: "req-head" }, [nameIn, where]));
 
         const methodSel = el("select", {}, ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"].map((m) =>
           el("option", { value: m, text: m })));
@@ -1511,14 +1803,19 @@
         urlInput.addEventListener("input", () => { r.url = urlInput.value; ctx.save(); });
         urlInput.addEventListener("keydown", (e) => { if (e.key === "Enter") send(); });
         const sendBtn = el("button", { class: "btn primary", text: "Send", onclick: () => send() });
+
         mainBox.append(el("div", { class: "req-line" }, [
           methodSel, urlInput, sendBtn,
-          el("button", { class: "btn", text: "Save to collection", title: "Keep this request in the collection panel", onclick: saveToCollection }),
+          // wrap the handler: passing doSave directly would hand it the click
+          // event as `forceNew`, making Save always behave as Save-as
+          el("button", { class: "btn", text: saved ? "Save" : "Save…", title: saved ? "Update the saved request" : "Save into a collection", onclick: () => doSave(false) }),
+          saved ? el("button", { class: "btn", text: "Save as…", title: "Save as a new request", onclick: () => doSave(true) }) : null,
         ]));
 
-        // auth: falls back to the collection's when set to inherit
-        const colAuthLabel = (col.auth && col.auth.type && col.auth.type !== "none")
-          ? (AUTH_TYPES.find((x) => x.value === col.auth.type) || {}).label : "none set";
+        // auth: falls back to the owning collection's when set to inherit
+        const colAuthLabel = (col && col.auth && col.auth.type && col.auth.type !== "none")
+          ? (AUTH_TYPES.find((x) => x.value === col.auth.type) || {}).label + " from " + col.name
+          : "none set";
         const authDetails = el("details", { class: "section" }, [
           el("summary", { text: authSummary(r.auth, colAuthLabel) }),
           authEditor(r, ctx, { allowInherit: true, onChange: () => renderMain(view) }),
@@ -1553,19 +1850,20 @@
 
         async function send() {
           if (!r.url.trim()) return setStatus(status, "✗ Enter a URL", "err");
+          flash = null;
           sendBtn.disabled = true;
           setStatus(status, "Sending…", "dim");
           try {
             const headers = {};
-            const under = inCollection(r.url.trim());
-            if (under) {
-              for (const h of col.headers) if (h.k.trim()) headers[h.k.trim()] = h.v;
+            const owner = owningCollection(r);
+            const under = !!owner && (!owner.baseUrl || r.url.trim().toLowerCase().startsWith(owner.baseUrl.toLowerCase()));
+            if (owner && under) {
+              for (const h of owner.headers) if (h.k.trim()) headers[h.k.trim()] = h.v;
             }
             // request auth wins; "inherit" falls back to the collection's auth
-            // (only for requests under its base URL)
             const auth = (r.auth && r.auth.type && r.auth.type !== "inherit")
               ? r.auth
-              : (under ? col.auth : null);
+              : (owner && under ? owner.auth : null);
             const parts = authParts(auth);
             Object.assign(headers, parts.headers);
             // an explicit header always overrides the generated one
@@ -1578,8 +1876,8 @@
             d.history.unshift({ method: r.method, url: r.url.trim(), status: resp.status, durationMs: resp.durationMs, at: Date.now() });
             d.history.length = Math.min(d.history.length, 50);
             ctx.save();
+            renderSide();
             renderMain();
-            if (sideView === "history") renderSide();
           } catch (e) {
             setStatus(status, "✗ " + e.message, "err");
             sendBtn.disabled = false;
@@ -1587,19 +1885,121 @@
           }
         }
 
-        function saveToCollection() {
+        // Saving an already-saved request updates it in place; anything else
+        // asks where it should go, so nothing is filed somewhere by accident.
+        async function doSave(forceNew) {
           const url = r.url.trim();
           if (!url) return setStatus(status, "✗ Enter a URL first", "err");
-          const path = inCollection(url) ? url.slice(col.baseUrl.length) || "/" : url;
-          if (col.requests.some((q) => q.method === r.method && q.path === path)) {
-            return setStatus(status, "Already in the collection", "dim");
+
+          if (saved && !forceNew) {
+            Object.assign(saved, {
+              name: r.name === "New request" ? saved.name : r.name,
+              method: r.method,
+              path: pathWithin(savedIn, url),
+              headers: JSON.parse(JSON.stringify(r.headers)),
+              body: r.body,
+              auth: JSON.parse(JSON.stringify(r.auth)),
+            });
+            ctx.save();
+            setStatus(status, `✓ Updated in ${savedIn.name}`, "ok");
+            renderSide();
+            return;
           }
-          col.requests.push({ method: r.method, path, name: r.name === "New request" ? "" : r.name });
+
+          const choice = await saveRequestDialog({
+            name: r.name === "New request" ? (r.method + " " + shortPath(url)) : r.name,
+            colId: (savedIn && savedIn.id) || (col && col.id) || d.activeColId,
+          });
+          if (!choice) return;
+          let target = colById(choice.colId);
+          if (!target) {
+            target = newCollection(choice.newName || "New collection");
+            d.collections.push(target);
+          }
+          const rec = newSavedRequest({
+            name: choice.name, method: r.method, path: pathWithin(target, url),
+            headers: JSON.parse(JSON.stringify(r.headers)), body: r.body,
+            auth: JSON.parse(JSON.stringify(r.auth)),
+          });
+          target.requests.push(rec);
+          r.name = choice.name;
+          r.colId = target.id;
+          r.reqId = rec.id;
+          d.activeColId = target.id;
+          target.collapsed = false;
           ctx.save();
-          setStatus(status, "✓ Saved — see the Collection panel on the left", "ok");
-          sideView = "requests";
+          setFlash(`✓ Saved to ${target.name}`, "ok");
+          sideView = "collections";
           renderSide();
+          renderMain(view);
         }
+      }
+
+      // A saved request stores a path relative to its collection's base URL
+      // when it sits under it, so re-pointing the base URL moves every request.
+      function pathWithin(col, url) {
+        const base = trimBase(col && col.baseUrl);
+        if (base && url.toLowerCase().startsWith(base.toLowerCase())) return url.slice(base.length) || "/";
+        return url;
+      }
+
+      // ---- "save into which collection?" ---------------------------------
+      function saveRequestDialog({ name, colId }) {
+        return new Promise((resolve) => {
+          const overlay = el("div", { class: "app-dialog-overlay" });
+          const close = (val) => { overlay.remove(); document.removeEventListener("keydown", onKey); resolve(val); };
+          const onKey = (e) => {
+            e.stopPropagation();
+            if (e.key === "Escape") close(null);
+          };
+          document.addEventListener("keydown", onKey);
+
+          const nameIn = el("input", { class: "app-dialog-input", type: "text", value: name || "" });
+          const colSel = el("select", { class: "app-dialog-input" }, [
+            ...d.collections.map((c) => el("option", { value: c.id, text: c.name })),
+            el("option", { value: "__new__", text: "＋ New collection…" }),
+          ]);
+          colSel.value = colId && d.collections.some((c) => c.id === colId) ? colId : d.collections[0].id;
+
+          const newNameIn = el("input", { class: "app-dialog-input", type: "text", placeholder: "New collection name" });
+          const newNameRow = el("div", { class: "field", style: "display:none" }, [
+            el("span", { class: "pane-label", text: "New collection name" }), newNameIn,
+          ]);
+          colSel.addEventListener("change", () => {
+            const isNew = colSel.value === "__new__";
+            newNameRow.style.display = isNew ? "" : "none";
+            if (isNew) newNameIn.focus();
+          });
+
+          const submit = () => {
+            const n = nameIn.value.trim();
+            if (!n) return nameIn.focus();
+            if (colSel.value === "__new__") {
+              const cn = newNameIn.value.trim();
+              if (!cn) return newNameIn.focus();
+              return close({ name: n, colId: null, newName: cn });
+            }
+            close({ name: n, colId: colSel.value });
+          };
+
+          overlay.append(el("div", { class: "app-dialog" }, [
+            el("div", { class: "app-dialog-msg", text: "Save request" }),
+            el("div", { class: "field" }, [el("span", { class: "pane-label", text: "Name" }), nameIn]),
+            el("div", { class: "field" }, [el("span", { class: "pane-label", text: "Collection" }), colSel]),
+            newNameRow,
+            el("div", { class: "app-dialog-actions" }, [
+              el("button", { class: "btn", text: "Cancel", onclick: () => close(null) }),
+              el("button", { class: "btn primary", text: "Save", onclick: submit }),
+            ]),
+          ]));
+          overlay.addEventListener("click", (e) => { if (e.target === overlay) close(null); });
+          for (const inp of [nameIn, newNameIn]) {
+            inp.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); submit(); } });
+          }
+          document.body.append(overlay);
+          nameIn.focus();
+          nameIn.select();
+        });
       }
 
       function renderResponse(respArea, r, view) {

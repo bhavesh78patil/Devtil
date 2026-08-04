@@ -769,6 +769,63 @@ a.sftp-dir:hover, a.sftp-file:hover { color: var(--accent); text-decoration: und
 .form-grid .field { display: flex; flex-direction: column; gap: 4px; }
 .form-grid .field > span { font-size: 11px; color: var(--text-dim); }
 
+/* API client — collection tree */
+.api-tree-head { display: flex; gap: 6px; align-items: center; padding: 0 0 8px; }
+.api-tree-head .api-search { flex: 1; min-width: 0; font-size: 12.5px; padding: 5px 8px; }
+.api-tree-head .btn { padding: 4px 9px; font-size: 12px; white-space: nowrap; }
+.api-tree { display: flex; flex-direction: column; gap: 1px; }
+
+.api-col-row {
+  display: flex; align-items: center; gap: 5px;
+  padding: 5px 6px; cursor: pointer; border-radius: var(--radius-input, 6px);
+  font-size: 13px;
+}
+.api-col-row:hover { background: var(--bg3); }
+.api-col-row.active { background: var(--accent-soft); }
+.api-col-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.api-col-count { font-size: 11px; color: var(--text-dim); }
+/* Row actions stay out of the way until you hover — but the caret is an
+   affordance rather than an action, so it is always visible. */
+.api-col-row .icon-btn, .api-req-row .icon-btn { opacity: 0; padding: 0 3px; font-size: 12px; }
+.api-col-row:hover .icon-btn, .api-req-row:hover .icon-btn { opacity: 0.75; }
+.api-col-row .icon-btn:hover, .api-req-row .icon-btn:hover { opacity: 1; }
+.api-col-row .api-caret { opacity: 1; font-size: 11px; color: var(--text-dim); }
+
+.api-req-row {
+  display: flex; align-items: center; gap: 6px;
+  padding: 4px 6px 4px 22px; cursor: pointer;
+  border-radius: var(--radius-input, 6px); font-size: 12.5px;
+}
+.api-req-row:hover { background: var(--bg3); }
+.api-req-row.active { background: var(--accent-soft); }
+.api-req-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.api-req-path { font-family: var(--mono); font-size: 11px; color: var(--text-dim); }
+.api-req-empty { padding: 3px 6px 5px 22px; font-size: 11.5px; color: var(--text-dim); font-style: italic; }
+
+/* HTTP verbs read faster with a stable colour each */
+.api-method {
+  font-family: var(--mono); font-size: 10.5px; font-weight: 600;
+  min-width: 42px; text-align: right; flex-shrink: 0; color: var(--text-dim);
+}
+.api-method.mGET { color: var(--green); }
+.api-method.mPOST { color: var(--accent); }
+.api-method.mPUT, .api-method.mPATCH { color: var(--yellow); }
+.api-method.mDELETE { color: var(--red); }
+
+/* API client — request + collection panes */
+.req-head { display: flex; align-items: center; gap: 8px; }
+.req-head .req-name {
+  flex: 1; min-width: 0; font-size: 14px; font-weight: 500;
+  border: 1px solid transparent; background: transparent; color: var(--text);
+  padding: 3px 6px; border-radius: var(--radius-input, 6px);
+}
+.req-head .req-name:hover { border-color: var(--border); }
+.req-head .req-name:focus { border-color: var(--accent); background: var(--bg2); outline: none; }
+.req-origin { font-size: 11.5px; color: var(--text-dim); white-space: nowrap; }
+.col-head { display: flex; align-items: center; gap: 8px; }
+.col-head input { flex: 1; min-width: 0; }
+.col-req-list { display: flex; flex-direction: column; gap: 1px; }
+
 /* Settings panel */
 .settings-btn { width: 100%; justify-content: center; margin-bottom: 6px; }
 .settings-overlay {

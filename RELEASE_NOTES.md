@@ -19,11 +19,21 @@ single dependency-free binary (with an optional native desktop app).
 - **Notepad** — multiple autosaving pads as inner tabs
 
 **API client (Postman-style)**
-- Request tabs, headers, body, response viewer; **auth** (Basic / Bearer /
-  API key, per request or inherited from the collection); **Collection** with a base URL
-  and **global headers**; **History**; import endpoints from a
-  **Swagger/OpenAPI** URL. Requests are proxied through the backend so CORS is
-  never in the way.
+- **Multiple collections**, each with its own name, base URL, global headers
+  and auth — shown as a **searchable request tree**: type to filter every
+  collection at once by request name, path or method
+- **Collection tabs** — click a collection to open its own view (rename, base
+  URL, global headers, auth, Swagger import, export) alongside request tabs
+- **Rename** collections and requests inline from the tree; delete with
+  confirmation
+- Saved requests keep their **headers, body and auth**, so opening one,
+  editing it and pressing **Save** updates it in place — **Save as…** files a
+  copy into any collection, or a new one
+- **Swagger/OpenAPI import** lands in the collection you're in (and offers to
+  name it from the document title) instead of scattering endpoints
+- **Auth** (Basic / Bearer / API key) per request or inherited from the
+  collection; **History**; export a collection to JSON and import it back as a
+  new one. Requests are proxied through the backend so CORS is never in the way.
 
 **Infra clients**
 - **Kafka** (multi-cluster): topic dropdown, read latest / from-beginning /
