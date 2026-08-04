@@ -2,9 +2,11 @@
 "use strict";
 
 (() => {
-  const { el, uid, debounce, api, getTool, tools, confirmDialog, promptDialog } = Devtil;
+  const { el, uid, debounce, api, getTool, tools, confirmDialog, promptDialog, copyText } = Devtil;
 
   let state = null;
+  // sidebar tab filter — a view concern, deliberately not persisted
+  let tabQuery = "";
 
   // ---- autosave ----
 
@@ -97,7 +99,16 @@
     list.replaceChildren();
     for (const ws of state.workspaces) {
       const nameSpan = el("span", { class: "ws-name", text: ws.name, title: "Double-click to rename" });
-      const item = el("li", { class: ws.id === state.activeWorkspaceId ? "active" : "" }, [
+      const isActive = ws.id === state.activeWorkspaceId;
+      // collapse the tree to get the workspace list back to one line each
+      const caret = el("button", {
+        class: "icon-btn ws-caret",
+        text: ws.treeCollapsed ? "▸" : "▾",
+        title: ws.treeCollapsed ? "Show tabs" : "Hide tabs",
+        onclick: (e) => { e.stopPropagation(); ws.treeCollapsed = !ws.treeCollapsed; save(); renderSidebar(); },
+      });
+      const item = el("li", { class: isActive ? "active" : "" }, [
+        isActive && ws.tabs.length ? caret : null,
         nameSpan,
         el("button", {
           class: "icon-btn ws-del", text: "×", title: "Delete workspace",
@@ -144,15 +155,25 @@
       });
       // tab tree: every tab (open and closed) with its sub-tabs, under the
       // active workspace — open on click, rename, or delete permanently
-      if (ws.id === state.activeWorkspaceId && ws.tabs.length) item.append(buildTabTree(ws));
+      if (isActive && ws.tabs.length && !ws.treeCollapsed) item.append(buildTabTree(ws));
       list.append(item);
+    }
+    // a search with no hits anywhere is worth saying out loud
+    if (tabQuery && !list.querySelector(".tt-row")) {
+      list.append(el("li", { class: "tt-empty" }, [el("span", { text: `No tabs match “${tabQuery}”` })]));
     }
   }
 
   function buildTabTree(ws) {
     const tree = el("div", { class: "tab-tree" });
+    const q = tabQuery.toLowerCase();
     for (const tab of ws.tabs) {
       const tool = getTool(tab.type);
+      // when searching, keep a tab if it matches, or if any of its sub-tabs do
+      const subsAll = tool && tool.subTabs ? (tool.subTabs(tab.data || {}, tab) || []) : [];
+      const hitSubs = q ? subsAll.filter((s) => s.label.toLowerCase().includes(q)) : subsAll;
+      const tabHit = !q || tab.title.toLowerCase().includes(q) || tab.type.toLowerCase().includes(q);
+      if (q && !tabHit && !hitSubs.length) continue;
       const title = el("span", {
         class: "tt-title",
         text: (tool ? tool.icon + " " : "") + tab.title,
@@ -193,7 +214,9 @@
       title.addEventListener("dblclick", (e) => { e.stopPropagation(); startRename(); });
       tree.append(row);
 
-      const subs = tool && tool.subTabs ? (tool.subTabs(tab.data || {}, tab) || []) : [];
+      // while searching show only the matching sub-tabs (unless the tab name
+      // itself is the hit, in which case show all of them)
+      const subs = q && !tabHit ? hitSubs : subsAll;
       for (const s of subs) {
         const srow = el("div", { class: "tt-row tt-sub" }, [
           el("span", { class: "tt-title", text: s.label, title: "Click to open" }),
@@ -321,6 +344,22 @@
   overlay.addEventListener("click", (e) => { if (e.target === overlay) overlay.classList.add("hidden"); });
   document.getElementById("picker-close").addEventListener("click", () => overlay.classList.add("hidden"));
   document.getElementById("add-tab").addEventListener("click", openPicker);
+  // sidebar tab search: filters tabs and sub-tabs of the active workspace,
+  // and temporarily forces its tree open so hits are visible
+  const tabSearch = document.getElementById("tab-search");
+  tabSearch.addEventListener("input", () => {
+    tabQuery = tabSearch.value.trim();
+    if (tabQuery) {
+      const ws = activeWorkspace();
+      if (ws) ws.treeCollapsed = false;
+    }
+    renderSidebar();
+  });
+  tabSearch.addEventListener("keydown", (e) => {
+    e.stopPropagation(); // don't trigger the app-level shortcuts while typing
+    if (e.key === "Escape") { tabSearch.value = ""; tabQuery = ""; renderSidebar(); }
+  });
+
   document.getElementById("add-workspace").addEventListener("click", async () => {
     const name = await promptDialog("Workspace name:", "Workspace " + (state.workspaces.length + 1));
     if (name !== null) newWorkspace(name.trim() || undefined);
@@ -359,6 +398,324 @@
     applyTheme(state.theme);
     save();
   });
+
+  // ---- settings ----
+  //
+  // Devtil's MCP server runs inside this process and is exposed over the
+  // Streamable HTTP transport at /mcp, so an agent can use the toolbox while
+  // devtil is open without launching anything. It ships enabled; this panel
+  // is where you turn it off, or narrow what it exposes.
+
+  const AGENT_RULES = `## Devtil tools & knowledge
+
+Devtil is connected over MCP. It exposes this project's real infrastructure
+(Kafka, databases, Elasticsearch, Kubernetes, SSH) plus a shared knowledge
+bundle in Open Knowledge Format.
+
+### Look before you dig
+
+Before investigating anything about this system's infrastructure, data or
+operations — what a table holds, why a topic is shaped the way it is, how a
+service is deployed, what broke last time — call \`okf_search\` first. A
+previous session may already have written it down.
+
+Use \`okf_neighbors\` to pull in the context around a concept you found.
+
+### Write down what will still be true next month
+
+After you learn something durable, record it with \`okf_write\`:
+
+- what a table, topic, index or queue actually **means** — the semantics you
+  had to infer, not the schema you can already read
+- **why** something is the way it is: a partitioning choice, a retention
+  setting, a workaround and the constraint behind it
+- a **runbook**: symptom → how to confirm it → how to fix it
+- the **shape of a payload** you had to reverse-engineer from real messages
+
+Do not record transient state, anything obvious from the code, or credentials.
+
+Every concept needs a \`type\` — a short string like \`Database Table\`,
+\`Kafka Topic\`, \`Runbook\`, \`Service\` or \`Decision\` — plus a \`title\`
+and a one-line \`description\`.
+
+### Link it, or it is lost
+
+In the body, link related concepts with ordinary markdown links to their
+bundle paths, e.g. a link to /tables/customers.md. Those links are the graph.
+When you add a concept, also link to it from the closest existing one.
+
+### Target the right system
+
+The developer has several clusters and databases — dev, staging, production.
+They are different systems, not copies. Reading the wrong one wastes a minute;
+writing to the wrong one does not.
+
+Call \`devtil_connections\` before infrastructure work: it gives each
+connection's name, environment and which is the default. Then:
+
+- If the developer named a system, use it.
+- If they did not and more than one could fit, **ask them**. Do not guess.
+  Devtil refuses an ambiguous request anyway and tells you to ask.
+- Anything marked \`production\` must be named explicitly, and only after the
+  developer confirms they mean production. Devtil never selects it for you.
+- Every result carries a \`connection\` block saying which system was used and
+  how it was chosen. Read it, and name the system when you report back.
+
+Use the connection name — never ask for a password, and never write
+credentials into a concept.
+
+### Be careful with the writes
+
+\`kafka_produce\`, mutating \`db_query\`, \`kube_exec\` and \`ssh_exec\` act on
+real systems. Say what you are about to run, on which connection, and get
+agreement first.`;
+
+  function mcpSettings() {
+    if (!state.settings) state.settings = {};
+    if (!state.settings.mcp) state.settings.mcp = {};
+    const m = state.settings.mcp;
+    if (!m.groups) m.groups = {};
+    if (!m.tools) m.tools = {};
+    if (!m.connections) m.connections = {};
+    return m;
+  }
+
+  const mcpEnabled = () => mcpSettings().enabled !== false;
+  const mcpAllConns = () => mcpSettings().connectionsAll !== false;
+  const groupOn = (id) => mcpSettings().groups[id] !== false;
+  const toolOn = (groupId, name) => {
+    const m = mcpSettings();
+    return name in m.tools ? m.tools[name] : groupOn(groupId);
+  };
+
+  function settingsRow(label, help, control) {
+    return el("div", { class: "set-row" }, [
+      el("div", { class: "set-row-text" }, [
+        el("span", { class: "set-row-label", text: label }),
+        help ? el("span", { class: "set-row-help", text: help }) : null,
+      ]),
+      control,
+    ]);
+  }
+
+  function checkbox(checked, onchange) {
+    const input = el("input", { type: "checkbox" });
+    input.checked = checked;
+    input.addEventListener("change", () => onchange(input.checked));
+    return input;
+  }
+
+  function codeBlock(text) {
+    const pre = el("pre", { class: "set-code" });
+    pre.textContent = text;
+    return el("div", { class: "set-code-wrap" }, [
+      pre,
+      el("button", {
+        class: "btn set-copy", text: "Copy",
+        onclick: (e) => Devtil.copyText(text, e.currentTarget),
+      }),
+    ]);
+  }
+
+  async function openSettings() {
+    const overlay = el("div", { class: "settings-overlay" });
+    const body = el("div", { class: "settings-body" });
+    const close = () => { overlay.remove(); document.removeEventListener("keydown", onKey); };
+    const onKey = (e) => { if (e.key === "Escape") close(); };
+    document.addEventListener("keydown", onKey);
+
+    overlay.append(el("div", { class: "settings-panel" }, [
+      el("div", { class: "settings-head" }, [
+        el("h2", { text: "Settings" }),
+        el("button", { class: "icon-btn", text: "×", title: "Close (Esc)", onclick: close }),
+      ]),
+      body,
+    ]));
+    overlay.addEventListener("click", (e) => { if (e.target === overlay) close(); });
+    document.body.append(overlay);
+
+    body.append(el("div", { class: "set-loading", text: "Loading…" }));
+
+    let info = { groups: [], connections: [], bundle: "" };
+    try {
+      info = await api("GET", "/api/mcp/info");
+    } catch (e) {
+      body.replaceChildren(el("div", { class: "set-error", text: "Could not load MCP settings: " + e.message }));
+      return;
+    }
+
+    const render = () => {
+      const m = mcpSettings();
+      const endpoint = `${location.origin}/mcp`;
+      const configJson = JSON.stringify({
+        mcpServers: { devtil: { type: "http", url: endpoint } },
+      }, null, 2);
+
+      const sections = [];
+
+      // ---- MCP server -------------------------------------------------
+      sections.push(el("section", { class: "set-section" }, [
+        el("h3", { text: "MCP server" }),
+        el("p", { class: "set-lead", text: "Lets an AI agent use Devtil's tools while you work. It runs inside this app over the Streamable HTTP transport — nothing extra to start." }),
+        settingsRow(
+          "Enable the MCP server",
+          mcpEnabled() ? "Agents can connect right now." : "The endpoint refuses every request.",
+          checkbox(mcpEnabled(), (on) => { m.enabled = on; save(); render(); })
+        ),
+        el("div", { class: "set-sub" + (mcpEnabled() ? "" : " set-dim") }, [
+          el("span", { class: "pane-label", text: "Endpoint" }),
+          codeBlock(endpoint),
+          el("span", { class: "pane-label", text: "Add this to your agent's MCP config" }),
+          codeBlock(configJson),
+          el("p", { class: "set-note", text: "For a host that only speaks stdio, run: devtil mcp" }),
+        ]),
+      ]));
+
+      // ---- tools ------------------------------------------------------
+      const groupNodes = info.groups.map((g) => {
+        const enabled = groupOn(g.id);
+        const toolRows = g.tools.map((t) => el("label", { class: "set-tool" }, [
+          checkbox(toolOn(g.id, t.name), (on) => {
+            // an explicit tick that matches its group is just "follow the
+            // group" — drop the override so the group keeps controlling it
+            if (on === groupOn(g.id)) delete m.tools[t.name];
+            else m.tools[t.name] = on;
+            save();
+            render();
+          }),
+          el("code", { text: t.name }),
+          el("span", { class: "set-tool-title", text: t.title }),
+          t.readOnly ? el("span", { class: "set-badge", text: "read-only", title: "Only observes — safe for a host to auto-approve" }) : null,
+        ]));
+        return el("details", { class: "set-group" + (enabled ? "" : " set-dim") }, [
+          el("summary", {}, [
+            checkbox(enabled, (on) => {
+              m.groups[g.id] = on;
+              // toggling a group is a decision about all of it; clear the
+              // per-tool exceptions rather than leaving invisible ones behind
+              for (const t of g.tools) delete m.tools[t.name];
+              save();
+              render();
+            }),
+            el("span", { class: "set-group-label", text: g.label }),
+            el("span", { class: "set-group-count", text: `${g.tools.length} tool${g.tools.length === 1 ? "" : "s"}` }),
+          ]),
+          el("p", { class: "set-note", text: g.desc }),
+          el("div", { class: "set-tools" }, toolRows),
+        ]);
+      });
+      sections.push(el("section", { class: "set-section" }, [
+        el("h3", { text: "Tools exposed to agents" }),
+        el("p", { class: "set-lead", text: "Untick a group to hide it entirely, or expand one to control single tools. Anything hidden is also refused if an agent asks for it from a cached list." }),
+        ...groupNodes,
+      ]));
+
+      // ---- connections ------------------------------------------------
+      // Picking the wrong cluster is the expensive mistake, so this section
+      // is about targeting as much as it is about access: which systems an
+      // agent may reach, which one it gets when it doesn't say, and which are
+      // production and must always be named explicitly.
+      if (!m.defaults) m.defaults = {};
+      if (!m.env) m.env = {};
+
+      const connNodes = [];
+      if (!info.connections.length) {
+        connNodes.push(el("p", { class: "set-note", text: "No saved connections yet. Add them in the Kafka, database or Elastic tools and they will appear here." }));
+      } else {
+        const byTool = new Map();
+        for (const c of info.connections) {
+          if (!byTool.has(c.tool)) byTool.set(c.tool, []);
+          byTool.get(c.tool).push(c);
+        }
+        for (const [tool, list] of byTool) {
+          connNodes.push(el("div", { class: "set-conn-group", text: list[0].toolLabel }));
+          for (const c of list) {
+            const shared = mcpAllConns() || !!m.connections[c.key];
+            const isDefault = (m.defaults[tool] || "") === c.name;
+
+            const envSel = el("select", { class: "set-env", title: "How agents should treat this system" }, [
+              el("option", { value: "", text: "unlabelled" }),
+              el("option", { value: "development", text: "development" }),
+              el("option", { value: "staging", text: "staging" }),
+              el("option", { value: "production", text: "production" }),
+            ]);
+            envSel.value = m.env[c.key] || "";
+            envSel.addEventListener("change", () => {
+              if (envSel.value) m.env[c.key] = envSel.value;
+              else delete m.env[c.key];
+              // production is never handed out automatically, so it cannot
+              // also be the default — drop the pairing rather than keep a
+              // setting that silently does nothing
+              if (envSel.value === "production" && (m.defaults[tool] || "") === c.name) delete m.defaults[tool];
+              save();
+              render();
+            });
+
+            const isProd = (m.env[c.key] || "") === "production";
+            const defBtn = el("button", {
+              class: "btn set-default" + (isDefault ? " active" : ""),
+              text: isDefault ? "★ default" : "make default",
+              title: isProd
+                ? "A production connection is never selected automatically — an agent must name it"
+                : "Agents get this one when they don't name a connection",
+              onclick: () => {
+                if (isProd) return;
+                if (isDefault) delete m.defaults[tool];
+                else m.defaults[tool] = c.name;
+                save();
+                render();
+              },
+            });
+            if (isProd) defBtn.disabled = true;
+
+            connNodes.push(el("div", { class: "set-conn" + (shared ? "" : " set-dim") }, [
+              mcpAllConns()
+                ? el("span", { class: "set-conn-spacer" })
+                : checkbox(!!m.connections[c.key], (on) => { m.connections[c.key] = on; save(); render(); }),
+              el("span", { class: "set-conn-name", text: c.name }),
+              el("span", { class: "set-note set-conn-sum", text: c.summary }),
+              envSel,
+              defBtn,
+            ]));
+          }
+        }
+        // Say plainly what happens for each tool that has no default set.
+        const undecided = [...byTool.entries()]
+          .filter(([tool, list]) => list.length > 1 && !(m.defaults[tool] || ""))
+          .map(([, list]) => list[0].toolLabel);
+        if (undecided.length) {
+          connNodes.push(el("p", { class: "set-note", text:
+            `No default set for: ${undecided.join(", ")}. An agent that doesn't name a connection will be refused and told to ask you — which is usually what you want.` }));
+        }
+      }
+
+      sections.push(el("section", { class: "set-section" }, [
+        el("h3", { text: "Connections agents can use" }),
+        el("p", { class: "set-lead", text: "An agent names a connection and Devtil supplies the credentials itself — they are never returned to the model. A connection you don't share is invisible: the agent can't even learn it exists." }),
+        settingsRow(
+          "Share every saved connection",
+          mcpAllConns() ? "Including any you add later." : "Only the ones ticked below.",
+          checkbox(mcpAllConns(), (on) => { m.connectionsAll = on; save(); render(); })
+        ),
+        el("p", { class: "set-lead", text: "Label each system so an agent targets the right one. Devtil never picks between several clusters on its own — with no default it refuses and makes the agent ask you, and a production system is never selected automatically at all." }),
+        ...connNodes,
+      ]));
+
+      // ---- agent rules ------------------------------------------------
+      sections.push(el("section", { class: "set-section" }, [
+        el("h3", { text: "Make agents actually use it" }),
+        el("p", { class: "set-lead", text: "Connecting Devtil gives an agent the ability to use the knowledge bundle, not the habit. Paste these rules into the file your agent reads as standing instructions — CLAUDE.md, AGENTS.md, .cursor/rules — and it will search before investigating and write down what it learns." }),
+        codeBlock(AGENT_RULES),
+        el("p", { class: "set-note", text: "Knowledge bundle: " + (info.bundle || "—") }),
+      ]));
+
+      body.replaceChildren(...sections);
+    };
+
+    render();
+  }
+
+  document.getElementById("open-settings").addEventListener("click", openSettings);
 
   // ---- report UI errors into the backend log (best effort) ----
 

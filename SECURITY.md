@@ -37,6 +37,64 @@ or delete the connection/session, which removes it from state. A future
 option to keep credentials out of the state file (prompt-per-use, or OS
 keychain integration) is tracked as an enhancement.
 
+## Giving an AI agent access (MCP)
+
+Devtil's MCP server is **enabled by default** and served from the running app
+at `http://127.0.0.1:<port>/mcp` (Streamable HTTP). `devtil mcp` serves the
+same tools over stdio for hosts that need it. Either way this is a real grant
+of capability, not a read-only integration — be deliberate about it.
+
+What the agent **can** do: everything the tools do. Run SQL, produce to a
+Kafka topic, `kubectl exec` into a pod, run a command over SSH, send an HTTP
+request from your machine to any host you can reach.
+
+What the agent **cannot** do: read your credentials. When it references a
+saved connection by name, devtil looks the credentials up from your local
+state file, uses them, and returns only the result. Passwords, tokens and
+SASL secrets are never included in a tool's response, and `devtil_connections`
+lists names and hosts only. An agent that passes connection fields *inline*
+is, of course, using whatever it was given.
+
+Devtil marks tools that only observe with MCP's `readOnlyHint` so a host can
+auto-approve them. `kafka_produce`, `db_query`, `cassandra_query`,
+`kube_exec`, `ssh_exec`, `http_request` and the `okf_*` writers are **not**
+marked read-only — keep the approval prompt on for those, and point the agent
+at non-production connections while you are getting a feel for it.
+
+**What you control.** Settings → MCP server switches the whole server off,
+hides individual tool groups or single tools, and restricts which saved
+connections agents may name. A hidden tool is refused even if an agent asks
+for it from a cached list, and an unshared connection is invisible rather
+than merely unusable. Changes apply to the agent's next call.
+
+**Which system gets touched.** Devtil does not let an agent pick between your
+clusters. If it doesn't name one, devtil uses the default you set, or the only
+candidate — and otherwise refuses, listing the options and telling the agent
+to ask you. Label a connection **production** and it is never selected
+automatically, even as the sole candidate: an agent must name it explicitly,
+which means a human decided. Every tool result records which connection was
+used and how it was chosen, so a transcript shows what was actually touched.
+
+**How the HTTP endpoint is protected.** It rides on the same
+localhost-only listener as the rest of Devtil, so it is not reachable from
+your network. It also validates the `Origin` header and rejects anything that
+did not come from this machine — that is the DNS-rebinding protection the MCP
+spec requires, and it stops a page on the internet from driving your tools
+through your browser.
+
+**What it does not have** is authentication: any process already running as
+you on your machine can call it, exactly as it could already call
+`/api/ssh/exec` or read `state.json`. That is the same trust boundary the rest
+of Devtil has always had. If you don't want that surface at all, switch the
+server off in Settings — the stdio transport (`devtil mcp`) opens no port and
+talks only to the process that launched it.
+
+**Knowledge bundles.** `okf_*` tools read and write markdown under the bundle
+directory only; concept paths are normalised and clamped to the bundle root,
+so a path containing `../` cannot write elsewhere on disk. Treat the bundle as
+agent-authored content: review it before committing it, the same as any other
+generated file.
+
 ## Logs
 
 Devtil writes a diagnostic log (`<data dir>/devtil.log`, viewable in the **App

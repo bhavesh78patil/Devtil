@@ -80,11 +80,11 @@ built on macOS/Windows.
 | **Base64** | Encode/decode, unicode-safe, URL-safe variant, live conversion |
 | **URL Tools** | Encode/decode components or full URIs, plus a URL/query-param breakdown table |
 | **JWT Decoder** | Decode header & payload, human-readable `exp`/`iat`/`nbf`, expiry check |
-| **API Client** | Postman-like layout: a **side panel** split into **Requests** (saved requests + Swagger import), **Setup** (base URL, global headers, auth) and **History**, and **inner request tabs** in the main area. Clicking a saved or historical request opens it in its own tab (re-clicking focuses the existing tab), each with its own method, headers, body and response — status/time/size, pretty-printed JSON, response-headers view. Requests are proxied through the Go backend so CORS never gets in the way, with an opt-in "skip TLS verification" for dev servers. The collection holds a base URL, endpoints imported from a Swagger/OpenAPI JSON URL (pick individual endpoints or select all) or saved via "Save to collection", and **global headers** automatically sent with every request under the base URL (request-level headers override on conflict). **Auth** is built in — **Basic** (username + password, base64-encoded per RFC 7617, UTF-8 safe), **Bearer** token, or an **API key** sent as a header or query param — set per request, or once on the collection and inherited by every request under its base URL. Each editor shows the exact header it will send, so the generated credential is verifiable. The collection can be **exported to a JSON file and imported** by someone else — **auth credentials are left out by default** (tick a box to include them), and an import **merges** into the existing collection without overwriting anything already set or duplicating requests |
+| **API Client** | Postman-like: **multiple collections**, each with its own name, base URL, global headers and auth, shown as a **searchable request tree** in the side panel — type to filter across every collection by request name, path or method. Click a collection to open its own **collection tab** (rename, base URL, global headers, auth, Swagger import, export); click a request to open it in a **request tab**. Saved requests are complete requests — method, path, headers, body and auth — so opening one, editing it and pressing **Save** updates it in place, while **Save as…** files a copy anywhere (a small dialog picks the collection, or creates a new one). **Rename** collections and requests inline from the tree (✎), delete with confirmation. **Swagger/OpenAPI import** targets the collection you're in and offers to name it from the document title, picking up the base URL and skipping endpoints already present. **Auth** is built in — **Basic** (RFC 7617, UTF-8 safe), **Bearer** or an **API key** as header or query param — set per request or once on the collection and inherited by every request under its base URL; each editor shows the exact header it will send. Requests are proxied through the Go backend so CORS never gets in the way, with an opt-in "skip TLS verification" for dev servers. Collections **export to JSON and import back as a new collection** — credentials are left out by default (tick a box to include them). Plus **History** of everything sent, click to reopen. |
 | **Kube Console** | Connect to the kubemaster **over SSH with a username/password** (built-in SSH client — no keys or ssh binary needed), pick a context and namespace, and find pods for a service by name/label. Then **click any container to open a terminal panel** — a MobaXterm-like grid where each panel can **tail logs live** (follow), **run any command** in that container (`kubectl exec`), **search a whole folder** (`grep -rIn` / `ls`), and be **minimized, maximized or closed** independently. Panels, their output and commands autosave and persist |
 | **SSH / PuTTY** | **Fully interactive SSH terminals** — real PTYs streamed over a WebSocket into embedded [xterm.js](https://xtermjs.org/), so `vim`, `top`, `htop`, tab-completion and colours all work. **Saved hosts** are remembered — pick one from the dropdown to prefill the form (or "New host"), with a Forget option. Open **multiple sessions** (password auth) as panels in one tab; type once in the **broadcast bar** to send the same input to every session with 📡 enabled (MobaXterm-style multi-exec). **Copy** (⧉ button, `Ctrl+Shift+C`, or auto-copy on select) and **paste** (📋, `Ctrl+Shift+V`) work while plain `Ctrl+C` stays as SIGINT. Each panel minimizes, maximizes, reconnects (⟳) and closes independently; sessions survive tab switches and reconnect on reload |
 | **SFTP / Files** | WinSCP-style remote file browser over SFTP (password auth): list directories, navigate in/out (folders first), and **download files to your machine** with one click. Paths and the current listing persist |
-| **Kafka** | Connect to **multiple clusters** (plain, SASL/PLAIN, TLS) with a **configurable timeout (ms, default 1000)** per cluster: **List topics** populates a **topic dropdown** (type-or-pick), read messages from **latest, the beginning, or a time range** (start + optional end), **search by key and/or value** (case-insensitive substring, scans a wider window and reports matched/scanned counts), and produce messages. Results **stream in as they are read** — messages appear while partitions are still being scanned, with a spinner, a running match count and a live elapsed timer, and the final line reports matched/scanned and the total time. Consumed messages are shown **newest-first** with each value **JSON pretty-printed**, collapsible, and openable **full-screen** (⤢ Maximize) with **Value / Headers tabs**. Produce has **Message / Headers tabs** so you can attach record headers. Pure-Go client, no local Kafka tooling needed |
+| **Kafka** | Connect to **multiple clusters** (plain, SASL/PLAIN, TLS) with a **configurable timeout (ms, default 1000)** per cluster: the console splits into **Consume** and **Produce** modes so each gets the full pane (the topic is shared between them). **List topics** populates a **topic dropdown** (type-or-pick), read messages from **latest, the beginning, or a time range** (start + optional end), **search by key and/or value** (case-insensitive substring, scans a wider window and reports matched/scanned counts), and produce messages. Results **stream in as they are read** — messages appear while partitions are still being scanned, with a spinner, a running match count and a live elapsed timer, and the final line reports matched/scanned and the total time. Consumed messages are shown **newest-first** with each value **JSON pretty-printed**, collapsible, and openable **full-screen** (⤢ Maximize) with **Value / Headers tabs**. Produce has **Message / Headers tabs** so you can attach record headers, waits for a leader acknowledgement, and checks the topic exists first so a wrong name reports itself instead of timing out. Pure-Go client, no local Kafka tooling needed |
 | **Elastic / OpenSearch** | Per-cluster connections with basic auth: one-click cluster health / indices / nodes, plus a free-form REST console for `_search` and any other endpoint, with pretty-printed responses. A **visual query builder** lists the cluster's indices, loads the selected index's mapping, and lets you add **per-field conditions** whose clause is chosen automatically from the field's schema type — `term`/`terms`/`prefix`/`wildcard` for keyword, `match`/`match_phrase` for text, `range` (`>`, `≥`, between) for numbers and dates, `true`/`false` for boolean, `exists` for anything — combine **multiple fields** with ALL (bool.must) or ANY (bool.should), and **nested** fields are auto-wrapped in a `nested` query on their path. The `_search` body is generated live as you edit, with a `_source` projection picker for the returned columns. Hits render as a **table** (with a Raw JSON toggle), and the toolbar has **CSV / Excel export** plus **Copy response** — which copies the full pretty-printed JSON for any endpoint, not just searches |
 | **Cassandra** | CQL console against multiple connections (contact points, keyspace, auth) with a results grid, row limits, and Ctrl+Enter to run. The **query helper** lists tables from `system_schema`, shows the chosen table's **columns as checkboxes**, and generates the `SELECT … LIMIT …` for you |
 | **Relational Databases** | SQL console for **Oracle, MySQL/MariaDB and PostgreSQL** — pure-Go drivers, **no DB client install required**. Pick the engine per connection; connect with separate host/port/database fields **or paste a single URL** (`jdbc:oracle:thin:@host:1521/service`, `mysql://user:pass@host:3306/db`, `postgres://user:pass@host:5432/db`, `jdbc:` variants, or a native driver DSN). A **schema** field (Oracle owner / PostgreSQL schema / MySQL database) sets *where* to query — it drives the query helper and is applied to the session (`search_path` / `CURRENT_SCHEMA`). Each tab shows its **target engine + schema**. Results grid, DML support (rows-affected), and a schema-aware **query helper**: list tables, choose columns, and the `SELECT …` (`LIMIT` / `FETCH FIRST n ROWS ONLY`) is generated |
@@ -94,6 +94,146 @@ built on macOS/Windows.
 | **Timestamps** | Auto-detects epoch seconds/millis/date strings; converts to ISO, local, relative |
 | **Regex Tester** | Live match highlighting, capture groups, match list |
 | **Text Diff** | Line-by-line LCS diff with added/removed counts |
+| **Knowledge Graph** | Browse and edit an **Open Knowledge Format** bundle — markdown concepts with YAML frontmatter, linked into a graph. Concepts are grouped by type in a searchable, filterable list; the **graph view** lays them out force-directed with type-coloured nodes, arrows for links, and dashed red placeholders for links that point at concepts which don't exist yet. Open any concept to edit its type, title, description, tags, status and markdown body, and to see what it **links to and is linked from**. This is the same bundle `devtil mcp` gives AI agents, so what an agent records while it works shows up here |
+
+## MCP — give the toolbox to an AI agent
+
+Devtil speaks the [Model Context Protocol](https://modelcontextprotocol.io),
+so any agent host can use every tool above while you work.
+
+**It is on by default.** While Devtil is running, the MCP server is served
+from the app itself over the **Streamable HTTP** transport — nothing extra to
+start, no second process:
+
+```json
+{
+  "mcpServers": {
+    "devtil": { "type": "http", "url": "http://127.0.0.1:8347/mcp" }
+  }
+}
+```
+
+**Settings → MCP server** (the ⚙ button in the sidebar) shows the exact URL
+for your port with a copy button, and is where you turn the server off or
+narrow what it exposes. For a host that only speaks stdio, run `devtil mcp`
+instead.
+
+**34 tools**, in three groups:
+
+- **Offline utilities** — `json_format`, `jsonpath_query`, `xml_to_json`,
+  `json_to_xml`, `base64`, `url_encode`, `jwt_decode`, `hash_text`,
+  `uuid_generate`, `timestamp_convert`, `regex_test`. No network, no
+  credentials, no side effects.
+- **Infrastructure** — `http_request`, `kafka_topics`, `kafka_consume`,
+  `kafka_produce`, `db_query` (Oracle/MySQL/PostgreSQL), `cassandra_query`,
+  `elastic_request`, `kube_contexts`, `kube_namespaces`, `kube_pods`,
+  `kube_logs`, `kube_exec`, `ssh_exec`, `sftp_list`.
+- **Knowledge** — `okf_search`, `okf_read`, `okf_write`, `okf_delete`,
+  `okf_graph`, `okf_neighbors`, `okf_log`, `okf_validate`.
+
+**Connections without handing over credentials.** Infrastructure tools accept
+either inline connection fields or a `connection` name that resolves against
+the connections you already saved in the Devtil UI. The agent names the
+cluster; devtil reads the credentials from your local state file and never
+returns them. `devtil_connections` lists what's available.
+
+**Devtil never guesses which cluster you meant.** You typically have dev,
+staging and prod side by side — different systems, not copies. So when an
+agent doesn't say which one it wants:
+
+- it gets the **default** you picked for that tool, if you set one;
+- or the single connection, if there's only one;
+- otherwise the call is **refused**, with the candidates listed and an
+  instruction to ask you. The agent comes back to you rather than picking.
+
+A connection you label **production** is never selected automatically, even
+when it's the only one — an agent has to name it explicitly, which means a
+human decided. Environments and the default are set per connection in
+Settings, and **every result says which connection it used and how it was
+chosen**, so you can see what the agent actually touched.
+
+Tools that only observe are annotated `readOnlyHint`, so a host can
+auto-approve them while still prompting for `kafka_produce`, `db_query`,
+`kube_exec` and `ssh_exec`. A tool that fails reports the message in its
+result rather than as a protocol error, so the model can read it and adjust.
+
+### Controlling what agents can reach
+
+Settings → MCP server gives you three levels of control, and every change
+takes effect on the agent's next call — nothing to restart:
+
+- **The master switch.** Off means the endpoint refuses every request.
+- **Tool groups.** Untick *SSH & SFTP* and those tools vanish from
+  `tools/list`; expand a group to switch off a single tool (letting an agent
+  read Kafka but never produce is a one-click change). Anything hidden is
+  also **refused if an agent asks for it anyway** from a cached list.
+- **Connections.** Share every saved connection, or pick them individually.
+  A connection you don't share is *invisible* — an agent can't even learn it
+  exists, let alone use it. Label each one `development` / `staging` /
+  `production`, and mark one per tool as the default an agent gets when it
+  doesn't name a system.
+
+### Making agents actually use it
+
+Connecting Devtil gives an agent the **ability** to use the knowledge bundle,
+not the **habit**. See [AGENT_RULES.md](AGENT_RULES.md) for a drop-in block to
+paste into `CLAUDE.md`, `AGENTS.md`, `.cursor/rules` or your host's equivalent
+— it tells the agent to search the bundle before investigating and to write
+down what it learns. The same text is in Settings with a copy button.
+
+```
+devtil mcp [-data <dir>] [-okf <dir>]     # stdio transport
+  -data   data directory, used to resolve saved connections
+          (default: <user config dir>/devtil)
+  -okf    knowledge bundle directory (default: <data dir>/knowledge)
+```
+
+## Knowledge bundles (OKF)
+
+[Open Knowledge Format](https://github.com/GoogleCloudPlatform/knowledge-catalog/tree/main/okf)
+is Google Cloud's vendor-neutral spec for representing knowledge as plain
+markdown files with YAML frontmatter. Devtil implements **OKF v0.2**.
+
+A bundle is just a directory:
+
+```
+knowledge/
+  index.md                  optional root listing (declares okf_version)
+  log.md                    optional chronological history
+  tables/orders.md          one file per concept
+  runbooks/checkout.md
+```
+
+Each concept is markdown with a frontmatter block. The **only required field
+is `type`**; everything else is the producer's choice:
+
+```markdown
+---
+type: Database Table
+title: Orders
+description: One row per completed customer order.
+tags: [sales, revenue]
+generated:
+  by: devtil/mcp
+  at: 2026-08-01T09:14:00Z
+---
+# Schema
+
+| Column | Type | Description |
+|---|---|---|
+| `order_id` | STRING | Globally unique order identifier. |
+| `customer_id` | STRING | FK to [customers](/tables/customers.md). |
+```
+
+The file path is the concept's identity, and **ordinary markdown links are
+the graph** — no database, no query language, no SDK. Because it is just
+markdown, a bundle renders on GitHub, diffs in a PR, and can be committed
+alongside the code it describes.
+
+Why it's here: an agent that figures out what a table means, why a topic is
+partitioned the way it is, or how to recover a stuck consumer group can write
+that down once instead of rediscovering it every session — and you can read,
+correct and commit what it wrote.
 
 ## Navigation
 
@@ -220,7 +360,10 @@ Actions tab, where artifacts are downloadable from the run page.
 │  – spawns the Go backend   │      │  – /api/state  autosave store  │
 └────────────────────────────┘      │  – /api/proxy  HTTP client     │
         or just a browser ─────────▶│  – /api/kube/* kubectl wrapper │
-                                    └────────────────────────────────┘
+                                    │  – /api/okf/*  knowledge bundle│
+┌────────────────────────────┐      │                                │
+│ AI agent (any MCP host)    │─────▶│  – `devtil mcp` on stdio       │
+└────────────────────────────┘      └────────────────────────────────┘
 ```
 
 - **Backend** (`main.go`, `internal/`): net/http only, binds to
@@ -228,6 +371,13 @@ Actions tab, where artifacts are downloadable from the run page.
   never exposed to the network.
 - **Frontend** (`web/`): dependency-free vanilla JS/CSS embedded with
   `go:embed`; each tool is a small module registered in `web/js/tools.js`.
+- **MCP server** (`internal/mcp/`): JSON-RPC 2.0 over stdio, calling the same
+  `internal/` packages the HTTP API does — so an agent and the UI cannot
+  drift apart. `internal/jsonpath/` is a Go port of the browser engine, kept
+  expression-for-expression identical.
+- **Knowledge bundle** (`internal/okf/`): reads and writes OKF v0.2 markdown
+  bundles. Concept paths are clamped to the bundle root, so no `../` in a
+  path an agent supplies can write outside it.
 - **Kube integration** shells out to `kubectl`, so it honours existing
   kubeconfigs, contexts and auth plugins. Two ways to reach a cluster that
   your machine can't talk to directly:
