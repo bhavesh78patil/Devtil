@@ -594,6 +594,24 @@ details.section[open] summary { margin-bottom: 8px; }
   padding-right: 2px;
 }
 .console-controls textarea { max-height: 22vh; }
+
+/* Producing is a full-pane workflow — the results area is hidden in that
+   mode, so the editor gets the room instead of being clamped to 55%. */
+.produce-pane { max-height: none; flex: 1 1 auto; min-height: 0; }
+.produce-pane .produce-box { flex: 1; display: flex; flex-direction: column; min-height: 0; gap: 6px; }
+.produce-pane .prod-value {
+  flex: 1; width: 100%; min-height: 240px; max-height: none;
+  font-family: var(--mono); font-size: 12.5px; line-height: 1.5;
+  resize: vertical;
+}
+.prod-info { font-size: 11.5px; color: var(--text-dim); margin-left: auto; }
+.prod-info.bad { color: var(--red); }
+
+/* The Elastic console's request block can be folded away so a response gets
+   the whole pane — reading a result is what you are usually there for. */
+.es-req { display: flex; flex-direction: column; gap: 10px; }
+.es-req.collapsed { display: none; }
+.req-toggle { padding: 2px 8px; font-size: 12px; }
 /* the result area gets everything else */
 .api-main > .tool > .tool:last-child,
 .api-main > .tool > div:last-child { min-height: 200px; }

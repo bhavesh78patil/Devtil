@@ -28,7 +28,7 @@ var Groups = []Group{
 		Tools: []string{
 			"json_format", "jsonpath_query", "xml_to_json", "json_to_xml",
 			"base64", "url_encode", "jwt_decode", "hash_text",
-			"uuid_generate", "timestamp_convert", "regex_test",
+			"uuid_generate", "timestamp_convert", "regex_test", "text_diff",
 		},
 	},
 	{
@@ -64,7 +64,12 @@ var Groups = []Group{
 	{
 		ID: "ssh", Label: "SSH & SFTP",
 		Desc:  "Runs commands on a remote host and lists remote directories.",
-		Tools: []string{"ssh_exec", "sftp_list"},
+		Tools: []string{"ssh_exec", "sftp_list", "sftp_read"},
+	},
+	{
+		ID: "workspace", Label: "The developer's workspace",
+		Desc:  "The saved API requests, scratch pads and Devtil's own log. Sending a saved request performs a real HTTP call.",
+		Tools: []string{"api_collections", "api_request", "notepad_list", "notepad_read", "devtil_logs"},
 	},
 	{
 		ID: "knowledge", Label: "Knowledge bundle (OKF)",
@@ -225,7 +230,9 @@ func (s *Server) GroupsForUI() []map[string]any {
 // an environment label and a per-tool default.
 func (s *Server) ConnectionsForUI() []map[string]any {
 	idx := loadConnections(s.store)
-	var out []map[string]any
+	// never nil: a fresh install has no connections, and the Settings panel
+	// reads .length off whatever this marshals to
+	out := []map[string]any{}
 	for toolType, list := range idx.byTool {
 		for _, c := range list {
 			out = append(out, map[string]any{

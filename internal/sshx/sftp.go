@@ -112,3 +112,22 @@ func SFTPOpen(conn Conn, p string) (rc io.ReadCloser, name string, size int64, e
 	}
 	return &multiCloser{Reader: f, closers: []io.Closer{f, fs, client}}, path.Base(p), size, nil
 }
+
+// SFTPReadText reads a remote file as text, stopping at max bytes. It reports
+// the size it read and whether more was left, so a caller never mistakes a
+// truncated file for the whole thing.
+func SFTPReadText(conn Conn, p string, max int) (text string, size int, truncated bool, err error) {
+	rc, _, _, err := SFTPOpen(conn, p)
+	if err != nil {
+		return "", 0, false, err
+	}
+	defer rc.Close()
+	buf, err := io.ReadAll(io.LimitReader(rc, int64(max)+1))
+	if err != nil {
+		return "", 0, false, err
+	}
+	if len(buf) > max {
+		return string(buf[:max]), max, true, nil
+	}
+	return string(buf), len(buf), false, nil
+}

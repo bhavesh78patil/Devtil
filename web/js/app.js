@@ -485,11 +485,27 @@ connection's name, environment and which is the default. Then:
 Use the connection name — never ask for a password, and never write
 credentials into a concept.
 
+### Use what the developer already has
+
+Their workspace is open beside you, and you can read it:
+
+- \`api_collections\` / \`api_request\` — they have already saved the requests
+  for this system, with the right base URL, headers and auth. Find one by name
+  and send it rather than rebuilding the call; the credentials are applied on
+  the way out and never reach you.
+- \`notepad_list\` / \`notepad_read\` — "the notes I made about X" live here.
+  Read-only: anything you want to keep goes to \`okf_write\`.
+- \`devtil_logs\` — Devtil's own log, with every kubectl and ssh command it ran
+  and every request it proxied. Read it when one of your calls failed and the
+  error was not enough, before asking the developer.
+- \`sftp_read\` — read a config or log file straight off a remote host.
+
 ### Be careful with the writes
 
 \`kafka_produce\`, mutating \`db_query\`, \`kube_exec\` and \`ssh_exec\` act on
 real systems. Say what you are about to run, on which connection, and get
-agreement first.`;
+agreement first. \`api_request\` sends a real request too — a saved DELETE is
+still a delete.`;
 
   function mcpSettings() {
     if (!state.settings) state.settings = {};
@@ -640,7 +656,8 @@ agreement first.`;
       if (!m.env) m.env = {};
 
       const connNodes = [];
-      if (!info.connections.length) {
+      // an older backend sends null rather than [] when nothing is saved
+      if (!info.connections || !info.connections.length) {
         connNodes.push(el("p", { class: "set-note", text: "No saved connections yet. Add them in the Kafka, database or Elastic tools and they will appear here." }));
       } else {
         const byTool = new Map();

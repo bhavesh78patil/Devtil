@@ -3868,9 +3868,47 @@
     const prodKey = el("input", { type: "text", placeholder: "key (optional)", style: "width:160px" });
     prodKey.value = c.prodKey || "";
     prodKey.addEventListener("input", () => { c.prodKey = prodKey.value; ctx.save(); });
-    const prodValue = el("input", { type: "text", placeholder: "message value", style: "flex:1;min-width:200px" });
+    // Payloads are JSON far more often than not, and a single-line input made
+    // one unreadable the moment it was pasted. This is a real editor: it
+    // pretty-prints a pasted payload, and says how big it is and whether it
+    // parses so you find out before the broker does.
+    const prodValue = el("textarea", {
+      class: "prod-value", spellcheck: "false",
+      placeholder: "message value — paste JSON and it is formatted for you",
+    });
     prodValue.value = c.prodValue || "";
-    prodValue.addEventListener("input", () => { c.prodValue = prodValue.value; ctx.save(); });
+    const valueInfo = el("span", { class: "prod-info" });
+    const describeValue = () => {
+      const raw = prodValue.value;
+      if (!raw.trim()) return (valueInfo.textContent = "");
+      let shape = "text";
+      try { JSON.parse(raw); shape = "valid JSON"; }
+      catch { shape = looksJson(raw) ? "JSON — but it does not parse" : "text"; }
+      valueInfo.textContent = `${fmtBytes(new Blob([raw]).size)} · ${shape}`;
+      valueInfo.className = "prod-info" + (shape.includes("not parse") ? " bad" : "");
+    };
+    const setValue = (v) => { prodValue.value = v; c.prodValue = v; ctx.save(); describeValue(); };
+    /** Pretty-print the value when it is JSON; leave anything else alone. */
+    const formatValue = (quiet) => {
+      const raw = prodValue.value.trim();
+      if (!raw) return;
+      try {
+        const pretty = JSON.stringify(JSON.parse(raw), null, 2);
+        if (pretty !== prodValue.value) setValue(pretty);
+        if (!quiet) say(status2, "lastStatus2", "✓ Formatted", "ok");
+      } catch (e) {
+        if (!quiet) say(status2, "lastStatus2", "Not JSON, left as-is — " + e.message, "dim");
+      }
+    };
+    const minifyValue = () => {
+      const raw = prodValue.value.trim();
+      if (!raw) return;
+      try { setValue(JSON.stringify(JSON.parse(raw))); say(status2, "lastStatus2", "✓ Minified", "ok"); }
+      catch (e) { say(status2, "lastStatus2", "✗ Not valid JSON: " + e.message, "err"); }
+    };
+    prodValue.addEventListener("input", () => { c.prodValue = prodValue.value; ctx.save(); describeValue(); });
+    // The paste event fires before the text lands, so format on the next tick.
+    prodValue.addEventListener("paste", () => setTimeout(() => formatValue(true), 0));
     // the Produce pane reports into its own status line
     const status2 = el("div", { class: "status-line dim" });
     const produce = async () => {
@@ -3904,7 +3942,18 @@
         el("button", { class: "btn primary", text: "Send", onclick: produce }),
       ]));
       if (prodTab === "msg") {
-        produceBox.append(el("div", { class: "toolbar" }, [el("label", { class: "inline" }, ["Key", prodKey]), prodValue]));
+        produceBox.append(
+          el("div", { class: "toolbar" }, [
+            el("label", { class: "inline" }, ["Key", prodKey]),
+            el("button", { class: "btn", text: "{ } Format", title: "Pretty-print the value as JSON", onclick: () => formatValue(false) }),
+            el("button", { class: "btn", text: "Minify", title: "Collapse the JSON to one line", onclick: minifyValue }),
+            copyBtn(() => prodValue.value, "Copy"),
+            valueInfo,
+          ]),
+          el("span", { class: "pane-label", text: "Value" }),
+          prodValue
+        );
+        describeValue();
       } else {
         const box = el("div", { style: "display:flex;flex-direction:column;gap:6px" });
         c.prodHeaders.forEach((h, i) => {
@@ -3941,7 +3990,7 @@
       ]),
       status,
     ]);
-    const producePane = el("div", { class: "console-controls" }, [
+    const producePane = el("div", { class: "console-controls produce-pane" }, [
       el("div", { class: "toolbar" }, [
         el("button", { class: "btn", text: "List topics", onclick: listTopics }),
         topicSel2,
@@ -4094,7 +4143,12 @@
         try { text = JSON.stringify(JSON.parse(r.body), null, 2); } catch { /* not JSON */ }
         c.response = text;
         c.name = method + " /" + String(p || "").split("?")[0];
+        // The first response is the moment the room stops belonging to the
+        // request. Fold it once, unprompted; after that the toggle is the
+        // developer's and we never move it again.
+        if (c.reqCollapsed === undefined) c.reqCollapsed = true;
         ctx.save();
+        applyReqOpen();
         drawResponse();
         say(`${r.status < 400 ? "✓" : "✗"} ${r.status} · ${r.durationMs} ms · ${fmtBytes(r.size)}`, r.status < 400 ? "ok" : "err");
       } catch (e) {
@@ -4377,23 +4431,41 @@
     drawFields();
     renderConds();
 
-    // controls are grouped so they keep their natural size (scrolling among
-    // themselves when the builder is open) and the response always gets the
-    // rest of the pane instead of being pushed off the bottom
+    // The request block — index picker, query builder and body — is the tall
+    // part, and once a response is on screen it is usually the response you
+    // want the room for. Everything except the send line folds away, and the
+    // choice is remembered per console.
+    const reqBlock = el("div", { class: "es-req" }, [
+      target,
+      builder,
+      el("div", { class: "toolbar" }, [
+        quick("Cluster health", "GET", "_cluster/health"),
+        quick("Indices", "GET", "_cat/indices?v&format=json"),
+        quick("Nodes", "GET", "_cat/nodes?v&format=json"),
+      ]),
+      el("div", {}, [el("span", { class: "pane-label", text: "Body (JSON, for _search etc.)" }), reqBody]),
+    ]);
+    const reqToggle = el("button", { class: "btn req-toggle" });
+    const applyReqOpen = () => {
+      const open = c.reqCollapsed !== true;
+      reqBlock.classList.toggle("collapsed", !open);
+      reqToggle.textContent = open ? "▾ Request" : "▸ Request";
+      reqToggle.title = open ? "Fold the request away and give the response the pane" : "Show the index picker, query builder and body";
+    };
+    reqToggle.addEventListener("click", () => {
+      c.reqCollapsed = c.reqCollapsed !== true;
+      ctx.save();
+      applyReqOpen();
+    });
+    applyReqOpen();
+
     body.append(
       el("div", { class: "console-controls" }, [
-        target,
-        builder,
-        el("div", { class: "toolbar" }, [
-          quick("Cluster health", "GET", "_cluster/health"),
-          quick("Indices", "GET", "_cat/indices?v&format=json"),
-          quick("Nodes", "GET", "_cat/nodes?v&format=json"),
-        ]),
+        reqBlock,
         el("div", { class: "req-line" }, [
-          methodSel, path,
+          reqToggle, methodSel, path,
           el("button", { class: "btn primary", text: "Send", onclick: () => send(c.method || "GET", c.path, c.body) }),
         ]),
-        el("div", {}, [el("span", { class: "pane-label", text: "Body (JSON, for _search etc.)" }), reqBody]),
         // copy sits with the export actions so it's available for every
         // response, not just the _search ones that render as a table
         exportBar(c, ctx, doExport, [copyResponseBtn()]),
