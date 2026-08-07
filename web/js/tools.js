@@ -2875,6 +2875,21 @@
         if (!Array.isArray(d.connections)) d.connections = [];
         if (!Array.isArray(d.consoles)) d.consoles = [];
         if (!d.consoles.length) d.consoles.push(cfg.newConsole());
+        // Consoles and connections saved before inner tabs had ids have none,
+        // and `undefined === undefined` matches the *first* entry — so every
+        // lookup resolved to console one, every tab drew as active, and
+        // clicking a tab appeared to do nothing. Backfill before anything
+        // reads an id.
+        let backfilled = false;
+        for (const c of d.consoles) if (!c.id) { c.id = uid(); backfilled = true; }
+        for (const c of d.connections) if (!c.id) { c.id = uid(); backfilled = true; }
+        // A connection that never had an id left activeConnId pointing at
+        // nothing, so a tool with saved clusters greeted you with "add one".
+        if (d.connections.length && !d.connections.some((c) => c.id === d.activeConnId)) {
+          d.activeConnId = d.connections[0].id;
+          backfilled = true;
+        }
+        if (backfilled) ctx.save();
         if (!d.consoles.some((c) => c.id === d.activeConsoleId)) d.activeConsoleId = d.consoles[0].id;
 
         const sideBox = el("div", { class: "api-side" });
@@ -3464,6 +3479,15 @@
       with key & value search), producer. */
   function kafkaConsole(body, conn, c, ctx) {
     const status = el("div", { class: "status-line dim" });
+    // The status line is the result of the last run. Rebuilding the console
+    // on every outer-tab switch wiped it, so a console you had just used came
+    // back looking untouched. Terminal results are kept on the console data;
+    // in-progress notes ("Consuming…") deliberately are not.
+    const say = (node, key, text, kind) => {
+      if (kind === "ok" || kind === "err") { c[key] = { text, kind }; ctx.save(); }
+      else if (c[key]) { delete c[key]; ctx.save(); }
+      setStatus(node, text, kind);
+    };
     const out = el("div", { style: "flex:1;overflow:auto;display:flex;flex-direction:column;gap:10px" });
 
     // connection payload with numeric timeout (form fields store strings)
@@ -3592,17 +3616,17 @@
     };
 
     const listTopics = async () => {
-      setStatus(status, "Listing topics…", "dim");
+      say(status, "lastStatus", "Listing topics…", "dim");
       try {
         const r = await api("POST", "/api/kafka/topics", { conn: kconn() });
         c.topics = r.topics || [];
         ctx.save();
         fillTopics();
-        setStatus(status, c.topics.length
+        say(status, "lastStatus", c.topics.length
           ? `✓ ${c.topics.length} topic(s) — pick one from the dropdown`
           : "✓ Connected, but no (non-internal) topics were returned", c.topics.length ? "ok" : "dim");
       } catch (e) {
-        setStatus(status, "✗ " + e.message, "err");
+        say(status, "lastStatus", "✗ " + e.message, "err");
       }
     };
     const fmtSecs = (ms) => (ms / 1000).toFixed(1) + "s";
@@ -3619,9 +3643,9 @@
     const busy2 = (text, ms) => busyIn(status2, text, ms);
 
     const consume = async () => {
-      if (!c.topic) return setStatus(status, "✗ Enter or pick a topic", "err");
+      if (!c.topic) return say(status, "lastStatus", "✗ Enter or pick a topic", "err");
       if ((c.from || "latest") === "time" && !c.startT) {
-        return setStatus(status, "✗ Set the start of the time range", "err");
+        return say(status, "lastStatus", "✗ Set the start of the time range", "err");
       }
       const started = Date.now();
       let live = [], seen = 0;
@@ -3691,12 +3715,12 @@
         c.name = c.topic;
         ctx.save();
         draw();
-        setStatus(status, done
+        say(status, "lastStatus", done
           ? `✓ ${done.matched} match(es) of ${done.scanned} scanned, showing ${done.messages.length}${done.truncated ? " (scan capped — narrow the range or raise Last N)" : ""} · ${took}`
           : `✓ ${c.messages.length} message(s) · ${took}`, "ok");
       } catch (e) {
         clearInterval(ticker);
-        setStatus(status, "✗ " + e.message + ` · ${fmtSecs(Date.now() - started)}`, "err");
+        say(status, "lastStatus", "✗ " + e.message + ` · ${fmtSecs(Date.now() - started)}`, "err");
       }
     };
 
@@ -3710,7 +3734,7 @@
     // the Produce pane reports into its own status line
     const status2 = el("div", { class: "status-line dim" });
     const produce = async () => {
-      if (!c.topic) return setStatus(status2, "✗ Enter or pick a topic", "err");
+      if (!c.topic) return say(status2, "lastStatus2", "✗ Enter or pick a topic", "err");
       const t0 = Date.now();
       busy2("Producing…", 0);
       const tick = setInterval(() => busy2("Producing…", Date.now() - t0), 100);
@@ -3718,10 +3742,10 @@
         const headers = (c.prodHeaders || []).filter((h) => h.k.trim()).map((h) => ({ key: h.k.trim(), value: h.v }));
         await api("POST", "/api/kafka/produce", { conn: kconn(), topic: c.topic, key: c.prodKey || "", value: c.prodValue || "", headers });
         clearInterval(tick);
-        setStatus(status2, `✓ Produced to ${c.topic}${headers.length ? " with " + headers.length + " header(s)" : ""} · ${fmtSecs(Date.now() - t0)}`, "ok");
+        say(status2, "lastStatus2", `✓ Produced to ${c.topic}${headers.length ? " with " + headers.length + " header(s)" : ""} · ${fmtSecs(Date.now() - t0)}`, "ok");
       } catch (e) {
         clearInterval(tick);
-        setStatus(status2, "✗ " + e.message + ` · ${fmtSecs(Date.now() - t0)}`, "err");
+        say(status2, "lastStatus2", "✗ " + e.message + ` · ${fmtSecs(Date.now() - t0)}`, "err");
       }
     };
 
@@ -3806,6 +3830,10 @@
     renderProduce();
     applyMode();
     draw();
+    // put the last result back so switching away and returning shows the
+    // console exactly as you left it
+    if (c.lastStatus) setStatus(status, c.lastStatus.text, c.lastStatus.kind);
+    if (c.lastStatus2) setStatus(status2, c.lastStatus2.text, c.lastStatus2.kind);
   }
 
   /** Flatten an ES mapping's properties into dotted field paths, recording
@@ -3831,6 +3859,13 @@
     // is bound to right now, not a connection captured when the tab was drawn.
     const cluster = () => (getConn && getConn()) || conn;
     const status = el("div", { class: "status-line dim" });
+    // Same as the Kafka console: the last result has to outlive the re-render
+    // an outer-tab switch causes, or the console comes back looking untouched.
+    const say = (text, kind) => {
+      if (kind === "ok" || kind === "err") { c.lastStatus = { text, kind }; ctx.save(); }
+      else if (c.lastStatus) { delete c.lastStatus; ctx.save(); }
+      setStatus(status, text, kind);
+    };
     const out = el("div", { class: "tool", style: "flex:1;min-height:160px" });
     let esView = "table"; // _search results render as a grid by default
 
@@ -3872,7 +3907,7 @@
       const btn = el("button", { class: "btn", text: "Copy response" });
       btn.addEventListener("click", () => {
         const text = c.response || "";
-        if (!text) return setStatus(status, "✗ Nothing to copy — send a request first", "err");
+        if (!text) return say("✗ Nothing to copy — send a request first", "err");
         Devtil.copyText(text, btn);
       });
       return btn;
@@ -3902,8 +3937,8 @@
 
     const send = async (method, p, bodyText) => {
       const k = cluster();
-      if (!k || !k.baseUrl) return setStatus(status, "✗ The active cluster has no base URL", "err");
-      setStatus(status, "Sending…", "dim");
+      if (!k || !k.baseUrl) return say("✗ The active cluster has no base URL", "err");
+      say("Sending…", "dim");
       const headers = {};
       if (bodyText) headers["Content-Type"] = "application/json";
       if (k.username) headers["Authorization"] = "Basic " + btoa(k.username + ":" + (k.password || ""));
@@ -3921,9 +3956,9 @@
         c.name = method + " /" + String(p || "").split("?")[0];
         ctx.save();
         drawResponse();
-        setStatus(status, `${r.status < 400 ? "✓" : "✗"} ${r.status} · ${r.durationMs} ms · ${fmtBytes(r.size)}`, r.status < 400 ? "ok" : "err");
+        say(`${r.status < 400 ? "✓" : "✗"} ${r.status} · ${r.durationMs} ms · ${fmtBytes(r.size)}`, r.status < 400 ? "ok" : "err");
       } catch (e) {
-        setStatus(status, "✗ " + e.message, "err");
+        say("✗ " + e.message, "err");
       }
     };
     const quick = (label, method, p) => el("button", {
@@ -3961,26 +3996,26 @@
       let p = (c.path || "").split("?")[0];
       if (!/_search(\/|$)/.test(p)) {
         if (c.index) p = encodeURIComponent(c.index) + "/_search";
-        else return setStatus(status, "✗ Point the request at a _search endpoint (or pick an index in the builder) first", "err");
+        else return say("✗ Point the request at a _search endpoint (or pick an index in the builder) first", "err");
       }
       let bodyObj = {};
       if ((c.body || "").trim()) {
-        try { bodyObj = JSON.parse(c.body); } catch { return setStatus(status, "✗ Body is not valid JSON", "err"); }
+        try { bodyObj = JSON.parse(c.body); } catch { return say("✗ Body is not valid JSON", "err"); }
       }
       if (!bodyObj.query) bodyObj.query = { match_all: {} };
       bodyObj.size = n;
-      setStatus(status, `Exporting up to ${n} hit(s)…`, "dim");
+      say(`Exporting up to ${n} hit(s)…`, "dim");
       try {
         const data = await esFetch("POST", p, JSON.stringify(bodyObj));
         const hits = data.hits && data.hits.hits;
-        if (!Array.isArray(hits)) return setStatus(status, "✗ Response has no hits — is this a _search?", "err");
+        if (!Array.isArray(hits)) return say("✗ Response has no hits — is this a _search?", "err");
         const flat = hits.map((h) => flatten(h._source, "", { _id: h._id }));
         const cols = [];
         for (const row of flat) for (const k of Object.keys(row)) if (!cols.includes(k)) cols.push(k);
         exportRows(fmt, "elastic-export", cols, flat.map((row) => cols.map((k) => row[k] ?? "")));
-        setStatus(status, `✓ Exported ${flat.length} hit(s)`, "ok");
+        say(`✓ Exported ${flat.length} hit(s)`, "ok");
       } catch (e) {
-        setStatus(status, "✗ " + e.message, "err");
+        say("✗ " + e.message, "err");
       }
     };
 
@@ -4017,20 +4052,20 @@
     };
 
     const loadIndices = async () => {
-      setStatus(status, "Loading indices…", "dim");
+      say("Loading indices…", "dim");
       try {
         const list = await esFetch("GET", "_cat/indices?format=json");
         c.indices = list.map((i) => i.index).filter((n) => n && !n.startsWith(".")).sort();
         ctx.save();
         fillIndices();
-        setStatus(status, `✓ ${c.indices.length} index(es)`, "ok");
+        say(`✓ ${c.indices.length} index(es)`, "ok");
       } catch (e) {
-        setStatus(status, "✗ " + e.message, "err");
+        say("✗ " + e.message, "err");
       }
     };
     const loadFields = async () => {
       if (!c.index) { c.fields = []; drawFields(); renderConds(); return; }
-      setStatus(status, "Loading mapping…", "dim");
+      say("Loading mapping…", "dim");
       try {
         const m = await esFetch("GET", encodeURIComponent(c.index) + "/_mapping");
         const entry = m[c.index] || Object.values(m)[0] || {};
@@ -4039,9 +4074,9 @@
         ctx.save();
         drawFields();
         renderConds();
-        setStatus(status, `✓ ${c.fields.length} field(s)`, "ok");
+        say(`✓ ${c.fields.length} field(s)`, "ok");
       } catch (e) {
-        setStatus(status, "✗ " + e.message, "err");
+        say("✗ " + e.message, "err");
       }
     };
     idxSel.addEventListener("change", () => { c.index = idxSel.value; c.conds = []; ctx.save(); loadFields(); });
@@ -4179,7 +4214,7 @@
       reqBody.value = c.body;
     };
     const buildSearch = () => {
-      if (!c.index) { setStatus(status, "✗ Pick an index first (Load indices)", "err"); return false; }
+      if (!c.index) { say("✗ Pick an index first (Load indices)", "err"); return false; }
       syncBody();
       return true;
     };
@@ -4227,6 +4262,9 @@
       out
     );
     drawResponse();
+    // put the last result back, so returning to this console shows it exactly
+    // as you left it
+    if (c.lastStatus) setStatus(status, c.lastStatus.text, c.lastStatus.kind);
   }
 
   clientTool({
