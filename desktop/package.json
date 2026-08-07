@@ -1,6 +1,6 @@
 {
   "name": "devtil-desktop",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "description": "Native desktop shell for Devtil (spawns the Go backend and wraps the UI in an app window)",
   "author": "Bhavesh Patil",
   "license": "MIT",
