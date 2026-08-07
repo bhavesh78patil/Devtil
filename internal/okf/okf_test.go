@@ -1,6 +1,8 @@
 package okf
 
 import (
+	"archive/zip"
+	"bytes"
 	"os"
 	"path/filepath"
 	"strings"
@@ -561,5 +563,209 @@ func TestDelete(t *testing.T) {
 	}
 	if err := b.Delete("/a.md"); err == nil {
 		t.Error("deleting a missing concept should report it")
+	}
+}
+
+// ---- sharing a bundle -------------------------------------------------
+
+// A bundle round-trips through a zip unchanged: the recipient unpacks the
+// author's markdown, not devtil's re-serialisation of it.
+func TestZipRoundTrip(t *testing.T) {
+	src := newBundle(t)
+	if _, err := src.Write(WriteOptions{
+		Path:        "/tables/orders.md",
+		Frontmatter: map[string]any{"type": "Table", "title": "Orders", "tags": []any{"sales"}},
+		Body:        "Joined with [customers](/tables/customers.md).",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	write(t, src, "/tables/customers.md", "Table", "One row per customer.")
+	write(t, src, "/runbooks/deep/nested.md", "Runbook", "Nested folders survive.")
+	if err := src.AppendLog("exported", "human:test"); err != nil {
+		t.Fatal(err)
+	}
+	original, err := src.Read("/tables/orders.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var buf bytes.Buffer
+	if err := src.WriteZip(&buf); err != nil {
+		t.Fatal(err)
+	}
+
+	dst := newBundle(t)
+	res, err := dst.ReadZip(bytes.NewReader(buf.Bytes()), int64(buf.Len()), ImportOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Added) != 4 {
+		t.Errorf("added %v, want 4 documents", res.Added)
+	}
+	got, err := dst.Read("/tables/orders.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Body != original.Body || got.Title() != "Orders" || len(got.Tags()) != 1 {
+		t.Errorf("document did not survive the round trip: %#v", got)
+	}
+	if _, err := dst.Read("/runbooks/deep/nested.md"); err != nil {
+		t.Errorf("nested folders were lost: %v", err)
+	}
+	// the graph rebuilds on the other side
+	g, err := dst.Graph()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(g.Edges) != 1 {
+		t.Errorf("links did not survive: %#v", g.Edges)
+	}
+}
+
+// An import must not overwrite the user's own work unless they asked.
+func TestImportDoesNotClobberByDefault(t *testing.T) {
+	src := newBundle(t)
+	write(t, src, "/a.md", "Note", "theirs")
+	var buf bytes.Buffer
+	if err := src.WriteZip(&buf); err != nil {
+		t.Fatal(err)
+	}
+
+	dst := newBundle(t)
+	write(t, dst, "/a.md", "Note", "mine")
+
+	res, err := dst.ReadZip(bytes.NewReader(buf.Bytes()), int64(buf.Len()), ImportOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Skipped) != 1 || len(res.Replaced) != 0 {
+		t.Errorf("want the existing doc skipped, got %#v", res)
+	}
+	doc, _ := dst.Read("/a.md")
+	if !strings.Contains(doc.Body, "mine") {
+		t.Errorf("import clobbered existing content: %q", doc.Body)
+	}
+
+	// ...and does overwrite when they do.
+	res, err = dst.ReadZip(bytes.NewReader(buf.Bytes()), int64(buf.Len()), ImportOptions{Overwrite: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Replaced) != 1 {
+		t.Errorf("want 1 replaced, got %#v", res)
+	}
+	doc, _ = dst.Read("/a.md")
+	if !strings.Contains(doc.Body, "theirs") {
+		t.Errorf("overwrite did not take: %q", doc.Body)
+	}
+}
+
+// Importing under a prefix keeps someone else's bundle in its own corner.
+func TestImportUnderPrefix(t *testing.T) {
+	src := newBundle(t)
+	write(t, src, "/tables/orders.md", "Table", "x")
+	var buf bytes.Buffer
+	if err := src.WriteZip(&buf); err != nil {
+		t.Fatal(err)
+	}
+
+	dst := newBundle(t)
+	res, err := dst.ReadZip(bytes.NewReader(buf.Bytes()), int64(buf.Len()), ImportOptions{Prefix: "vendor/acme"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Added) != 1 || res.Added[0] != "/vendor/acme/tables/orders.md" {
+		t.Errorf("added %v, want it nested under the prefix", res.Added)
+	}
+}
+
+// A hand-made archive is the hostile case: traversal entries, non-markdown
+// files and a redundant top-level directory.
+func TestImportRejectsUnsafeEntries(t *testing.T) {
+	root := t.TempDir()
+	b, err := Open(filepath.Join(root, "bundle"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sentinel := filepath.Join(root, "escaped.md")
+
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	for _, name := range []string{
+		// index.md at the wrapper root is what marks "mybundle/" as a
+		// wrapper rather than a real bundle folder
+		"mybundle/index.md",
+		"mybundle/notes/real.md",
+		"mybundle/../../escaped.md",
+		"mybundle/assets/logo.png",
+		"mybundle/.hidden.md",
+		"__MACOSX/mybundle/._real.md",
+	} {
+		f, err := zw.Create(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		f.Write([]byte("---\ntype: Note\n---\n\nbody\n"))
+	}
+	zw.Close()
+
+	res, err := b.ReadZip(bytes.NewReader(buf.Bytes()), int64(buf.Len()), ImportOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// the redundant "mybundle/" wrapper is stripped; the bundle Open seeded
+	// an index.md already, so the incoming one is skipped rather than added
+	if len(res.Added) != 1 || res.Added[0] != "/notes/real.md" {
+		t.Errorf("added %v, want just /notes/real.md", res.Added)
+	}
+	if len(res.Skipped) != 1 || res.Skipped[0] != "/index.md" {
+		t.Errorf("skipped %v, want the existing index left alone", res.Skipped)
+	}
+	if _, err := os.Stat(sentinel); err == nil {
+		t.Fatalf("a zip entry escaped the bundle: %s exists", sentinel)
+	}
+	if len(res.Ignored) < 3 {
+		t.Errorf("non-markdown, hidden and resource-fork entries should be ignored: %#v", res.Ignored)
+	}
+}
+
+func TestImportRejectsRubbish(t *testing.T) {
+	b := newBundle(t)
+	if _, err := b.ReadZip(bytes.NewReader([]byte("not a zip")), 9, ImportOptions{}); err == nil {
+		t.Error("a non-zip upload should be reported")
+	}
+	if _, err := b.ReadZip(bytes.NewReader(nil), 0, ImportOptions{}); err == nil {
+		t.Error("an empty upload should be reported")
+	}
+	// a valid zip with nothing usable in it
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	f, _ := zw.Create("readme.txt")
+	f.Write([]byte("hello"))
+	zw.Close()
+	if _, err := b.ReadZip(bytes.NewReader(buf.Bytes()), int64(buf.Len()), ImportOptions{}); err == nil {
+		t.Error("an archive with no markdown should be reported")
+	}
+}
+
+// A folder that merely happens to be the only one must not be mistaken for a
+// wrapper and flattened away.
+func TestImportKeepsRealTopLevelFolder(t *testing.T) {
+	src := newBundle(t)
+	write(t, src, "/tables/orders.md", "Table", "x")
+	write(t, src, "/tables/customers.md", "Table", "y")
+	var buf bytes.Buffer
+	if err := src.WriteZip(&buf); err != nil {
+		t.Fatal(err)
+	}
+	dst := newBundle(t)
+	res, err := dst.ReadZip(bytes.NewReader(buf.Bytes()), int64(buf.Len()), ImportOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range res.Added {
+		if !strings.HasPrefix(p, "/tables/") {
+			t.Errorf("added %q — the tables/ folder was flattened", p)
+		}
 	}
 }

@@ -239,3 +239,29 @@ func TestGroupsCoverEveryRegisteredTool(t *testing.T) {
 		}
 	}
 }
+
+// The Settings panel reads .length off these payloads, so a nil slice
+// marshalled as JSON null crashes the panel — which is exactly the state a
+// fresh install is in, before anything has been saved.
+func TestUIPayloadsAreArraysNotNull(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		srv  *Server
+	}{
+		{"no store at all", NewHTTPServer(Options{})},
+		{"store with nothing saved", NewHTTPServer(Options{Store: stateWith(t, nil, nil)})},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			payload, err := json.Marshal(map[string]any{
+				"groups":      tc.srv.GroupsForUI(),
+				"connections": tc.srv.ConnectionsForUI(),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(string(payload), "null") {
+				t.Errorf("payload contains null, which the Settings panel cannot render: %s", payload)
+			}
+		})
+	}
+}

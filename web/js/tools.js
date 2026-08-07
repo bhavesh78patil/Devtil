@@ -2064,6 +2064,7 @@
     name: "Kube Console",
     desc: "Connect to the kubemaster over SSH (password), find pods, then open a terminal panel per container — tail logs, run commands, search folders.",
     defaults: () => ({
+      connections: [], activeConnId: null,
       sshHost: "", sshPort: "", sshPassword: "",
       context: "", namespace: "", podQuery: "", panels: [],
     }),
@@ -2084,8 +2085,24 @@
     render(root, tab, ctx) {
       const d = tab.data;
       if (!Array.isArray(d.panels)) d.panels = [];
+      // Saved clusters. The form fields stay the working copy — selecting a
+      // saved connection loads it in, Save writes it back — so everything that
+      // worked before still works, and a host you use daily is now one pick
+      // away instead of a retyped password.
+      if (!Array.isArray(d.connections)) d.connections = [];
+      for (const c of d.connections) if (!c.id) c.id = uid();
+      if ((d.sshHost || "").trim() && !d.connections.length) {
+        // the single unnamed connection this tool used to have
+        d.connections.push({
+          id: uid(), name: d.sshHost, sshHost: d.sshHost, sshPort: d.sshPort,
+          sshPassword: d.sshPassword, context: d.context, namespace: d.namespace,
+        });
+        d.activeConnId = d.connections[0].id;
+        ctx.save();
+      }
       const status = el("div", { class: "status-line dim" });
       const podBox = el("div");
+      const svcBox = el("div");
       const panelsArea = el("div", { class: "kube-panels" });
 
       // runtime-only state (not persisted), kept per-tab so live tails survive
@@ -2346,9 +2363,129 @@
       nsSel.addEventListener("change", () => { d.namespace = nsSel.value; ctx.save(); });
       podQuery.addEventListener("keydown", (e) => { if (e.key === "Enter") loadPods(); });
 
+      // ---------- services ----------
+      // A cluster is easier to reason about through its services than its
+      // pods, so this lists them and resolves one to the pods it fronts.
+      async function loadServices() {
+        if (!d.namespace) return setStatus(status, "✗ Pick a namespace first (Connect)", "err");
+        setStatus(status, "Finding services…", "dim");
+        try {
+          const r = await api("GET", "/api/kube/services?" + connQS() +
+            "&namespace=" + encodeURIComponent(d.namespace) + "&query=" + encodeURIComponent(d.podQuery || ""));
+          renderServices(r.services || []);
+          setStatus(status, `✓ ${r.count} service(s) — click one to see the pods behind it`, "ok");
+        } catch (e) {
+          svcBox.replaceChildren();
+          setStatus(status, "✗ " + e.message, "err");
+        }
+      }
+
+      function renderServices(list) {
+        svcBox.replaceChildren();
+        if (!list.length) {
+          svcBox.append(el("div", { class: "status-line dim", text: "No services matched." }));
+          return;
+        }
+        const rows = list.map((sv) => el("tr", {}, [
+          el("td", {}, [el("a", {
+            class: "svc-link", text: sv.name,
+            title: sv.selects ? "Show the pods this service selects" : "This service has no pod selector",
+            onclick: () => sv.selects ? podsForSelector(sv.name, sv.selects) : setStatus(status, `${sv.name} has no pod selector (type ${sv.type})`, "err"),
+          })]),
+          el("td", { text: sv.type || "" }),
+          el("td", { text: (sv.ports || []).join(", ") }),
+          el("td", { class: "svc-sel", text: sv.selects || "—" }),
+        ]));
+        svcBox.append(el("table", { class: "kv svc-table" }, [
+          el("tr", {}, [el("th", { text: "Service" }), el("th", { text: "Type" }), el("th", { text: "Ports" }), el("th", { text: "Selector" })]),
+          ...rows,
+        ]));
+      }
+
+      async function podsForSelector(name, selector) {
+        setStatus(status, `Finding pods for ${name}…`, "dim");
+        try {
+          const r = await api("GET", "/api/kube/pods?" + connQS() +
+            "&namespace=" + encodeURIComponent(d.namespace) + "&selector=" + encodeURIComponent(selector));
+          renderPods(r.pods || []);
+          setStatus(status, `✓ ${r.pods.length} pod(s) behind ${name} (${selector}) — click a container to open a terminal`, "ok");
+        } catch (e) {
+          setStatus(status, "✗ " + e.message, "err");
+        }
+      }
+
+      // ---------- saved connections ----------
+      const connSel = el("select", { style: "min-width:180px" });
+      const loadFields = () => {
+        sshHost.value = d.sshHost || "";
+        sshPort.value = d.sshPort || "";
+        sshPassword.value = d.sshPassword || "";
+      };
+      const fillConnSel = () => {
+        connSel.replaceChildren(
+          el("option", { value: "", text: d.connections.length ? "— unsaved —" : "— no saved clusters —" }),
+          ...d.connections.map((c) => el("option", { value: c.id, text: c.name }))
+        );
+        connSel.value = d.connections.some((c) => c.id === d.activeConnId) ? d.activeConnId : "";
+      };
+      connSel.addEventListener("change", () => {
+        const c = d.connections.find((x) => x.id === connSel.value);
+        d.activeConnId = c ? c.id : null;
+        if (c) {
+          d.sshHost = c.sshHost || ""; d.sshPort = c.sshPort || "";
+          d.sshPassword = c.sshPassword || "";
+          d.context = c.context || ""; d.namespace = c.namespace || "";
+          loadFields();
+          if (d.context) fillSelect(ctxSel, [d.context], d.context);
+          if (d.namespace) fillSelect(nsSel, [d.namespace], d.namespace);
+          setStatus(status, `Loaded “${c.name}” — press Connect to list contexts and namespaces`, "dim");
+        }
+        ctx.save();
+      });
+
+      async function saveConnection() {
+        if (!(d.sshHost || "").trim()) return setStatus(status, "✗ Enter an SSH host before saving", "err");
+        const existing = d.connections.find((c) => c.id === d.activeConnId);
+        const name = await promptDialog("Name for this cluster:", existing ? existing.name : d.sshHost);
+        if (!name || !name.trim()) return;
+        const fields = {
+          name: name.trim(), sshHost: d.sshHost, sshPort: d.sshPort,
+          sshPassword: d.sshPassword, context: d.context, namespace: d.namespace,
+        };
+        // The name is the identity: saving over an existing name updates that
+        // cluster, a new name creates one. Falling back to "whatever is
+        // selected" would silently rename the cluster you had loaded.
+        let target = d.connections.find((c) => c.name === fields.name);
+        if (target) Object.assign(target, fields);
+        else {
+          target = { id: uid(), ...fields };
+          d.connections.push(target);
+        }
+        d.activeConnId = target.id;
+        ctx.save();
+        fillConnSel();
+        setStatus(status, `✓ Saved “${fields.name}” — agents can reach it by that name over MCP`, "ok");
+      }
+
+      async function deleteConnection() {
+        const c = d.connections.find((x) => x.id === d.activeConnId);
+        if (!c) return setStatus(status, "✗ Pick a saved cluster to delete", "err");
+        if (!(await confirmDialog(`Delete the saved cluster “${c.name}”?`, { okLabel: "Delete", danger: true }))) return;
+        d.connections = d.connections.filter((x) => x.id !== c.id);
+        d.activeConnId = null;
+        ctx.save();
+        fillConnSel();
+        setStatus(status, `Deleted “${c.name}”`, "dim");
+      }
+
       const field = (label, node) => el("div", { class: "field" }, [el("span", { text: label }), node]);
 
       root.append(
+        el("div", { class: "form-grid" }, [
+          field("Saved cluster", connSel),
+          el("button", { class: "btn", text: "💾 Save", title: "Save these connection details under a name (agents can then use it by name)", onclick: saveConnection }),
+          el("button", { class: "btn danger", text: "Delete", title: "Delete the selected saved cluster", onclick: deleteConnection }),
+        ]),
         el("div", { class: "form-grid" }, [
           field("SSH host — kubectl runs here", sshHost),
           field("SSH port", sshPort),
@@ -2359,13 +2496,16 @@
           field("Context", ctxSel),
           field("Namespace", nsSel),
           field("Service / pod filter", podQuery),
+          el("button", { class: "btn", text: "Find services", onclick: loadServices }),
           el("button", { class: "btn primary", text: "Find pods", onclick: loadPods }),
         ]),
+        svcBox,
         podBox,
         status,
         panelsArea
       );
       renderPanels();
+      fillConnSel();
       if (d.context) fillSelect(ctxSel, [d.context], d.context);
       if (d.namespace) fillSelect(nsSel, [d.namespace], d.namespace);
     },
@@ -2875,6 +3015,21 @@
         if (!Array.isArray(d.connections)) d.connections = [];
         if (!Array.isArray(d.consoles)) d.consoles = [];
         if (!d.consoles.length) d.consoles.push(cfg.newConsole());
+        // Consoles and connections saved before inner tabs had ids have none,
+        // and `undefined === undefined` matches the *first* entry — so every
+        // lookup resolved to console one, every tab drew as active, and
+        // clicking a tab appeared to do nothing. Backfill before anything
+        // reads an id.
+        let backfilled = false;
+        for (const c of d.consoles) if (!c.id) { c.id = uid(); backfilled = true; }
+        for (const c of d.connections) if (!c.id) { c.id = uid(); backfilled = true; }
+        // A connection that never had an id left activeConnId pointing at
+        // nothing, so a tool with saved clusters greeted you with "add one".
+        if (d.connections.length && !d.connections.some((c) => c.id === d.activeConnId)) {
+          d.activeConnId = d.connections[0].id;
+          backfilled = true;
+        }
+        if (backfilled) ctx.save();
         if (!d.consoles.some((c) => c.id === d.activeConsoleId)) d.activeConsoleId = d.consoles[0].id;
 
         const sideBox = el("div", { class: "api-side" });
@@ -3464,6 +3619,15 @@
       with key & value search), producer. */
   function kafkaConsole(body, conn, c, ctx) {
     const status = el("div", { class: "status-line dim" });
+    // The status line is the result of the last run. Rebuilding the console
+    // on every outer-tab switch wiped it, so a console you had just used came
+    // back looking untouched. Terminal results are kept on the console data;
+    // in-progress notes ("Consuming…") deliberately are not.
+    const say = (node, key, text, kind) => {
+      if (kind === "ok" || kind === "err") { c[key] = { text, kind }; ctx.save(); }
+      else if (c[key]) { delete c[key]; ctx.save(); }
+      setStatus(node, text, kind);
+    };
     const out = el("div", { style: "flex:1;overflow:auto;display:flex;flex-direction:column;gap:10px" });
 
     // connection payload with numeric timeout (form fields store strings)
@@ -3592,17 +3756,17 @@
     };
 
     const listTopics = async () => {
-      setStatus(status, "Listing topics…", "dim");
+      say(status, "lastStatus", "Listing topics…", "dim");
       try {
         const r = await api("POST", "/api/kafka/topics", { conn: kconn() });
         c.topics = r.topics || [];
         ctx.save();
         fillTopics();
-        setStatus(status, c.topics.length
+        say(status, "lastStatus", c.topics.length
           ? `✓ ${c.topics.length} topic(s) — pick one from the dropdown`
           : "✓ Connected, but no (non-internal) topics were returned", c.topics.length ? "ok" : "dim");
       } catch (e) {
-        setStatus(status, "✗ " + e.message, "err");
+        say(status, "lastStatus", "✗ " + e.message, "err");
       }
     };
     const fmtSecs = (ms) => (ms / 1000).toFixed(1) + "s";
@@ -3619,9 +3783,9 @@
     const busy2 = (text, ms) => busyIn(status2, text, ms);
 
     const consume = async () => {
-      if (!c.topic) return setStatus(status, "✗ Enter or pick a topic", "err");
+      if (!c.topic) return say(status, "lastStatus", "✗ Enter or pick a topic", "err");
       if ((c.from || "latest") === "time" && !c.startT) {
-        return setStatus(status, "✗ Set the start of the time range", "err");
+        return say(status, "lastStatus", "✗ Set the start of the time range", "err");
       }
       const started = Date.now();
       let live = [], seen = 0;
@@ -3691,12 +3855,12 @@
         c.name = c.topic;
         ctx.save();
         draw();
-        setStatus(status, done
+        say(status, "lastStatus", done
           ? `✓ ${done.matched} match(es) of ${done.scanned} scanned, showing ${done.messages.length}${done.truncated ? " (scan capped — narrow the range or raise Last N)" : ""} · ${took}`
           : `✓ ${c.messages.length} message(s) · ${took}`, "ok");
       } catch (e) {
         clearInterval(ticker);
-        setStatus(status, "✗ " + e.message + ` · ${fmtSecs(Date.now() - started)}`, "err");
+        say(status, "lastStatus", "✗ " + e.message + ` · ${fmtSecs(Date.now() - started)}`, "err");
       }
     };
 
@@ -3704,13 +3868,51 @@
     const prodKey = el("input", { type: "text", placeholder: "key (optional)", style: "width:160px" });
     prodKey.value = c.prodKey || "";
     prodKey.addEventListener("input", () => { c.prodKey = prodKey.value; ctx.save(); });
-    const prodValue = el("input", { type: "text", placeholder: "message value", style: "flex:1;min-width:200px" });
+    // Payloads are JSON far more often than not, and a single-line input made
+    // one unreadable the moment it was pasted. This is a real editor: it
+    // pretty-prints a pasted payload, and says how big it is and whether it
+    // parses so you find out before the broker does.
+    const prodValue = el("textarea", {
+      class: "prod-value", spellcheck: "false",
+      placeholder: "message value — paste JSON and it is formatted for you",
+    });
     prodValue.value = c.prodValue || "";
-    prodValue.addEventListener("input", () => { c.prodValue = prodValue.value; ctx.save(); });
+    const valueInfo = el("span", { class: "prod-info" });
+    const describeValue = () => {
+      const raw = prodValue.value;
+      if (!raw.trim()) return (valueInfo.textContent = "");
+      let shape = "text";
+      try { JSON.parse(raw); shape = "valid JSON"; }
+      catch { shape = looksJson(raw) ? "JSON — but it does not parse" : "text"; }
+      valueInfo.textContent = `${fmtBytes(new Blob([raw]).size)} · ${shape}`;
+      valueInfo.className = "prod-info" + (shape.includes("not parse") ? " bad" : "");
+    };
+    const setValue = (v) => { prodValue.value = v; c.prodValue = v; ctx.save(); describeValue(); };
+    /** Pretty-print the value when it is JSON; leave anything else alone. */
+    const formatValue = (quiet) => {
+      const raw = prodValue.value.trim();
+      if (!raw) return;
+      try {
+        const pretty = JSON.stringify(JSON.parse(raw), null, 2);
+        if (pretty !== prodValue.value) setValue(pretty);
+        if (!quiet) say(status2, "lastStatus2", "✓ Formatted", "ok");
+      } catch (e) {
+        if (!quiet) say(status2, "lastStatus2", "Not JSON, left as-is — " + e.message, "dim");
+      }
+    };
+    const minifyValue = () => {
+      const raw = prodValue.value.trim();
+      if (!raw) return;
+      try { setValue(JSON.stringify(JSON.parse(raw))); say(status2, "lastStatus2", "✓ Minified", "ok"); }
+      catch (e) { say(status2, "lastStatus2", "✗ Not valid JSON: " + e.message, "err"); }
+    };
+    prodValue.addEventListener("input", () => { c.prodValue = prodValue.value; ctx.save(); describeValue(); });
+    // The paste event fires before the text lands, so format on the next tick.
+    prodValue.addEventListener("paste", () => setTimeout(() => formatValue(true), 0));
     // the Produce pane reports into its own status line
     const status2 = el("div", { class: "status-line dim" });
     const produce = async () => {
-      if (!c.topic) return setStatus(status2, "✗ Enter or pick a topic", "err");
+      if (!c.topic) return say(status2, "lastStatus2", "✗ Enter or pick a topic", "err");
       const t0 = Date.now();
       busy2("Producing…", 0);
       const tick = setInterval(() => busy2("Producing…", Date.now() - t0), 100);
@@ -3718,10 +3920,10 @@
         const headers = (c.prodHeaders || []).filter((h) => h.k.trim()).map((h) => ({ key: h.k.trim(), value: h.v }));
         await api("POST", "/api/kafka/produce", { conn: kconn(), topic: c.topic, key: c.prodKey || "", value: c.prodValue || "", headers });
         clearInterval(tick);
-        setStatus(status2, `✓ Produced to ${c.topic}${headers.length ? " with " + headers.length + " header(s)" : ""} · ${fmtSecs(Date.now() - t0)}`, "ok");
+        say(status2, "lastStatus2", `✓ Produced to ${c.topic}${headers.length ? " with " + headers.length + " header(s)" : ""} · ${fmtSecs(Date.now() - t0)}`, "ok");
       } catch (e) {
         clearInterval(tick);
-        setStatus(status2, "✗ " + e.message + ` · ${fmtSecs(Date.now() - t0)}`, "err");
+        say(status2, "lastStatus2", "✗ " + e.message + ` · ${fmtSecs(Date.now() - t0)}`, "err");
       }
     };
 
@@ -3740,7 +3942,18 @@
         el("button", { class: "btn primary", text: "Send", onclick: produce }),
       ]));
       if (prodTab === "msg") {
-        produceBox.append(el("div", { class: "toolbar" }, [el("label", { class: "inline" }, ["Key", prodKey]), prodValue]));
+        produceBox.append(
+          el("div", { class: "toolbar" }, [
+            el("label", { class: "inline" }, ["Key", prodKey]),
+            el("button", { class: "btn", text: "{ } Format", title: "Pretty-print the value as JSON", onclick: () => formatValue(false) }),
+            el("button", { class: "btn", text: "Minify", title: "Collapse the JSON to one line", onclick: minifyValue }),
+            copyBtn(() => prodValue.value, "Copy"),
+            valueInfo,
+          ]),
+          el("span", { class: "pane-label", text: "Value" }),
+          prodValue
+        );
+        describeValue();
       } else {
         const box = el("div", { style: "display:flex;flex-direction:column;gap:6px" });
         c.prodHeaders.forEach((h, i) => {
@@ -3777,7 +3990,7 @@
       ]),
       status,
     ]);
-    const producePane = el("div", { class: "console-controls" }, [
+    const producePane = el("div", { class: "console-controls produce-pane" }, [
       el("div", { class: "toolbar" }, [
         el("button", { class: "btn", text: "List topics", onclick: listTopics }),
         topicSel2,
@@ -3806,6 +4019,10 @@
     renderProduce();
     applyMode();
     draw();
+    // put the last result back so switching away and returning shows the
+    // console exactly as you left it
+    if (c.lastStatus) setStatus(status, c.lastStatus.text, c.lastStatus.kind);
+    if (c.lastStatus2) setStatus(status2, c.lastStatus2.text, c.lastStatus2.kind);
   }
 
   /** Flatten an ES mapping's properties into dotted field paths, recording
@@ -3831,6 +4048,13 @@
     // is bound to right now, not a connection captured when the tab was drawn.
     const cluster = () => (getConn && getConn()) || conn;
     const status = el("div", { class: "status-line dim" });
+    // Same as the Kafka console: the last result has to outlive the re-render
+    // an outer-tab switch causes, or the console comes back looking untouched.
+    const say = (text, kind) => {
+      if (kind === "ok" || kind === "err") { c.lastStatus = { text, kind }; ctx.save(); }
+      else if (c.lastStatus) { delete c.lastStatus; ctx.save(); }
+      setStatus(status, text, kind);
+    };
     const out = el("div", { class: "tool", style: "flex:1;min-height:160px" });
     let esView = "table"; // _search results render as a grid by default
 
@@ -3872,7 +4096,7 @@
       const btn = el("button", { class: "btn", text: "Copy response" });
       btn.addEventListener("click", () => {
         const text = c.response || "";
-        if (!text) return setStatus(status, "✗ Nothing to copy — send a request first", "err");
+        if (!text) return say("✗ Nothing to copy — send a request first", "err");
         Devtil.copyText(text, btn);
       });
       return btn;
@@ -3902,8 +4126,8 @@
 
     const send = async (method, p, bodyText) => {
       const k = cluster();
-      if (!k || !k.baseUrl) return setStatus(status, "✗ The active cluster has no base URL", "err");
-      setStatus(status, "Sending…", "dim");
+      if (!k || !k.baseUrl) return say("✗ The active cluster has no base URL", "err");
+      say("Sending…", "dim");
       const headers = {};
       if (bodyText) headers["Content-Type"] = "application/json";
       if (k.username) headers["Authorization"] = "Basic " + btoa(k.username + ":" + (k.password || ""));
@@ -3919,11 +4143,16 @@
         try { text = JSON.stringify(JSON.parse(r.body), null, 2); } catch { /* not JSON */ }
         c.response = text;
         c.name = method + " /" + String(p || "").split("?")[0];
+        // The first response is the moment the room stops belonging to the
+        // request. Fold it once, unprompted; after that the toggle is the
+        // developer's and we never move it again.
+        if (c.reqCollapsed === undefined) c.reqCollapsed = true;
         ctx.save();
+        applyReqOpen();
         drawResponse();
-        setStatus(status, `${r.status < 400 ? "✓" : "✗"} ${r.status} · ${r.durationMs} ms · ${fmtBytes(r.size)}`, r.status < 400 ? "ok" : "err");
+        say(`${r.status < 400 ? "✓" : "✗"} ${r.status} · ${r.durationMs} ms · ${fmtBytes(r.size)}`, r.status < 400 ? "ok" : "err");
       } catch (e) {
-        setStatus(status, "✗ " + e.message, "err");
+        say("✗ " + e.message, "err");
       }
     };
     const quick = (label, method, p) => el("button", {
@@ -3961,26 +4190,26 @@
       let p = (c.path || "").split("?")[0];
       if (!/_search(\/|$)/.test(p)) {
         if (c.index) p = encodeURIComponent(c.index) + "/_search";
-        else return setStatus(status, "✗ Point the request at a _search endpoint (or pick an index in the builder) first", "err");
+        else return say("✗ Point the request at a _search endpoint (or pick an index in the builder) first", "err");
       }
       let bodyObj = {};
       if ((c.body || "").trim()) {
-        try { bodyObj = JSON.parse(c.body); } catch { return setStatus(status, "✗ Body is not valid JSON", "err"); }
+        try { bodyObj = JSON.parse(c.body); } catch { return say("✗ Body is not valid JSON", "err"); }
       }
       if (!bodyObj.query) bodyObj.query = { match_all: {} };
       bodyObj.size = n;
-      setStatus(status, `Exporting up to ${n} hit(s)…`, "dim");
+      say(`Exporting up to ${n} hit(s)…`, "dim");
       try {
         const data = await esFetch("POST", p, JSON.stringify(bodyObj));
         const hits = data.hits && data.hits.hits;
-        if (!Array.isArray(hits)) return setStatus(status, "✗ Response has no hits — is this a _search?", "err");
+        if (!Array.isArray(hits)) return say("✗ Response has no hits — is this a _search?", "err");
         const flat = hits.map((h) => flatten(h._source, "", { _id: h._id }));
         const cols = [];
         for (const row of flat) for (const k of Object.keys(row)) if (!cols.includes(k)) cols.push(k);
         exportRows(fmt, "elastic-export", cols, flat.map((row) => cols.map((k) => row[k] ?? "")));
-        setStatus(status, `✓ Exported ${flat.length} hit(s)`, "ok");
+        say(`✓ Exported ${flat.length} hit(s)`, "ok");
       } catch (e) {
-        setStatus(status, "✗ " + e.message, "err");
+        say("✗ " + e.message, "err");
       }
     };
 
@@ -4017,20 +4246,20 @@
     };
 
     const loadIndices = async () => {
-      setStatus(status, "Loading indices…", "dim");
+      say("Loading indices…", "dim");
       try {
         const list = await esFetch("GET", "_cat/indices?format=json");
         c.indices = list.map((i) => i.index).filter((n) => n && !n.startsWith(".")).sort();
         ctx.save();
         fillIndices();
-        setStatus(status, `✓ ${c.indices.length} index(es)`, "ok");
+        say(`✓ ${c.indices.length} index(es)`, "ok");
       } catch (e) {
-        setStatus(status, "✗ " + e.message, "err");
+        say("✗ " + e.message, "err");
       }
     };
     const loadFields = async () => {
       if (!c.index) { c.fields = []; drawFields(); renderConds(); return; }
-      setStatus(status, "Loading mapping…", "dim");
+      say("Loading mapping…", "dim");
       try {
         const m = await esFetch("GET", encodeURIComponent(c.index) + "/_mapping");
         const entry = m[c.index] || Object.values(m)[0] || {};
@@ -4039,9 +4268,9 @@
         ctx.save();
         drawFields();
         renderConds();
-        setStatus(status, `✓ ${c.fields.length} field(s)`, "ok");
+        say(`✓ ${c.fields.length} field(s)`, "ok");
       } catch (e) {
-        setStatus(status, "✗ " + e.message, "err");
+        say("✗ " + e.message, "err");
       }
     };
     idxSel.addEventListener("change", () => { c.index = idxSel.value; c.conds = []; ctx.save(); loadFields(); });
@@ -4179,7 +4408,7 @@
       reqBody.value = c.body;
     };
     const buildSearch = () => {
-      if (!c.index) { setStatus(status, "✗ Pick an index first (Load indices)", "err"); return false; }
+      if (!c.index) { say("✗ Pick an index first (Load indices)", "err"); return false; }
       syncBody();
       return true;
     };
@@ -4202,23 +4431,41 @@
     drawFields();
     renderConds();
 
-    // controls are grouped so they keep their natural size (scrolling among
-    // themselves when the builder is open) and the response always gets the
-    // rest of the pane instead of being pushed off the bottom
+    // The request block — index picker, query builder and body — is the tall
+    // part, and once a response is on screen it is usually the response you
+    // want the room for. Everything except the send line folds away, and the
+    // choice is remembered per console.
+    const reqBlock = el("div", { class: "es-req" }, [
+      target,
+      builder,
+      el("div", { class: "toolbar" }, [
+        quick("Cluster health", "GET", "_cluster/health"),
+        quick("Indices", "GET", "_cat/indices?v&format=json"),
+        quick("Nodes", "GET", "_cat/nodes?v&format=json"),
+      ]),
+      el("div", {}, [el("span", { class: "pane-label", text: "Body (JSON, for _search etc.)" }), reqBody]),
+    ]);
+    const reqToggle = el("button", { class: "btn req-toggle" });
+    const applyReqOpen = () => {
+      const open = c.reqCollapsed !== true;
+      reqBlock.classList.toggle("collapsed", !open);
+      reqToggle.textContent = open ? "▾ Request" : "▸ Request";
+      reqToggle.title = open ? "Fold the request away and give the response the pane" : "Show the index picker, query builder and body";
+    };
+    reqToggle.addEventListener("click", () => {
+      c.reqCollapsed = c.reqCollapsed !== true;
+      ctx.save();
+      applyReqOpen();
+    });
+    applyReqOpen();
+
     body.append(
       el("div", { class: "console-controls" }, [
-        target,
-        builder,
-        el("div", { class: "toolbar" }, [
-          quick("Cluster health", "GET", "_cluster/health"),
-          quick("Indices", "GET", "_cat/indices?v&format=json"),
-          quick("Nodes", "GET", "_cat/nodes?v&format=json"),
-        ]),
+        reqBlock,
         el("div", { class: "req-line" }, [
-          methodSel, path,
+          reqToggle, methodSel, path,
           el("button", { class: "btn primary", text: "Send", onclick: () => send(c.method || "GET", c.path, c.body) }),
         ]),
-        el("div", {}, [el("span", { class: "pane-label", text: "Body (JSON, for _search etc.)" }), reqBody]),
         // copy sits with the export actions so it's available for every
         // response, not just the _search ones that render as a table
         exportBar(c, ctx, doExport, [copyResponseBtn()]),
@@ -4227,6 +4474,9 @@
       out
     );
     drawResponse();
+    // put the last result back, so returning to this console shows it exactly
+    // as you left it
+    if (c.lastStatus) setStatus(status, c.lastStatus.text, c.lastStatus.kind);
   }
 
   clientTool({
@@ -5090,6 +5340,12 @@
 
       let concepts = [];   // metadata for the list
       let graph = null;    // { nodes, edges, broken, orphans }
+      // pan/zoom survives a re-render, so switching to a concept and back
+      // does not throw away where you were looking
+      let gView = null;
+      // the previous graph pane's window listeners, dropped before the next
+      // one installs its own
+      let graphCleanup = null;
       let problems = [];
       let bundleRoot = "";
 
@@ -5170,6 +5426,10 @@
             ]));
           }
         }
+        // The type filter can also be set from the graph's legend, so keep
+        // the dropdown in step rather than letting it claim "All types" while
+        // the list is filtered.
+        if (typeSel.value !== (d.typeFilter || "")) typeSel.value = d.typeFilter || "";
         sideBox.replaceChildren(
           el("div", { class: "toolbar" }, [search, typeSel]),
           el("div", { class: "api-side-content" }, [list])
@@ -5185,6 +5445,11 @@
             viewBtn("doc", "📄 Concept"),
             el("span", { class: "spacer" }),
             el("button", { class: "btn primary", text: "+ New concept", onclick: newConcept }),
+            el("button", {
+              class: "btn", text: "⬇ Export", title: "Download the whole bundle as a zip you can share or commit",
+              onclick: () => { window.location.href = "/api/okf/export"; },
+            }),
+            el("button", { class: "btn", text: "⬆ Import", title: "Merge someone else's bundle into yours", onclick: pickImport }),
             el("button", { class: "btn", text: "↻ Refresh", onclick: () => load() }),
           ]),
           d.view === "doc" ? docPane() : graphPane()
@@ -5198,6 +5463,65 @@
         });
       }
 
+      // ---- import a bundle archive ----------------------------------------
+      function pickImport() {
+        const input = el("input", { type: "file", accept: ".zip,application/zip", style: "display:none" });
+        input.addEventListener("change", async () => {
+          const f = input.files && input.files[0];
+          input.remove();
+          if (!f) return;
+          const opts = await importDialog(f.name);
+          if (!opts) return;
+          setStatus(status, `Importing ${f.name}…`, "dim");
+          try {
+            const qs = new URLSearchParams();
+            if (opts.prefix) qs.set("prefix", opts.prefix);
+            if (opts.overwrite) qs.set("overwrite", "true");
+            const res = await fetch("/api/okf/import?" + qs.toString(), { method: "POST", body: f });
+            const out = await res.json();
+            if (!res.ok) throw new Error(out.error || res.statusText);
+            const bits = [`${(out.added || []).length} added`];
+            if ((out.replaced || []).length) bits.push(`${out.replaced.length} replaced`);
+            if ((out.skipped || []).length) bits.push(`${out.skipped.length} left alone (already here)`);
+            if ((out.ignored || []).length) bits.push(`${out.ignored.length} ignored (not markdown)`);
+            await load(true);
+            setStatus(status, "✓ Imported — " + bits.join(", "), "ok");
+          } catch (e) {
+            setStatus(status, "✗ " + e.message, "err");
+          }
+        });
+        document.body.append(input);
+        input.click();
+      }
+
+      function importDialog(fileName) {
+        return new Promise((resolve) => {
+          const overlay = el("div", { class: "app-dialog-overlay" });
+          const close = (v) => { overlay.remove(); document.removeEventListener("keydown", onKey); resolve(v); };
+          const onKey = (e) => { e.stopPropagation(); if (e.key === "Escape") close(null); };
+          document.addEventListener("keydown", onKey);
+
+          const prefix = el("input", { class: "app-dialog-input", type: "text", placeholder: "e.g. vendor/acme — leave blank to merge at the top level" });
+          const overwrite = el("input", { type: "checkbox" });
+
+          overlay.append(el("div", { class: "app-dialog" }, [
+            el("div", { class: "app-dialog-msg", text: `Import ${fileName}` }),
+            el("div", { class: "set-note", text: "Concepts are merged into your bundle. Anything you already have is left untouched unless you say otherwise." }),
+            el("div", { class: "field" }, [el("span", { class: "pane-label", text: "Import into folder (optional)" }), prefix]),
+            el("label", { class: "inline" }, [overwrite, "Overwrite concepts I already have with the same path"]),
+            el("div", { class: "app-dialog-actions" }, [
+              el("button", { class: "btn", text: "Cancel", onclick: () => close(null) }),
+              el("button", { class: "btn primary", text: "Import", onclick: () => close({ prefix: prefix.value.trim(), overwrite: overwrite.checked }) }),
+            ]),
+          ]));
+          overlay.addEventListener("click", (e) => { if (e.target === overlay) close(null); });
+          prefix.addEventListener("keydown", (e) => { if (e.key === "Enter") close({ prefix: prefix.value.trim(), overwrite: overwrite.checked }); });
+          document.body.append(overlay);
+          prefix.focus();
+        });
+      }
+
+      // ---- graph ----------------------------------------------------------
       function graphPane() {
         const box = el("div", { class: "kg-graph" });
         if (!graph || !graph.nodes || !graph.nodes.length) {
@@ -5206,64 +5530,270 @@
         }
         // Lay out once the box has real dimensions, otherwise every node
         // lands on top of the others in a zero-width viewport.
-        requestAnimationFrame(() => {
-          const w = Math.max(320, box.clientWidth), h = Math.max(260, box.clientHeight);
-          const real = graph.nodes.filter((n) => !n.reserved);
-          const broken = graph.broken || [];
-          // A link to a concept that doesn't exist yet is worth seeing, so
-          // give each missing target a placeholder node rather than dropping
-          // the edge and quietly showing a smaller graph than the bundle has.
-          const known = new Set(real.map((n) => n.path));
-          const missing = [...new Set(broken.map((e) => e.to))]
-            .filter((p) => !known.has(p))
-            .map((p) => ({ path: p, title: p.split("/").pop(), type: "", missing: true }));
-          const nodes = real.concat(missing);
-          const edges = (graph.edges || []).concat(broken);
-          const pts = layoutGraph(nodes, edges, w, h);
-          const at = new Map(pts.map((p) => [p.node.path, p]));
-
-          const canvas = svg("svg", { class: "kg-svg", viewBox: `0 0 ${w} ${h}`, preserveAspectRatio: "xMidYMid meet" });
-          canvas.append(svg("defs", {}, [
-            svg("marker", { id: "kg-arrow", viewBox: "0 0 10 10", refX: "10", refY: "5", markerWidth: "6", markerHeight: "6", orient: "auto-start-reverse" },
-              [svg("path", { d: "M 0 0 L 10 5 L 0 10 z", class: "kg-arrow-head" })]),
-          ]));
-          const brokenSet = new Set((graph.broken || []).map((e) => e.from + " " + e.to));
-          for (const e of edges) {
-            const a = at.get(e.from), b = at.get(e.to);
-            if (!a || !b) continue;
-            canvas.append(svg("line", {
-              x1: a.x, y1: a.y, x2: b.x, y2: b.y,
-              class: "kg-edge" + (brokenSet.has(e.from + " " + e.to) ? " broken" : ""),
-              "marker-end": "url(#kg-arrow)",
-            }, [svg("title", { text: `${e.from} → ${e.to}${brokenSet.has(e.from + " " + e.to) ? " (broken link)" : ""}` })]));
-          }
-          for (const p of pts) {
-            const isMissing = !!p.node.missing;
-            const g = svg("g", {
-              class: "kg-node" + (isMissing ? " missing" : "") + (p.node.path === d.path ? " active" : ""),
-              onclick: () => {
-                if (isMissing) return setStatus(status, `${p.node.path} is linked to but does not exist yet — create it to close the gap.`, "err");
-                open(p.node.path);
-              },
-            });
-            g.append(svg("circle", {
-              cx: p.x, cy: p.y, r: 9,
-              fill: isMissing ? "transparent" : typeColor(p.node.type),
-            }));
-            g.append(svg("text", { x: p.x, y: p.y - 15, "text-anchor": "middle", text: p.node.title }));
-            g.append(svg("title", {
-              text: isMissing
-                ? `${p.node.path}\nlinked to, but this concept does not exist`
-                : `${p.node.title}\n${p.node.type || "untyped"}\n${p.node.path}`,
-            }));
-            canvas.append(g);
-          }
-          box.replaceChildren(canvas);
-          if (graph.orphans && graph.orphans.length) {
-            box.append(el("div", { class: "kg-legend", text: `${graph.orphans.length} unlinked concept(s) — link them from a related concept so they are discoverable.` }));
-          }
-        });
+        requestAnimationFrame(() => buildGraph(box));
         return box;
+      }
+
+      function buildGraph(box) {
+        const w = Math.max(320, box.clientWidth), h = Math.max(260, box.clientHeight);
+        let unpinBtn = null; // created with the legend, revealed by a drag
+        const real = graph.nodes.filter((n) => !n.reserved);
+        const broken = graph.broken || [];
+        // A link to a concept that doesn't exist yet is worth seeing, so give
+        // each missing target a placeholder node rather than dropping the edge
+        // and quietly showing a smaller graph than the bundle has.
+        const known = new Set(real.map((n) => n.path));
+        const missing = [...new Set(broken.map((e) => e.to))]
+          .filter((p) => !known.has(p))
+          .map((p) => ({ path: p, title: p.split("/").pop(), type: "", missing: true }));
+        const nodes = real.concat(missing);
+        const edges = (graph.edges || []).concat(broken);
+
+        // degree drives node size, so the hubs of a domain stand out
+        const degree = new Map(nodes.map((n) => [n.path, 0]));
+        const adj = new Map(nodes.map((n) => [n.path, new Set()]));
+        for (const e of edges) {
+          if (degree.has(e.from)) degree.set(e.from, degree.get(e.from) + 1);
+          if (degree.has(e.to)) degree.set(e.to, degree.get(e.to) + 1);
+          if (adj.has(e.from)) adj.get(e.from).add(e.to);
+          if (adj.has(e.to)) adj.get(e.to).add(e.from);
+        }
+        const radius = (n) => 6 + Math.min(9, (degree.get(n.path) || 0) * 1.6);
+
+        const pts = layoutGraph(nodes, edges, w, h);
+        // a node the user dragged keeps the spot they put it in
+        for (const p of pts) {
+          const pin = d.pins && d.pins[p.node.path];
+          if (pin) { p.x = pin.x; p.y = pin.y; }
+        }
+        const at = new Map(pts.map((p) => [p.node.path, p]));
+
+        const canvas = svg("svg", { class: "kg-svg", viewBox: `0 0 ${w} ${h}`, preserveAspectRatio: "xMidYMid meet" });
+        canvas.append(svg("defs", {}, [
+          svg("marker", { id: "kg-arrow", viewBox: "0 0 10 10", refX: "10", refY: "5", markerWidth: "6", markerHeight: "6", orient: "auto-start-reverse" },
+            [svg("path", { d: "M 0 0 L 10 5 L 0 10 z", class: "kg-arrow-head" })]),
+        ]));
+        const viewport = svg("g", { class: "kg-viewport" });
+        canvas.append(viewport);
+
+        // ---- edges then nodes, so nodes sit on top
+        const brokenSet = new Set(broken.map((e) => e.from + " " + e.to));
+        const edgeEls = [];
+        for (const e of edges) {
+          const a = at.get(e.from), b = at.get(e.to);
+          if (!a || !b) continue;
+          const isBroken = brokenSet.has(e.from + " " + e.to);
+          const line = svg("line", {
+            x1: a.x, y1: a.y, x2: b.x, y2: b.y,
+            class: "kg-edge" + (isBroken ? " broken" : ""),
+            "marker-end": "url(#kg-arrow)",
+          }, [svg("title", { text: `${e.from} → ${e.to}${isBroken ? " (broken link)" : ""}` })]);
+          viewport.append(line);
+          edgeEls.push({ e, line, a, b });
+        }
+
+        const nodeEls = new Map();
+        for (const p of pts) {
+          const isMissing = !!p.node.missing;
+          const g = svg("g", {
+            class: "kg-node" + (isMissing ? " missing" : "") + (p.node.path === d.path ? " active" : ""),
+          });
+          const circle = svg("circle", {
+            cx: p.x, cy: p.y, r: radius(p.node),
+            fill: isMissing ? "transparent" : typeColor(p.node.type),
+          });
+          const label = svg("text", { x: p.x, y: p.y - radius(p.node) - 6, "text-anchor": "middle", text: p.node.title });
+          g.append(circle, label, svg("title", {
+            text: isMissing
+              ? `${p.node.path}\nlinked to, but this concept does not exist`
+              : `${p.node.title}\n${p.node.type || "untyped"}\n${p.node.path}\n${degree.get(p.node.path) || 0} link(s)`,
+          }));
+          viewport.append(g);
+          nodeEls.set(p.node.path, { g, circle, label, p, node: p.node });
+        }
+
+        // ---- highlight: the sidebar's filter, and whatever is hovered
+        const q = (d.query || "").toLowerCase();
+        const matches = (n) =>
+          (!d.typeFilter || n.type === d.typeFilter) &&
+          (!q || (n.path + " " + (n.title || "") + " " + (n.description || "")).toLowerCase().includes(q));
+        const filtering = !!(q || d.typeFilter);
+        let hovered = null;
+
+        function applyHighlight() {
+          // Hovering wins over the filter: you asked about *this* node now.
+          const near = hovered ? new Set([hovered, ...(adj.get(hovered) || [])]) : null;
+          for (const [path, ne] of nodeEls) {
+            const dim = near ? !near.has(path) : (filtering && !matches(ne.node));
+            ne.g.classList.toggle("dim", dim);
+            ne.g.classList.toggle("hot", !!near && near.has(path));
+          }
+          for (const { e, line } of edgeEls) {
+            const on = near
+              ? (e.from === hovered || e.to === hovered)
+              : (!filtering || (matches0(e.from) && matches0(e.to)));
+            line.classList.toggle("dim", !on);
+          }
+        }
+        const matches0 = (path) => {
+          const ne = nodeEls.get(path);
+          return ne ? matches(ne.node) : false;
+        };
+
+        // ---- pan / zoom ------------------------------------------------
+        const view = gView || { k: 1, tx: 0, ty: 0 };
+        const applyView = () => {
+          viewport.setAttribute("transform", `translate(${view.tx} ${view.ty}) scale(${view.k})`);
+          gView = view;
+        };
+        applyView();
+
+        // Screen→world through the SVG's own matrix, so the maths stays right
+        // whatever the element's size or aspect ratio is.
+        const toWorld = (evt) => {
+          const pt = canvas.createSVGPoint();
+          pt.x = evt.clientX; pt.y = evt.clientY;
+          const m = viewport.getScreenCTM();
+          return m ? pt.matrixTransform(m.inverse()) : { x: 0, y: 0 };
+        };
+
+        canvas.addEventListener("wheel", (evt) => {
+          evt.preventDefault();
+          const before = toWorld(evt);
+          const factor = Math.exp(-evt.deltaY * 0.0015);
+          view.k = Math.max(0.2, Math.min(4, view.k * factor));
+          applyView();
+          const after = toWorld(evt);
+          // keep the point under the cursor fixed while zooming
+          view.tx += (after.x - before.x) * view.k;
+          view.ty += (after.y - before.y) * view.k;
+          applyView();
+        }, { passive: false });
+
+        let panFrom = null;
+        canvas.addEventListener("mousedown", (evt) => {
+          if (evt.target.closest(".kg-node")) return; // node drag handles it
+          panFrom = { x: evt.clientX, y: evt.clientY, tx: view.tx, ty: view.ty };
+          canvas.classList.add("panning");
+        });
+        // Dragging has to keep working when the pointer leaves the SVG, so
+        // the listeners go on the window — which means the previous pane's
+        // pair must be removed or every re-render leaks another set.
+        if (graphCleanup) graphCleanup();
+        window.addEventListener("mousemove", onMove);
+        window.addEventListener("mouseup", onUp);
+        graphCleanup = () => {
+          window.removeEventListener("mousemove", onMove);
+          window.removeEventListener("mouseup", onUp);
+          graphCleanup = null;
+        };
+
+        let dragging = null;
+        function onMove(evt) {
+          if (dragging) {
+            const p = toWorld(evt);
+            dragging.moved = true;
+            dragging.entry.p.x = p.x;
+            dragging.entry.p.y = p.y;
+            placeNode(dragging.entry);
+            return;
+          }
+          if (panFrom) {
+            view.tx = panFrom.tx + (evt.clientX - panFrom.x);
+            view.ty = panFrom.ty + (evt.clientY - panFrom.y);
+            applyView();
+          }
+        }
+        function onUp() {
+          if (dragging) {
+            if (dragging.moved) {
+              // remember where the user put it
+              if (!d.pins) d.pins = {};
+              d.pins[dragging.path] = { x: dragging.entry.p.x, y: dragging.entry.p.y };
+              ctx.save();
+              // reveal the escape hatch as soon as there is something to undo,
+              // rather than waiting for whatever re-renders next
+              if (unpinBtn) unpinBtn.style.display = "";
+            } else {
+              openNode(dragging.entry);
+            }
+            dragging.entry.g.classList.remove("dragging");
+            dragging = null;
+          }
+          panFrom = null;
+          canvas.classList.remove("panning");
+        }
+
+        function placeNode(entry) {
+          const r = radius(entry.node);
+          entry.circle.setAttribute("cx", entry.p.x);
+          entry.circle.setAttribute("cy", entry.p.y);
+          entry.label.setAttribute("x", entry.p.x);
+          entry.label.setAttribute("y", entry.p.y - r - 6);
+          for (const { e, line } of edgeEls) {
+            if (e.from === entry.node.path) { line.setAttribute("x1", entry.p.x); line.setAttribute("y1", entry.p.y); }
+            if (e.to === entry.node.path) { line.setAttribute("x2", entry.p.x); line.setAttribute("y2", entry.p.y); }
+          }
+        }
+
+        function openNode(entry) {
+          if (entry.node.missing) {
+            return setStatus(status, `${entry.node.path} is linked to but does not exist yet — create it to close the gap.`, "err");
+          }
+          open(entry.node.path);
+        }
+
+        for (const [path, entry] of nodeEls) {
+          entry.g.addEventListener("mousedown", (evt) => {
+            evt.stopPropagation();
+            dragging = { path, entry, moved: false };
+            entry.g.classList.add("dragging");
+          });
+          entry.g.addEventListener("mouseenter", () => { hovered = path; applyHighlight(); });
+          entry.g.addEventListener("mouseleave", () => { hovered = null; applyHighlight(); });
+        }
+
+        applyHighlight();
+        box.replaceChildren(canvas);
+
+        // ---- legend + hints -------------------------------------------
+        const types = [...new Set(real.map((n) => n.type).filter(Boolean))].sort();
+        const legend = el("div", { class: "kg-legend-bar" });
+        for (const t of types) {
+          legend.append(el("button", {
+            class: "kg-chip" + (d.typeFilter === t ? " active" : ""),
+            title: d.typeFilter === t ? "Show all types" : `Highlight only ${t}`,
+            onclick: () => {
+              d.typeFilter = d.typeFilter === t ? "" : t;
+              ctx.save();
+              renderSide();
+              renderMain();
+            },
+          }, [
+            el("span", { class: "kg-dot", style: `background:${typeColor(t)}` }),
+            el("span", { text: t }),
+          ]));
+        }
+        legend.append(el("span", { class: "spacer" }));
+        unpinBtn = el("button", {
+          class: "btn kg-chip", text: "Unpin all",
+          title: "Forget the positions you dragged nodes to",
+          onclick: () => { d.pins = {}; ctx.save(); renderMain(); },
+        });
+        if (!(d.pins && Object.keys(d.pins).length)) unpinBtn.style.display = "none";
+        legend.append(unpinBtn);
+        legend.append(el("button", {
+          class: "btn kg-chip", text: "Reset view", title: "Back to the default zoom and position",
+          onclick: () => { gView = null; renderMain(); },
+        }));
+        box.append(legend);
+
+        const hints = [];
+        if (graph.orphans && graph.orphans.length) {
+          hints.push(`${graph.orphans.length} unlinked concept(s) — link them from a related concept so they are discoverable`);
+        }
+        hints.push("scroll to zoom · drag the background to pan · drag a node to pin it · hover to isolate its links");
+        box.append(el("div", { class: "kg-hint", text: hints.join("  ·  ") }));
       }
 
       function docPane() {
@@ -5387,8 +5917,15 @@
         }
       }
 
-      search.addEventListener("input", debounce(() => { d.query = search.value; ctx.save(); renderSide(); }, 150));
-      typeSel.addEventListener("change", () => { d.typeFilter = typeSel.value; ctx.save(); renderSide(); });
+      // the filter dims the graph as well as the list, so both have to redraw
+      search.addEventListener("input", debounce(() => {
+        d.query = search.value; ctx.save(); renderSide();
+        if (d.view === "graph") renderMain();
+      }, 200));
+      typeSel.addEventListener("change", () => {
+        d.typeFilter = typeSel.value; ctx.save(); renderSide();
+        if (d.view === "graph") renderMain();
+      });
 
       root.append(status, el("div", { class: "api-layout" }, [sideBox, mainBox]));
       load();

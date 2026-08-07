@@ -38,10 +38,16 @@ single dependency-free binary (with an optional native desktop app).
 **Infra clients**
 - **Kafka** (multi-cluster): topic dropdown, read latest / from-beginning /
   time-range, key & value search, newest-first messages with pretty-printed
-  values (maximize with Value/Headers tabs), produce with headers,
-  configurable timeout
+  values (maximize with Value/Headers tabs), configurable timeout. **Produce**
+  is its own mode with a full-height value editor that **pretty-prints JSON
+  the moment you paste it**, Format/Minify/Copy buttons, and a live readout of
+  the payload size and whether it parses — a broken payload reports itself
+  before the broker does
 - **Elastic / OpenSearch**: REST console + a **visual query builder** that
-  generates clauses from each field's schema type (term/match/range/nested)
+  generates clauses from each field's schema type (term/match/range/nested).
+  The index picker, builder and body **fold away behind a ▸ Request toggle**,
+  and fold themselves the first time a response arrives — so the result gets
+  the pane, not the request. Your choice after that is remembered per console
 - **Cassandra** and **Relational Databases** (Oracle, MySQL, PostgreSQL):
   SQL/CQL consoles with a schema-aware table+column query helper. Pure-Go
   drivers (no DB client install); connect with host/port fields or a single
@@ -50,18 +56,33 @@ single dependency-free binary (with an optional native desktop app).
   consoles — pick the row count (default 1000, max 10 000)
 
 **Kube & remote access**
-- **Kube Console**: connect over SSH (password) to the kubemaster, find pods,
-  and open a **terminal panel per container** — tail logs live, run any
-  command, search a whole folder, minimize/maximize/close
+- **Kube Console**: **saved clusters** — name a connection once (SSH host,
+  port, password, context, namespace) and pick it from a dropdown instead of
+  retyping it; agents reach the same clusters by name over MCP. **Find
+  services** lists a namespace's services with their ports and selector, and
+  clicking one resolves the pods it actually fronts. Then open a **terminal
+  panel per container** — tail logs live, run any command, search a whole
+  folder, minimize/maximize/close
 - **SSH / PuTTY**: fully **interactive terminals** (real PTY over WebSocket
   with xterm.js) — `vim`/`top`/colours/tab-completion work; multiple sessions,
   **broadcast typing** to all, **saved hosts**, copy/paste
 - **SFTP / Files**: WinSCP-style browser — list directories and download files
 
 **Use it from an AI agent (MCP)**
-- Devtil speaks the **Model Context Protocol**, exposing all **34 tools** to
-  any agent host: the offline utilities, the HTTP client, Kafka,
-  Oracle/MySQL/PostgreSQL, Cassandra, Elasticsearch, Kubernetes and SSH
+- Devtil speaks the **Model Context Protocol**, exposing all **42 tools** —
+  **every tab in the app** — to any agent host: the offline utilities, the
+  HTTP client, Kafka, Oracle/MySQL/PostgreSQL, Cassandra, Elasticsearch,
+  Kubernetes and SSH/SFTP
+- **Your own workspace is reachable too.** `api_request` sends a request you
+  already saved in the API Client, applying the collection's base URL, global
+  headers and auth exactly as the UI does — so an agent can call your services
+  without ever handling the credentials; `api_collections` lets it find one by
+  name. `notepad_read` gives it the notes you made, and `devtil_logs` gives it
+  Devtil's own diagnostic log, so an agent whose call failed can look up why
+  instead of asking you. The notepad tools are **read-only on purpose**: the
+  UI autosaves the whole workspace every few hundred milliseconds, so an
+  agent's write would be lost to your next keystroke — durable agent notes
+  belong in the knowledge bundle
 - **On by default**, served from the running app over the **Streamable HTTP**
   transport at `http://127.0.0.1:8347/mcp` — nothing extra to start. Point an
   agent at it with `{"type": "http", "url": "…/mcp"}`, or run `devtil mcp` for
@@ -79,6 +100,8 @@ single dependency-free binary (with an optional native desktop app).
   agent asks for it from a cached list
 - **Per-connection sharing** — an unshared connection is invisible to agents,
   not merely unusable
+- **Fixed**: Settings could fail to open on a fresh install, before any
+  connection had been saved
 - **Environment labels and a default per tool** — devtil never guesses which
   of your clusters an agent meant. With several and no default it refuses and
   tells the agent to ask you; a connection labelled **production** is never
@@ -93,8 +116,13 @@ single dependency-free binary (with an optional native desktop app).
 - A new tool for **Open Knowledge Format** bundles (v0.2): knowledge as plain
   markdown files with YAML frontmatter, where the file path is a concept's
   identity and markdown links form the graph
-- Force-directed graph view with type-coloured nodes, plus a concept editor
-  showing what each one links to and is linked from
+- **Interactive graph** — scroll to zoom, drag to pan, drag a node to pin it
+  (pins persist), hover to isolate a concept's neighbourhood, node size by how
+  many links a concept has, and a type legend that doubles as a filter
+- **Share a bundle**: export the whole thing as a zip, import someone else's.
+  Imports merge — your own concepts are never overwritten unless you ask — and
+  can land under a folder of their own
+- A concept editor showing what each one links to and is linked from
 - Agents read and write the **same bundle** over MCP, so what one records
   while it works is there for you to read, correct and commit
 

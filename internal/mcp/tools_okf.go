@@ -272,5 +272,6 @@ func (s *Server) registerOKF() {
 func (s *Server) registerAll() {
 	s.registerText()
 	s.registerInfra()
+	s.registerWorkspace()
 	s.registerOKF()
 }

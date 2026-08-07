@@ -20,8 +20,8 @@ import (
 // DBConn covers Cassandra and the relational engines (Oracle, MySQL,
 // PostgreSQL); unused fields are simply left empty by the respective tool.
 type DBConn struct {
-	Engine   string `json:"engine"`   // relational engine: oracle | mysql | postgres
-	Hosts    string `json:"hosts"`    // comma-separated; relational engines use the first
+	Engine   string `json:"engine"` // relational engine: oracle | mysql | postgres
+	Hosts    string `json:"hosts"`  // comma-separated; relational engines use the first
 	Port     int    `json:"port"`
 	Keyspace string `json:"keyspace"` // Cassandra
 	Service  string `json:"service"`  // Oracle service name

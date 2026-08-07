@@ -71,6 +71,7 @@ func (s *Server) Handler() http.Handler {
 
 	mux.HandleFunc("GET /api/kube/contexts", s.kubeContexts)
 	mux.HandleFunc("GET /api/kube/namespaces", s.kubeNamespaces)
+	mux.HandleFunc("GET /api/kube/services", s.kubeServices)
 	mux.HandleFunc("GET /api/kube/pods", s.kubePods)
 	mux.HandleFunc("POST /api/kube/logs", s.kubeLogs)
 	mux.HandleFunc("POST /api/kube/exec", s.kubeExec)
@@ -89,6 +90,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT /api/okf/doc", s.okfWrite)
 	mux.HandleFunc("DELETE /api/okf/doc", s.okfDelete)
 	mux.HandleFunc("GET /api/okf/graph", s.okfGraph)
+	mux.HandleFunc("GET /api/okf/export", s.okfExport)
+	mux.HandleFunc("POST /api/okf/import", s.okfImport)
 
 	mux.HandleFunc("GET /api/logs", s.getLogs)
 	mux.HandleFunc("POST /api/logs/client", s.clientLog)
@@ -231,6 +234,22 @@ func (s *Server) kubeContexts(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"contexts": names, "current": current})
 }
 
+// kubeServices lists the services in a namespace. The Kube tool leads with
+// services because that is how people describe a problem; pods come after.
+func (s *Server) kubeServices(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	conn := connFromQuery(q)
+	if !requireTools(w, conn) {
+		return
+	}
+	svcs, err := kube.Services(conn, q.Get("namespace"), q.Get("query"))
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err)
+		return
+	}
+	writeJSON(w, map[string]any{"services": svcs, "count": len(svcs)})
+}
+
 func (s *Server) kubeNamespaces(w http.ResponseWriter, r *http.Request) {
 	conn := connFromQuery(r.URL.Query())
 	if !requireTools(w, conn) {
@@ -254,7 +273,15 @@ func (s *Server) kubePods(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, errString("namespace is required"))
 		return
 	}
-	pods, err := kube.Pods(conn, q.Get("namespace"), q.Get("query"))
+	// A selector is the exact way to ask "which pods back this service?";
+	// the free-text query is the fuzzy fallback.
+	var pods []kube.Pod
+	var err error
+	if sel := strings.TrimSpace(q.Get("selector")); sel != "" {
+		pods, err = kube.PodsBySelector(conn, q.Get("namespace"), sel)
+	} else {
+		pods, err = kube.Pods(conn, q.Get("namespace"), q.Get("query"))
+	}
 	if err != nil {
 		writeError(w, http.StatusBadGateway, err)
 		return

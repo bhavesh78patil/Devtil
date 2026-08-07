@@ -1,11 +1,14 @@
 package server
 
 import (
+	"bytes"
 	"encoding/json"
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
+	"github.com/bhavesh78patil/devtil/internal/logging"
 	"github.com/bhavesh78patil/devtil/internal/okf"
 )
 
@@ -137,6 +140,49 @@ func (s *Server) okfDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, map[string]any{"ok": true})
+}
+
+// okfExport streams the bundle as a zip. What comes out is the bundle itself
+// — plain markdown — so the recipient can unpack it, read it in an editor, or
+// commit it next to the code it describes.
+func (s *Server) okfExport(w http.ResponseWriter, r *http.Request) {
+	b, err := s.bundle()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	name := "okf-bundle-" + time.Now().Format("2006-01-02") + ".zip"
+	w.Header().Set("Content-Type", "application/zip")
+	w.Header().Set("Content-Disposition", `attachment; filename="`+name+`"`)
+	if err := b.WriteZip(w); err != nil {
+		// The headers are already out, so the download will simply be short —
+		// log it rather than pretending we can still send an error document.
+		logging.Logf("okf: export failed: %v", err)
+	}
+}
+
+// okfImport merges an uploaded bundle archive into this one.
+func (s *Server) okfImport(w http.ResponseWriter, r *http.Request) {
+	b, err := s.bundle()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	data, err := io.ReadAll(io.LimitReader(r.Body, 64<<20))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	q := r.URL.Query()
+	res, err := b.ReadZip(bytes.NewReader(data), int64(len(data)), okf.ImportOptions{
+		Prefix:    q.Get("prefix"),
+		Overwrite: q.Get("overwrite") == "true",
+	})
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, res)
 }
 
 func (s *Server) okfGraph(w http.ResponseWriter, r *http.Request) {

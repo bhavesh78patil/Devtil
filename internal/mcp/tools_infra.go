@@ -179,7 +179,17 @@ func summarizeConn(toolType string, f map[string]any) string {
 		}
 		return eng + " · " + loc
 	case "kube":
-		return get("sshHost")
+		loc := get("sshHost")
+		if loc == "" {
+			loc = "local kubeconfig"
+		}
+		if c := get("context"); c != "" {
+			loc += " · context " + c
+		}
+		if ns := get("namespace"); ns != "" {
+			loc += " · namespace " + ns
+		}
+		return loc
 	default:
 		h := get("host")
 		if p := get("port"); p != "" && p != "22" {
@@ -481,10 +491,13 @@ var kubeConnProps = map[string]any{
 func (s *Server) kubeConn(a Args) (kube.Conn, resolved, error) {
 	r, err := s.resolve("kube", a, kubeConnKeys)
 	if err != nil {
-		// A local kubeconfig is a perfectly normal setup, so an absent saved
-		// connection is not fatal here — fall through to plain kubectl, which
-		// uses the current context.
-		if !a.Has("connection") {
+		// Running against the machine's own kubeconfig is a perfectly normal
+		// setup, so "no saved connection" is not fatal — but only when there
+		// genuinely are none. Once the developer has saved clusters, silently
+		// falling back to the local context would answer a question about
+		// their cluster with somebody else's.
+		saved := loadConnections(s.store).filter(a.policy).byTool["kube"]
+		if !a.Has("connection") && len(saved) == 0 {
 			return kube.Conn{}, resolved{SelectedBy: "the machine's current kubeconfig context"}, nil
 		}
 		return kube.Conn{}, r, err
@@ -562,23 +575,16 @@ func (s *Server) registerKube() {
 	})
 
 	s.register(&Tool{
-		Name:  "kube_logs",
-		Title: "Read pod logs",
-		Description: "Fetch logs from one or more pods, with an optional grep filter. When several pods are selected each line is prefixed with its pod name. " +
-			"Set source=file with filePath for services that write to a log file instead of stdout.",
+		Name:  "kube_services",
+		Title: "List services",
+		Description: "List the services in a namespace with their type, cluster IP, ports and pod selector. " +
+			"People describe problems in services (\"checkout is erroring\") while logs live in pods — start here, " +
+			"then pass the service name straight to kube_logs.",
 		ReadOnly: true,
 		Schema: obj(merge(connectionArg("Kube Console"), kubeConnProps, map[string]any{
-			"namespace":    str("Namespace the pods are in."),
-			"pods":         strArray("Pod names to read."),
-			"container":    str("Container name, when a pod has more than one."),
-			"tail":         num("Lines to read from the end of the log (default 500)."),
-			"sinceMinutes": num("Only return lines from the last N minutes."),
-			"previous":     boolean("Read the previous container instance's logs — use after a crash."),
-			"grep":         str("Only return lines containing this."),
-			"grepRegex":    boolean("Treat grep as a regular expression."),
-			"source":       enum("stdout (default) reads container logs; file tails filePath inside the pod.", "stdout", "file"),
-			"filePath":     str("Path to the log file inside the container, when source=file."),
-		}), "namespace", "pods"),
+			"namespace": str("Namespace to list."),
+			"query":     str("Case-insensitive substring to match against service names and their selectors."),
+		}), "namespace"),
 		Run: func(a Args) (any, error) {
 			conn, chosen, err := s.kubeConn(a)
 			if err != nil {
@@ -588,9 +594,88 @@ func (s *Server) registerKube() {
 			if err != nil {
 				return nil, err
 			}
+			svcs, err := kube.Services(conn, ns, a.Str("query"))
+			if err != nil {
+				return nil, err
+			}
+			return withConnection(map[string]any{
+				"services": svcs, "count": len(svcs), "namespace": ns,
+			}, chosen), nil
+		},
+	})
+
+	s.register(&Tool{
+		Name:  "kube_logs",
+		Title: "Read and search pod logs",
+		Description: "Fetch logs from pods, with an optional grep filter — this is how you search logs. " +
+			"Give it a service name and it resolves that service's pods for you (no need to list pods first), " +
+			"or name pods directly. When several pods are read each line is prefixed with its pod name. " +
+			"Combine grep with sinceMinutes to answer questions like \"any timeouts in checkout in the last hour?\". " +
+			"Set source=file with filePath for services that write to a log file instead of stdout.",
+		ReadOnly: true,
+		Schema: obj(merge(connectionArg("Kube Console"), kubeConnProps, map[string]any{
+			"namespace":    str("Namespace the pods are in."),
+			"service":      str("Service name — its pods are resolved from the service's selector. Use this instead of \"pods\" when the user named a service."),
+			"selector":     str("Label selector, e.g. app=checkout — an alternative to service/pods."),
+			"pods":         strArray("Pod names to read. Optional when service or selector is given."),
+			"maxPods":      num("When resolving a service or selector, read at most this many pods (default 10)."),
+			"container":    str("Container name, when a pod has more than one."),
+			"tail":         num("Lines to read from the end of the log (default 500)."),
+			"sinceMinutes": num("Only return lines from the last N minutes."),
+			"previous":     boolean("Read the previous container instance's logs — use after a crash."),
+			"grep":         str("Only return lines containing this."),
+			"grepRegex":    boolean("Treat grep as a regular expression."),
+			"source":       enum("stdout (default) reads container logs; file tails filePath inside the pod.", "stdout", "file"),
+			"filePath":     str("Path to the log file inside the container, when source=file."),
+		}), "namespace"),
+		Run: func(a Args) (any, error) {
+			conn, chosen, err := s.kubeConn(a)
+			if err != nil {
+				return nil, err
+			}
+			ns, err := a.Require("namespace")
+			if err != nil {
+				return nil, err
+			}
+			// Resolve whichever way the caller identified the workload, so a
+			// question about a service does not need a pod listing first.
 			pods := a.StrSlice("pods")
+			resolvedFrom := ""
 			if len(pods) == 0 {
-				return nil, fmt.Errorf(`"pods" is required — pass at least one pod name (see kube_pods)`)
+				var found []kube.Pod
+				switch {
+				case strings.TrimSpace(a.Str("service")) != "":
+					svc := strings.TrimSpace(a.Str("service"))
+					var selector string
+					found, selector, err = kube.PodsForService(conn, ns, svc)
+					resolvedFrom = fmt.Sprintf("service %s (%s)", svc, selector)
+				case strings.TrimSpace(a.Str("selector")) != "":
+					sel := strings.TrimSpace(a.Str("selector"))
+					found, err = kube.PodsBySelector(conn, ns, sel)
+					resolvedFrom = "selector " + sel
+				default:
+					return nil, fmt.Errorf(`name the workload: pass "service" (easiest), "selector", or "pods". Call kube_services to see what is in %s`, ns)
+				}
+				if err != nil {
+					return nil, err
+				}
+				if len(found) == 0 {
+					return nil, fmt.Errorf("no pods matched %s in %s — the service may be scaled to zero, or its selector may match nothing", resolvedFrom, ns)
+				}
+				max := a.Int("maxPods", 10)
+				if max <= 0 {
+					max = 10
+				}
+				truncated := false
+				if len(found) > max {
+					found, truncated = found[:max], true
+				}
+				for _, p := range found {
+					pods = append(pods, p.Name)
+				}
+				if truncated {
+					resolvedFrom += fmt.Sprintf(", first %d of %d pods", max, len(pods))
+				}
 			}
 			res, err := kube.Logs(kube.LogsRequest{
 				Conn:         conn,
@@ -608,7 +693,15 @@ func (s *Server) registerKube() {
 			if err != nil {
 				return nil, err
 			}
-			return withConnection(res, chosen), nil
+			out := withConnection(res, chosen).(map[string]any)
+			// Say which pods were actually read and how they were found — the
+			// set backing a service changes, so "checkout" alone is not a
+			// reproducible description of what was searched.
+			out["pods"] = pods
+			if resolvedFrom != "" {
+				out["resolvedFrom"] = resolvedFrom
+			}
+			return out, nil
 		},
 	})
 

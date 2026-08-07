@@ -40,10 +40,10 @@ func SSHAvailable() bool {
 //     over `ssh`, using the developer's own ssh config/keys/agent, for setups
 //     where the cluster is only reachable from a jump/master host.
 type Conn struct {
-	Context  string `json:"context"`
-	Server   string `json:"server"`
-	Token    string `json:"token"`
-	Insecure bool   `json:"insecure"`
+	Context     string `json:"context"`
+	Server      string `json:"server"`
+	Token       string `json:"token"`
+	Insecure    bool   `json:"insecure"`
 	SSHHost     string `json:"sshHost"` // user@host — run kubectl here via ssh
 	SSHPort     string `json:"sshPort"`
 	SSHKey      string `json:"sshKey"`      // optional identity file path
@@ -221,7 +221,13 @@ func Pods(conn Conn, namespace, query string) ([]Pod, error) {
 	if len(bytes.TrimSpace(out)) == 0 {
 		return nil, fmt.Errorf("kubectl produced no output for 'get pods -n %s' — open the App Logs tool to see the exact command and its stderr", namespace)
 	}
+	return parsePods(out, query)
+}
 
+// parsePods turns `kubectl get pods -o json` into Pods, keeping only those
+// whose name or labels contain query (empty keeps everything). Shared by the
+// namespace listing and the selector lookup so both report pods identically.
+func parsePods(out []byte, query string) ([]Pod, error) {
 	var list struct {
 		Items []struct {
 			Metadata struct {
