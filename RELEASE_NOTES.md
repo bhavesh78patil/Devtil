@@ -50,9 +50,13 @@ single dependency-free binary (with an optional native desktop app).
   consoles — pick the row count (default 1000, max 10 000)
 
 **Kube & remote access**
-- **Kube Console**: connect over SSH (password) to the kubemaster, find pods,
-  and open a **terminal panel per container** — tail logs live, run any
-  command, search a whole folder, minimize/maximize/close
+- **Kube Console**: **saved clusters** — name a connection once (SSH host,
+  port, password, context, namespace) and pick it from a dropdown instead of
+  retyping it; agents reach the same clusters by name over MCP. **Find
+  services** lists a namespace's services with their ports and selector, and
+  clicking one resolves the pods it actually fronts. Then open a **terminal
+  panel per container** — tail logs live, run any command, search a whole
+  folder, minimize/maximize/close
 - **SSH / PuTTY**: fully **interactive terminals** (real PTY over WebSocket
   with xterm.js) — `vim`/`top`/colours/tab-completion work; multiple sessions,
   **broadcast typing** to all, **saved hosts**, copy/paste

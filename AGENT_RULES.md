@@ -129,6 +129,12 @@ connection's name, environment and which is the default. Then:
 Use the connection **name** — never ask the developer to paste a password, and
 never write credentials into a knowledge concept.
 
+For Kubernetes, work the way the question is asked. Someone says "checkout is
+erroring", not "pod checkout-7d4f is erroring": call `kube_services` to see
+what is in the namespace, then pass `service: "checkout"` straight to
+`kube_logs` with a `grep` — it resolves the service's pods for you and tells
+you which ones it read. Don't list pods first unless you need a specific one.
+
 ### Be careful with the writes
 
 `kafka_produce`, `db_query` with a mutating statement, `kube_exec` and

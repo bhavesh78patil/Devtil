@@ -769,6 +769,13 @@ a.sftp-dir:hover, a.sftp-file:hover { color: var(--accent); text-decoration: und
 .form-grid .field { display: flex; flex-direction: column; gap: 4px; }
 .form-grid .field > span { font-size: 11px; color: var(--text-dim); }
 
+/* Kube — services browser */
+.svc-table { margin-bottom: 8px; }
+.svc-table th { font-size: 11px; text-transform: uppercase; letter-spacing: 0.07em; color: var(--text-dim); }
+.svc-link { color: var(--accent); cursor: pointer; text-decoration: none; }
+.svc-link:hover { text-decoration: underline; }
+.svc-sel { font-family: var(--mono); font-size: 11.5px; color: var(--text-dim); }
+
 /* API client — collection tree */
 .api-tree-head { display: flex; gap: 6px; align-items: center; padding: 0 0 8px; }
 .api-tree-head .api-search { flex: 1; min-width: 0; font-size: 12.5px; padding: 5px 8px; }

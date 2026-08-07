@@ -59,7 +59,7 @@ var Groups = []Group{
 	{
 		ID: "kube", Label: "Kubernetes",
 		Desc:  "Read pods and logs; exec runs commands inside a live pod.",
-		Tools: []string{"kube_contexts", "kube_namespaces", "kube_pods", "kube_logs", "kube_exec"},
+		Tools: []string{"kube_contexts", "kube_namespaces", "kube_services", "kube_pods", "kube_logs", "kube_exec"},
 	},
 	{
 		ID: "ssh", Label: "SSH & SFTP",

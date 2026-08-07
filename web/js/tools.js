@@ -2064,6 +2064,7 @@
     name: "Kube Console",
     desc: "Connect to the kubemaster over SSH (password), find pods, then open a terminal panel per container — tail logs, run commands, search folders.",
     defaults: () => ({
+      connections: [], activeConnId: null,
       sshHost: "", sshPort: "", sshPassword: "",
       context: "", namespace: "", podQuery: "", panels: [],
     }),
@@ -2084,8 +2085,24 @@
     render(root, tab, ctx) {
       const d = tab.data;
       if (!Array.isArray(d.panels)) d.panels = [];
+      // Saved clusters. The form fields stay the working copy — selecting a
+      // saved connection loads it in, Save writes it back — so everything that
+      // worked before still works, and a host you use daily is now one pick
+      // away instead of a retyped password.
+      if (!Array.isArray(d.connections)) d.connections = [];
+      for (const c of d.connections) if (!c.id) c.id = uid();
+      if ((d.sshHost || "").trim() && !d.connections.length) {
+        // the single unnamed connection this tool used to have
+        d.connections.push({
+          id: uid(), name: d.sshHost, sshHost: d.sshHost, sshPort: d.sshPort,
+          sshPassword: d.sshPassword, context: d.context, namespace: d.namespace,
+        });
+        d.activeConnId = d.connections[0].id;
+        ctx.save();
+      }
       const status = el("div", { class: "status-line dim" });
       const podBox = el("div");
+      const svcBox = el("div");
       const panelsArea = el("div", { class: "kube-panels" });
 
       // runtime-only state (not persisted), kept per-tab so live tails survive
@@ -2346,9 +2363,129 @@
       nsSel.addEventListener("change", () => { d.namespace = nsSel.value; ctx.save(); });
       podQuery.addEventListener("keydown", (e) => { if (e.key === "Enter") loadPods(); });
 
+      // ---------- services ----------
+      // A cluster is easier to reason about through its services than its
+      // pods, so this lists them and resolves one to the pods it fronts.
+      async function loadServices() {
+        if (!d.namespace) return setStatus(status, "✗ Pick a namespace first (Connect)", "err");
+        setStatus(status, "Finding services…", "dim");
+        try {
+          const r = await api("GET", "/api/kube/services?" + connQS() +
+            "&namespace=" + encodeURIComponent(d.namespace) + "&query=" + encodeURIComponent(d.podQuery || ""));
+          renderServices(r.services || []);
+          setStatus(status, `✓ ${r.count} service(s) — click one to see the pods behind it`, "ok");
+        } catch (e) {
+          svcBox.replaceChildren();
+          setStatus(status, "✗ " + e.message, "err");
+        }
+      }
+
+      function renderServices(list) {
+        svcBox.replaceChildren();
+        if (!list.length) {
+          svcBox.append(el("div", { class: "status-line dim", text: "No services matched." }));
+          return;
+        }
+        const rows = list.map((sv) => el("tr", {}, [
+          el("td", {}, [el("a", {
+            class: "svc-link", text: sv.name,
+            title: sv.selects ? "Show the pods this service selects" : "This service has no pod selector",
+            onclick: () => sv.selects ? podsForSelector(sv.name, sv.selects) : setStatus(status, `${sv.name} has no pod selector (type ${sv.type})`, "err"),
+          })]),
+          el("td", { text: sv.type || "" }),
+          el("td", { text: (sv.ports || []).join(", ") }),
+          el("td", { class: "svc-sel", text: sv.selects || "—" }),
+        ]));
+        svcBox.append(el("table", { class: "kv svc-table" }, [
+          el("tr", {}, [el("th", { text: "Service" }), el("th", { text: "Type" }), el("th", { text: "Ports" }), el("th", { text: "Selector" })]),
+          ...rows,
+        ]));
+      }
+
+      async function podsForSelector(name, selector) {
+        setStatus(status, `Finding pods for ${name}…`, "dim");
+        try {
+          const r = await api("GET", "/api/kube/pods?" + connQS() +
+            "&namespace=" + encodeURIComponent(d.namespace) + "&selector=" + encodeURIComponent(selector));
+          renderPods(r.pods || []);
+          setStatus(status, `✓ ${r.pods.length} pod(s) behind ${name} (${selector}) — click a container to open a terminal`, "ok");
+        } catch (e) {
+          setStatus(status, "✗ " + e.message, "err");
+        }
+      }
+
+      // ---------- saved connections ----------
+      const connSel = el("select", { style: "min-width:180px" });
+      const loadFields = () => {
+        sshHost.value = d.sshHost || "";
+        sshPort.value = d.sshPort || "";
+        sshPassword.value = d.sshPassword || "";
+      };
+      const fillConnSel = () => {
+        connSel.replaceChildren(
+          el("option", { value: "", text: d.connections.length ? "— unsaved —" : "— no saved clusters —" }),
+          ...d.connections.map((c) => el("option", { value: c.id, text: c.name }))
+        );
+        connSel.value = d.connections.some((c) => c.id === d.activeConnId) ? d.activeConnId : "";
+      };
+      connSel.addEventListener("change", () => {
+        const c = d.connections.find((x) => x.id === connSel.value);
+        d.activeConnId = c ? c.id : null;
+        if (c) {
+          d.sshHost = c.sshHost || ""; d.sshPort = c.sshPort || "";
+          d.sshPassword = c.sshPassword || "";
+          d.context = c.context || ""; d.namespace = c.namespace || "";
+          loadFields();
+          if (d.context) fillSelect(ctxSel, [d.context], d.context);
+          if (d.namespace) fillSelect(nsSel, [d.namespace], d.namespace);
+          setStatus(status, `Loaded “${c.name}” — press Connect to list contexts and namespaces`, "dim");
+        }
+        ctx.save();
+      });
+
+      async function saveConnection() {
+        if (!(d.sshHost || "").trim()) return setStatus(status, "✗ Enter an SSH host before saving", "err");
+        const existing = d.connections.find((c) => c.id === d.activeConnId);
+        const name = await promptDialog("Name for this cluster:", existing ? existing.name : d.sshHost);
+        if (!name || !name.trim()) return;
+        const fields = {
+          name: name.trim(), sshHost: d.sshHost, sshPort: d.sshPort,
+          sshPassword: d.sshPassword, context: d.context, namespace: d.namespace,
+        };
+        // The name is the identity: saving over an existing name updates that
+        // cluster, a new name creates one. Falling back to "whatever is
+        // selected" would silently rename the cluster you had loaded.
+        let target = d.connections.find((c) => c.name === fields.name);
+        if (target) Object.assign(target, fields);
+        else {
+          target = { id: uid(), ...fields };
+          d.connections.push(target);
+        }
+        d.activeConnId = target.id;
+        ctx.save();
+        fillConnSel();
+        setStatus(status, `✓ Saved “${fields.name}” — agents can reach it by that name over MCP`, "ok");
+      }
+
+      async function deleteConnection() {
+        const c = d.connections.find((x) => x.id === d.activeConnId);
+        if (!c) return setStatus(status, "✗ Pick a saved cluster to delete", "err");
+        if (!(await confirmDialog(`Delete the saved cluster “${c.name}”?`, { okLabel: "Delete", danger: true }))) return;
+        d.connections = d.connections.filter((x) => x.id !== c.id);
+        d.activeConnId = null;
+        ctx.save();
+        fillConnSel();
+        setStatus(status, `Deleted “${c.name}”`, "dim");
+      }
+
       const field = (label, node) => el("div", { class: "field" }, [el("span", { text: label }), node]);
 
       root.append(
+        el("div", { class: "form-grid" }, [
+          field("Saved cluster", connSel),
+          el("button", { class: "btn", text: "💾 Save", title: "Save these connection details under a name (agents can then use it by name)", onclick: saveConnection }),
+          el("button", { class: "btn danger", text: "Delete", title: "Delete the selected saved cluster", onclick: deleteConnection }),
+        ]),
         el("div", { class: "form-grid" }, [
           field("SSH host — kubectl runs here", sshHost),
           field("SSH port", sshPort),
@@ -2359,13 +2496,16 @@
           field("Context", ctxSel),
           field("Namespace", nsSel),
           field("Service / pod filter", podQuery),
+          el("button", { class: "btn", text: "Find services", onclick: loadServices }),
           el("button", { class: "btn primary", text: "Find pods", onclick: loadPods }),
         ]),
+        svcBox,
         podBox,
         status,
         panelsArea
       );
       renderPanels();
+      fillConnSel();
       if (d.context) fillSelect(ctxSel, [d.context], d.context);
       if (d.namespace) fillSelect(nsSel, [d.namespace], d.namespace);
     },
