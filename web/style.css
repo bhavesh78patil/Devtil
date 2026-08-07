@@ -939,21 +939,45 @@ a.sftp-dir:hover, a.sftp-file:hover { color: var(--accent); text-decoration: und
   border: 1px solid var(--border); border-radius: var(--radius-card, 12px);
   background: var(--bg2); overflow: hidden;
 }
-.kg-svg { width: 100%; height: 100%; display: block; }
-.kg-edge { stroke: var(--mute); stroke-width: 1.2; }
+.kg-svg { width: 100%; height: 100%; display: block; cursor: grab; touch-action: none; }
+.kg-svg.panning { cursor: grabbing; }
+.kg-edge { stroke: var(--mute); stroke-width: 1.2; transition: opacity 0.12s; }
 .kg-edge.broken { stroke: var(--red); stroke-dasharray: 4 3; }
+.kg-edge.dim { opacity: 0.12; }
 .kg-arrow-head { fill: var(--mute); }
-.kg-node { cursor: pointer; }
+.kg-node { cursor: pointer; transition: opacity 0.12s; }
 .kg-node text { font-family: var(--sans); font-size: 11px; fill: var(--text-dim); pointer-events: none; }
+.kg-node circle { transition: stroke-width 0.1s; }
 .kg-node:hover circle { stroke: var(--text); stroke-width: 2; }
+.kg-node.dragging { cursor: grabbing; }
+.kg-node.dragging circle { stroke: var(--accent); stroke-width: 3; }
+/* the hovered node and its neighbours stay lit while everything else fades */
+.kg-node.dim { opacity: 0.15; }
+.kg-node.hot text { fill: var(--text); font-weight: 500; }
 .kg-node.active circle { stroke: var(--accent); stroke-width: 3; }
 .kg-node.active text { fill: var(--text); font-weight: 500; }
 /* a concept that is linked to but does not exist: drawn as a hollow gap */
 .kg-node.missing circle { stroke: var(--red); stroke-width: 1.5; stroke-dasharray: 3 2; }
 .kg-node.missing text { fill: var(--red); font-style: italic; }
-.kg-legend {
-  position: absolute; left: 10px; bottom: 8px;
-  font-size: 11.5px; color: var(--text-dim);
+
+.kg-legend-bar {
+  position: absolute; left: 8px; right: 8px; top: 8px;
+  display: flex; flex-wrap: wrap; gap: 5px; align-items: center;
+  pointer-events: none;
+}
+.kg-legend-bar > * { pointer-events: auto; }
+.kg-chip {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 2px 8px; font-size: 11.5px;
+  border: 1px solid var(--border); border-radius: 999px;
+  background: var(--bg); color: var(--text-dim); cursor: pointer;
+}
+.kg-chip:hover { border-color: var(--text); color: var(--text); }
+.kg-chip.active { border-color: var(--accent); color: var(--accent); }
+.kg-hint {
+  position: absolute; left: 10px; right: 10px; bottom: 7px;
+  font-size: 11px; color: var(--text-dim); pointer-events: none;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 
 .kg-fields { display: flex; flex-wrap: wrap; gap: 8px; }

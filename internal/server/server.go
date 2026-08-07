@@ -89,6 +89,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT /api/okf/doc", s.okfWrite)
 	mux.HandleFunc("DELETE /api/okf/doc", s.okfDelete)
 	mux.HandleFunc("GET /api/okf/graph", s.okfGraph)
+	mux.HandleFunc("GET /api/okf/export", s.okfExport)
+	mux.HandleFunc("POST /api/okf/import", s.okfImport)
 
 	mux.HandleFunc("GET /api/logs", s.getLogs)
 	mux.HandleFunc("POST /api/logs/client", s.clientLog)

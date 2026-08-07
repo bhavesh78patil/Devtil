@@ -94,7 +94,7 @@ built on macOS/Windows.
 | **Timestamps** | Auto-detects epoch seconds/millis/date strings; converts to ISO, local, relative |
 | **Regex Tester** | Live match highlighting, capture groups, match list |
 | **Text Diff** | Line-by-line LCS diff with added/removed counts |
-| **Knowledge Graph** | Browse and edit an **Open Knowledge Format** bundle — markdown concepts with YAML frontmatter, linked into a graph. Concepts are grouped by type in a searchable, filterable list; the **graph view** lays them out force-directed with type-coloured nodes, arrows for links, and dashed red placeholders for links that point at concepts which don't exist yet. Open any concept to edit its type, title, description, tags, status and markdown body, and to see what it **links to and is linked from**. This is the same bundle `devtil mcp` gives AI agents, so what an agent records while it works shows up here |
+| **Knowledge Graph** | Browse and edit an **Open Knowledge Format** bundle — markdown concepts with YAML frontmatter, linked into a graph. Concepts are grouped by type in a searchable, filterable list; the **graph view** is interactive — **scroll to zoom, drag the background to pan, drag a node to pin it** where you want it (pins persist), **hover a node to isolate its neighbourhood** while everything else fades, and node size tracks how many links a concept has so the hubs of a domain stand out. A **type legend** doubles as a filter, and links pointing at concepts that don't exist yet show as dashed red placeholders. Open any concept to edit its type, title, description, tags, status and markdown body, and to see what it **links to and is linked from**. **Export the whole bundle as a zip** to share or commit, and **import** someone else's — merged into yours, optionally under a folder, never overwriting your own work unless you ask. This is the same bundle `devtil mcp` gives AI agents. |
 
 ## MCP — give the toolbox to an AI agent
 
@@ -234,6 +234,24 @@ Why it's here: an agent that figures out what a table means, why a topic is
 partitioned the way it is, or how to recover a stuck consumer group can write
 that down once instead of rediscovering it every session — and you can read,
 correct and commit what it wrote.
+
+### Sharing a bundle
+
+Because a bundle is just files, sharing one is just sending the files. The
+Knowledge Graph tool's **Export** button downloads the whole bundle as a zip;
+**Import** merges someone else's into yours:
+
+- concepts you already have are **left alone** by default — tick *overwrite*
+  only if you mean it
+- an optional **folder** keeps an imported bundle in its own corner
+  (`/vendor/acme/…`) instead of mixing it into yours
+- non-markdown files, dotfiles and anything with a `..` in its path are
+  ignored, so an untrusted archive cannot write outside the bundle
+- a zip made by right-clicking the bundle folder works too: the redundant
+  wrapper directory is detected and stripped
+
+You can equally well `git clone` a bundle into the knowledge directory or
+commit yours alongside your code — nothing about the format needs Devtil.
 
 ## Navigation
 

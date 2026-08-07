@@ -27,35 +27,63 @@ Devtil is connected over MCP. It exposes this project's real infrastructure
 (Kafka, databases, Elasticsearch, Kubernetes, SSH) plus a shared knowledge
 bundle in Open Knowledge Format.
 
-### Look before you dig
+**The knowledge bundle is the memory for this project. Read it before you
+work, and write to it as you go.** Treat it the way you would treat the
+codebase: the source of truth, kept current, not a place for occasional notes.
+
+### Always search first
 
 Before investigating anything about this system's infrastructure, data or
 operations — what a table holds, why a topic is shaped the way it is, how a
-service is deployed, what broke last time — call `okf_search` first. A
-previous session may already have written it down. Searching costs one call;
-rediscovering it costs many, and the answer is often worse.
+service is deployed, what broke last time, what someone already tried — call
+`okf_search`. Do this **first, every time**, before running a query, reading a
+topic or opening a runbook. A previous session may already have the answer.
+Searching costs one call; rediscovering costs many, and the answer is usually
+worse.
 
-Use `okf_neighbors` to pull in the context around a concept you found, rather
-than reading concepts one at a time.
+Then use `okf_neighbors` on whatever you found to pull in the surrounding
+context in one go, rather than reading concepts one at a time. `okf_graph`
+shows how a whole domain hangs together when you are new to it.
 
-### Write down what will still be true next month
+If the bundle turns out to be wrong or out of date, **fix it** in the same
+session. A stale concept is worse than a missing one.
 
-After you learn something durable, record it with `okf_write`:
+### Write down everything you establish
 
-- what a table, topic, index or queue actually **means** — the semantics you
-  had to infer, not the schema you can already read
-- **why** something is the way it is: a partitioning choice, a retention
-  setting, a workaround and the constraint behind it
-- a **runbook**: symptom → how to confirm it → how to fix it
-- the **shape of a payload** you had to reverse-engineer from real messages
+The rule is simple: **if you worked it out and it will still be true next
+week, it goes in the bundle** — via `okf_write`, before you report back. Not
+"if it seems important enough". Default to writing.
+
+That explicitly includes **everything you verify or correct**:
+
+- **A finding** — `type: Finding`. Something you established by looking:
+  this column is nullable in practice, this topic has 12 partitions, this
+  service actually reads from the replica. Record what you observed **and how
+  you observed it**, so the next session can re-check it.
+- **A correction** — when you discover the bundle, the docs, a comment or an
+  assumption was wrong, write the correct version and say what was wrong
+  before. Corrections are the highest-value thing in here.
+- **A verification** — `type: Verification`. You checked something and it held.
+  Say what you checked, against which connection, and when. "Confirmed X" is
+  worth recording precisely because the next session would otherwise re-check.
+- **A bug or defect** — `type: Bug`. Symptom, the reproduction, the root cause
+  if you found it, and whether it is fixed.
+- **A decision** — `type: Decision`. Why something is the way it is: a
+  partitioning choice, a retention setting, a workaround and the constraint
+  behind it.
+- **A runbook** — `type: Runbook`. Symptom → how to confirm → how to fix.
+- **Meaning** — what a table, topic, index or queue actually *means*: the
+  semantics you had to infer, not the schema anyone can already read.
+- **A payload shape** you reverse-engineered from real messages.
 
 Do **not** record: transient state (current lag, today's row counts), anything
 already obvious from the code, secrets or credentials of any kind, or a
 restatement of official docs.
 
-Every concept needs a `type` — a short free-form string like `Database Table`,
-`Kafka Topic`, `Runbook`, `Service` or `Decision`. Give it a `title` and a
-one-line `description`.
+Every concept needs a `type`; give it a `title` and a one-line `description`.
+When a finding is about a specific system, name the connection you used —
+`prod-payments` and `dev-cluster` may not agree, and a finding without its
+subject is not reusable.
 
 ### Link it, or it is lost
 
@@ -65,8 +93,19 @@ related concepts with ordinary markdown links to their bundle paths:
     Joined with [customers](/tables/customers.md) on `customer_id`.
     When this alerts, follow [checkout latency](/runbooks/checkout-latency.md).
 
-Those links *are* the knowledge graph. When you add a concept, also add a link
-to it from the most closely related existing concept.
+Those links *are* the knowledge graph. **Every concept you write must link to
+at least one existing concept**, and you should add a link back to it from the
+closest existing one. An unlinked concept shows up as an orphan in Devtil's
+graph view — treat that as a defect in your own work.
+
+Run `okf_validate` when you have finished writing: it catches concepts missing
+a type and links that point nowhere.
+
+### Record what changed
+
+Append a line to the bundle's history with `okf_log` when you add or correct
+something significant. It is the changelog for the project's knowledge, and it
+is how a human reviewing your work sees what you touched.
 
 ### Target the right system
 

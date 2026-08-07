@@ -412,37 +412,58 @@ Devtil is connected over MCP. It exposes this project's real infrastructure
 (Kafka, databases, Elasticsearch, Kubernetes, SSH) plus a shared knowledge
 bundle in Open Knowledge Format.
 
-### Look before you dig
+**The knowledge bundle is the memory for this project. Read it before you
+work, and write to it as you go.**
+
+### Always search first
 
 Before investigating anything about this system's infrastructure, data or
 operations — what a table holds, why a topic is shaped the way it is, how a
-service is deployed, what broke last time — call \`okf_search\` first. A
-previous session may already have written it down.
+service is deployed, what broke last time — call \`okf_search\` **first, every
+time**, before running a query or opening a runbook. A previous session may
+already have the answer.
 
-Use \`okf_neighbors\` to pull in the context around a concept you found.
+Then \`okf_neighbors\` on what you found pulls in the surrounding context in
+one go; \`okf_graph\` shows how a whole domain hangs together.
 
-### Write down what will still be true next month
+If the bundle is wrong or out of date, fix it in the same session. A stale
+concept is worse than a missing one.
 
-After you learn something durable, record it with \`okf_write\`:
+### Write down everything you establish
 
-- what a table, topic, index or queue actually **means** — the semantics you
-  had to infer, not the schema you can already read
-- **why** something is the way it is: a partitioning choice, a retention
-  setting, a workaround and the constraint behind it
-- a **runbook**: symptom → how to confirm it → how to fix it
-- the **shape of a payload** you had to reverse-engineer from real messages
+If you worked it out and it will still be true next week, it goes in the
+bundle via \`okf_write\`, before you report back. Default to writing.
+
+That explicitly includes everything you verify or correct:
+
+- **Finding** (\`type: Finding\`) — something you established by looking, plus
+  how you observed it, so it can be re-checked.
+- **Correction** — when the bundle, the docs or an assumption was wrong, write
+  the correct version and say what was wrong before. These are the
+  highest-value entries here.
+- **Verification** (\`type: Verification\`) — you checked something and it held.
+  Say what, against which connection, and when.
+- **Bug** (\`type: Bug\`) — symptom, reproduction, root cause, fixed or not.
+- **Decision** (\`type: Decision\`) — why something is the way it is.
+- **Runbook** (\`type: Runbook\`) — symptom → confirm → fix.
+- **Meaning** — what a table or topic actually means, not the schema anyone
+  can already read.
 
 Do not record transient state, anything obvious from the code, or credentials.
 
-Every concept needs a \`type\` — a short string like \`Database Table\`,
-\`Kafka Topic\`, \`Runbook\`, \`Service\` or \`Decision\` — plus a \`title\`
-and a one-line \`description\`.
+Every concept needs a \`type\`, a \`title\` and a one-line \`description\`. When a
+finding is about a specific system, name the connection you used —
+prod and dev may not agree.
 
 ### Link it, or it is lost
 
 In the body, link related concepts with ordinary markdown links to their
-bundle paths, e.g. a link to /tables/customers.md. Those links are the graph.
-When you add a concept, also link to it from the closest existing one.
+bundle paths. Those links are the graph. Every concept you write must link to
+at least one existing concept, and you should add a link back to it from the
+closest existing one — an unlinked concept is an orphan nobody finds.
+
+Run \`okf_validate\` when you finish writing, and \`okf_log\` to record what you
+changed.
 
 ### Target the right system
 

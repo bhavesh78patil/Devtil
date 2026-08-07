@@ -5090,6 +5090,12 @@
 
       let concepts = [];   // metadata for the list
       let graph = null;    // { nodes, edges, broken, orphans }
+      // pan/zoom survives a re-render, so switching to a concept and back
+      // does not throw away where you were looking
+      let gView = null;
+      // the previous graph pane's window listeners, dropped before the next
+      // one installs its own
+      let graphCleanup = null;
       let problems = [];
       let bundleRoot = "";
 
@@ -5170,6 +5176,10 @@
             ]));
           }
         }
+        // The type filter can also be set from the graph's legend, so keep
+        // the dropdown in step rather than letting it claim "All types" while
+        // the list is filtered.
+        if (typeSel.value !== (d.typeFilter || "")) typeSel.value = d.typeFilter || "";
         sideBox.replaceChildren(
           el("div", { class: "toolbar" }, [search, typeSel]),
           el("div", { class: "api-side-content" }, [list])
@@ -5185,6 +5195,11 @@
             viewBtn("doc", "📄 Concept"),
             el("span", { class: "spacer" }),
             el("button", { class: "btn primary", text: "+ New concept", onclick: newConcept }),
+            el("button", {
+              class: "btn", text: "⬇ Export", title: "Download the whole bundle as a zip you can share or commit",
+              onclick: () => { window.location.href = "/api/okf/export"; },
+            }),
+            el("button", { class: "btn", text: "⬆ Import", title: "Merge someone else's bundle into yours", onclick: pickImport }),
             el("button", { class: "btn", text: "↻ Refresh", onclick: () => load() }),
           ]),
           d.view === "doc" ? docPane() : graphPane()
@@ -5198,6 +5213,65 @@
         });
       }
 
+      // ---- import a bundle archive ----------------------------------------
+      function pickImport() {
+        const input = el("input", { type: "file", accept: ".zip,application/zip", style: "display:none" });
+        input.addEventListener("change", async () => {
+          const f = input.files && input.files[0];
+          input.remove();
+          if (!f) return;
+          const opts = await importDialog(f.name);
+          if (!opts) return;
+          setStatus(status, `Importing ${f.name}…`, "dim");
+          try {
+            const qs = new URLSearchParams();
+            if (opts.prefix) qs.set("prefix", opts.prefix);
+            if (opts.overwrite) qs.set("overwrite", "true");
+            const res = await fetch("/api/okf/import?" + qs.toString(), { method: "POST", body: f });
+            const out = await res.json();
+            if (!res.ok) throw new Error(out.error || res.statusText);
+            const bits = [`${(out.added || []).length} added`];
+            if ((out.replaced || []).length) bits.push(`${out.replaced.length} replaced`);
+            if ((out.skipped || []).length) bits.push(`${out.skipped.length} left alone (already here)`);
+            if ((out.ignored || []).length) bits.push(`${out.ignored.length} ignored (not markdown)`);
+            await load(true);
+            setStatus(status, "✓ Imported — " + bits.join(", "), "ok");
+          } catch (e) {
+            setStatus(status, "✗ " + e.message, "err");
+          }
+        });
+        document.body.append(input);
+        input.click();
+      }
+
+      function importDialog(fileName) {
+        return new Promise((resolve) => {
+          const overlay = el("div", { class: "app-dialog-overlay" });
+          const close = (v) => { overlay.remove(); document.removeEventListener("keydown", onKey); resolve(v); };
+          const onKey = (e) => { e.stopPropagation(); if (e.key === "Escape") close(null); };
+          document.addEventListener("keydown", onKey);
+
+          const prefix = el("input", { class: "app-dialog-input", type: "text", placeholder: "e.g. vendor/acme — leave blank to merge at the top level" });
+          const overwrite = el("input", { type: "checkbox" });
+
+          overlay.append(el("div", { class: "app-dialog" }, [
+            el("div", { class: "app-dialog-msg", text: `Import ${fileName}` }),
+            el("div", { class: "set-note", text: "Concepts are merged into your bundle. Anything you already have is left untouched unless you say otherwise." }),
+            el("div", { class: "field" }, [el("span", { class: "pane-label", text: "Import into folder (optional)" }), prefix]),
+            el("label", { class: "inline" }, [overwrite, "Overwrite concepts I already have with the same path"]),
+            el("div", { class: "app-dialog-actions" }, [
+              el("button", { class: "btn", text: "Cancel", onclick: () => close(null) }),
+              el("button", { class: "btn primary", text: "Import", onclick: () => close({ prefix: prefix.value.trim(), overwrite: overwrite.checked }) }),
+            ]),
+          ]));
+          overlay.addEventListener("click", (e) => { if (e.target === overlay) close(null); });
+          prefix.addEventListener("keydown", (e) => { if (e.key === "Enter") close({ prefix: prefix.value.trim(), overwrite: overwrite.checked }); });
+          document.body.append(overlay);
+          prefix.focus();
+        });
+      }
+
+      // ---- graph ----------------------------------------------------------
       function graphPane() {
         const box = el("div", { class: "kg-graph" });
         if (!graph || !graph.nodes || !graph.nodes.length) {
@@ -5206,64 +5280,270 @@
         }
         // Lay out once the box has real dimensions, otherwise every node
         // lands on top of the others in a zero-width viewport.
-        requestAnimationFrame(() => {
-          const w = Math.max(320, box.clientWidth), h = Math.max(260, box.clientHeight);
-          const real = graph.nodes.filter((n) => !n.reserved);
-          const broken = graph.broken || [];
-          // A link to a concept that doesn't exist yet is worth seeing, so
-          // give each missing target a placeholder node rather than dropping
-          // the edge and quietly showing a smaller graph than the bundle has.
-          const known = new Set(real.map((n) => n.path));
-          const missing = [...new Set(broken.map((e) => e.to))]
-            .filter((p) => !known.has(p))
-            .map((p) => ({ path: p, title: p.split("/").pop(), type: "", missing: true }));
-          const nodes = real.concat(missing);
-          const edges = (graph.edges || []).concat(broken);
-          const pts = layoutGraph(nodes, edges, w, h);
-          const at = new Map(pts.map((p) => [p.node.path, p]));
-
-          const canvas = svg("svg", { class: "kg-svg", viewBox: `0 0 ${w} ${h}`, preserveAspectRatio: "xMidYMid meet" });
-          canvas.append(svg("defs", {}, [
-            svg("marker", { id: "kg-arrow", viewBox: "0 0 10 10", refX: "10", refY: "5", markerWidth: "6", markerHeight: "6", orient: "auto-start-reverse" },
-              [svg("path", { d: "M 0 0 L 10 5 L 0 10 z", class: "kg-arrow-head" })]),
-          ]));
-          const brokenSet = new Set((graph.broken || []).map((e) => e.from + " " + e.to));
-          for (const e of edges) {
-            const a = at.get(e.from), b = at.get(e.to);
-            if (!a || !b) continue;
-            canvas.append(svg("line", {
-              x1: a.x, y1: a.y, x2: b.x, y2: b.y,
-              class: "kg-edge" + (brokenSet.has(e.from + " " + e.to) ? " broken" : ""),
-              "marker-end": "url(#kg-arrow)",
-            }, [svg("title", { text: `${e.from} → ${e.to}${brokenSet.has(e.from + " " + e.to) ? " (broken link)" : ""}` })]));
-          }
-          for (const p of pts) {
-            const isMissing = !!p.node.missing;
-            const g = svg("g", {
-              class: "kg-node" + (isMissing ? " missing" : "") + (p.node.path === d.path ? " active" : ""),
-              onclick: () => {
-                if (isMissing) return setStatus(status, `${p.node.path} is linked to but does not exist yet — create it to close the gap.`, "err");
-                open(p.node.path);
-              },
-            });
-            g.append(svg("circle", {
-              cx: p.x, cy: p.y, r: 9,
-              fill: isMissing ? "transparent" : typeColor(p.node.type),
-            }));
-            g.append(svg("text", { x: p.x, y: p.y - 15, "text-anchor": "middle", text: p.node.title }));
-            g.append(svg("title", {
-              text: isMissing
-                ? `${p.node.path}\nlinked to, but this concept does not exist`
-                : `${p.node.title}\n${p.node.type || "untyped"}\n${p.node.path}`,
-            }));
-            canvas.append(g);
-          }
-          box.replaceChildren(canvas);
-          if (graph.orphans && graph.orphans.length) {
-            box.append(el("div", { class: "kg-legend", text: `${graph.orphans.length} unlinked concept(s) — link them from a related concept so they are discoverable.` }));
-          }
-        });
+        requestAnimationFrame(() => buildGraph(box));
         return box;
+      }
+
+      function buildGraph(box) {
+        const w = Math.max(320, box.clientWidth), h = Math.max(260, box.clientHeight);
+        let unpinBtn = null; // created with the legend, revealed by a drag
+        const real = graph.nodes.filter((n) => !n.reserved);
+        const broken = graph.broken || [];
+        // A link to a concept that doesn't exist yet is worth seeing, so give
+        // each missing target a placeholder node rather than dropping the edge
+        // and quietly showing a smaller graph than the bundle has.
+        const known = new Set(real.map((n) => n.path));
+        const missing = [...new Set(broken.map((e) => e.to))]
+          .filter((p) => !known.has(p))
+          .map((p) => ({ path: p, title: p.split("/").pop(), type: "", missing: true }));
+        const nodes = real.concat(missing);
+        const edges = (graph.edges || []).concat(broken);
+
+        // degree drives node size, so the hubs of a domain stand out
+        const degree = new Map(nodes.map((n) => [n.path, 0]));
+        const adj = new Map(nodes.map((n) => [n.path, new Set()]));
+        for (const e of edges) {
+          if (degree.has(e.from)) degree.set(e.from, degree.get(e.from) + 1);
+          if (degree.has(e.to)) degree.set(e.to, degree.get(e.to) + 1);
+          if (adj.has(e.from)) adj.get(e.from).add(e.to);
+          if (adj.has(e.to)) adj.get(e.to).add(e.from);
+        }
+        const radius = (n) => 6 + Math.min(9, (degree.get(n.path) || 0) * 1.6);
+
+        const pts = layoutGraph(nodes, edges, w, h);
+        // a node the user dragged keeps the spot they put it in
+        for (const p of pts) {
+          const pin = d.pins && d.pins[p.node.path];
+          if (pin) { p.x = pin.x; p.y = pin.y; }
+        }
+        const at = new Map(pts.map((p) => [p.node.path, p]));
+
+        const canvas = svg("svg", { class: "kg-svg", viewBox: `0 0 ${w} ${h}`, preserveAspectRatio: "xMidYMid meet" });
+        canvas.append(svg("defs", {}, [
+          svg("marker", { id: "kg-arrow", viewBox: "0 0 10 10", refX: "10", refY: "5", markerWidth: "6", markerHeight: "6", orient: "auto-start-reverse" },
+            [svg("path", { d: "M 0 0 L 10 5 L 0 10 z", class: "kg-arrow-head" })]),
+        ]));
+        const viewport = svg("g", { class: "kg-viewport" });
+        canvas.append(viewport);
+
+        // ---- edges then nodes, so nodes sit on top
+        const brokenSet = new Set(broken.map((e) => e.from + " " + e.to));
+        const edgeEls = [];
+        for (const e of edges) {
+          const a = at.get(e.from), b = at.get(e.to);
+          if (!a || !b) continue;
+          const isBroken = brokenSet.has(e.from + " " + e.to);
+          const line = svg("line", {
+            x1: a.x, y1: a.y, x2: b.x, y2: b.y,
+            class: "kg-edge" + (isBroken ? " broken" : ""),
+            "marker-end": "url(#kg-arrow)",
+          }, [svg("title", { text: `${e.from} → ${e.to}${isBroken ? " (broken link)" : ""}` })]);
+          viewport.append(line);
+          edgeEls.push({ e, line, a, b });
+        }
+
+        const nodeEls = new Map();
+        for (const p of pts) {
+          const isMissing = !!p.node.missing;
+          const g = svg("g", {
+            class: "kg-node" + (isMissing ? " missing" : "") + (p.node.path === d.path ? " active" : ""),
+          });
+          const circle = svg("circle", {
+            cx: p.x, cy: p.y, r: radius(p.node),
+            fill: isMissing ? "transparent" : typeColor(p.node.type),
+          });
+          const label = svg("text", { x: p.x, y: p.y - radius(p.node) - 6, "text-anchor": "middle", text: p.node.title });
+          g.append(circle, label, svg("title", {
+            text: isMissing
+              ? `${p.node.path}\nlinked to, but this concept does not exist`
+              : `${p.node.title}\n${p.node.type || "untyped"}\n${p.node.path}\n${degree.get(p.node.path) || 0} link(s)`,
+          }));
+          viewport.append(g);
+          nodeEls.set(p.node.path, { g, circle, label, p, node: p.node });
+        }
+
+        // ---- highlight: the sidebar's filter, and whatever is hovered
+        const q = (d.query || "").toLowerCase();
+        const matches = (n) =>
+          (!d.typeFilter || n.type === d.typeFilter) &&
+          (!q || (n.path + " " + (n.title || "") + " " + (n.description || "")).toLowerCase().includes(q));
+        const filtering = !!(q || d.typeFilter);
+        let hovered = null;
+
+        function applyHighlight() {
+          // Hovering wins over the filter: you asked about *this* node now.
+          const near = hovered ? new Set([hovered, ...(adj.get(hovered) || [])]) : null;
+          for (const [path, ne] of nodeEls) {
+            const dim = near ? !near.has(path) : (filtering && !matches(ne.node));
+            ne.g.classList.toggle("dim", dim);
+            ne.g.classList.toggle("hot", !!near && near.has(path));
+          }
+          for (const { e, line } of edgeEls) {
+            const on = near
+              ? (e.from === hovered || e.to === hovered)
+              : (!filtering || (matches0(e.from) && matches0(e.to)));
+            line.classList.toggle("dim", !on);
+          }
+        }
+        const matches0 = (path) => {
+          const ne = nodeEls.get(path);
+          return ne ? matches(ne.node) : false;
+        };
+
+        // ---- pan / zoom ------------------------------------------------
+        const view = gView || { k: 1, tx: 0, ty: 0 };
+        const applyView = () => {
+          viewport.setAttribute("transform", `translate(${view.tx} ${view.ty}) scale(${view.k})`);
+          gView = view;
+        };
+        applyView();
+
+        // Screen→world through the SVG's own matrix, so the maths stays right
+        // whatever the element's size or aspect ratio is.
+        const toWorld = (evt) => {
+          const pt = canvas.createSVGPoint();
+          pt.x = evt.clientX; pt.y = evt.clientY;
+          const m = viewport.getScreenCTM();
+          return m ? pt.matrixTransform(m.inverse()) : { x: 0, y: 0 };
+        };
+
+        canvas.addEventListener("wheel", (evt) => {
+          evt.preventDefault();
+          const before = toWorld(evt);
+          const factor = Math.exp(-evt.deltaY * 0.0015);
+          view.k = Math.max(0.2, Math.min(4, view.k * factor));
+          applyView();
+          const after = toWorld(evt);
+          // keep the point under the cursor fixed while zooming
+          view.tx += (after.x - before.x) * view.k;
+          view.ty += (after.y - before.y) * view.k;
+          applyView();
+        }, { passive: false });
+
+        let panFrom = null;
+        canvas.addEventListener("mousedown", (evt) => {
+          if (evt.target.closest(".kg-node")) return; // node drag handles it
+          panFrom = { x: evt.clientX, y: evt.clientY, tx: view.tx, ty: view.ty };
+          canvas.classList.add("panning");
+        });
+        // Dragging has to keep working when the pointer leaves the SVG, so
+        // the listeners go on the window — which means the previous pane's
+        // pair must be removed or every re-render leaks another set.
+        if (graphCleanup) graphCleanup();
+        window.addEventListener("mousemove", onMove);
+        window.addEventListener("mouseup", onUp);
+        graphCleanup = () => {
+          window.removeEventListener("mousemove", onMove);
+          window.removeEventListener("mouseup", onUp);
+          graphCleanup = null;
+        };
+
+        let dragging = null;
+        function onMove(evt) {
+          if (dragging) {
+            const p = toWorld(evt);
+            dragging.moved = true;
+            dragging.entry.p.x = p.x;
+            dragging.entry.p.y = p.y;
+            placeNode(dragging.entry);
+            return;
+          }
+          if (panFrom) {
+            view.tx = panFrom.tx + (evt.clientX - panFrom.x);
+            view.ty = panFrom.ty + (evt.clientY - panFrom.y);
+            applyView();
+          }
+        }
+        function onUp() {
+          if (dragging) {
+            if (dragging.moved) {
+              // remember where the user put it
+              if (!d.pins) d.pins = {};
+              d.pins[dragging.path] = { x: dragging.entry.p.x, y: dragging.entry.p.y };
+              ctx.save();
+              // reveal the escape hatch as soon as there is something to undo,
+              // rather than waiting for whatever re-renders next
+              if (unpinBtn) unpinBtn.style.display = "";
+            } else {
+              openNode(dragging.entry);
+            }
+            dragging.entry.g.classList.remove("dragging");
+            dragging = null;
+          }
+          panFrom = null;
+          canvas.classList.remove("panning");
+        }
+
+        function placeNode(entry) {
+          const r = radius(entry.node);
+          entry.circle.setAttribute("cx", entry.p.x);
+          entry.circle.setAttribute("cy", entry.p.y);
+          entry.label.setAttribute("x", entry.p.x);
+          entry.label.setAttribute("y", entry.p.y - r - 6);
+          for (const { e, line } of edgeEls) {
+            if (e.from === entry.node.path) { line.setAttribute("x1", entry.p.x); line.setAttribute("y1", entry.p.y); }
+            if (e.to === entry.node.path) { line.setAttribute("x2", entry.p.x); line.setAttribute("y2", entry.p.y); }
+          }
+        }
+
+        function openNode(entry) {
+          if (entry.node.missing) {
+            return setStatus(status, `${entry.node.path} is linked to but does not exist yet — create it to close the gap.`, "err");
+          }
+          open(entry.node.path);
+        }
+
+        for (const [path, entry] of nodeEls) {
+          entry.g.addEventListener("mousedown", (evt) => {
+            evt.stopPropagation();
+            dragging = { path, entry, moved: false };
+            entry.g.classList.add("dragging");
+          });
+          entry.g.addEventListener("mouseenter", () => { hovered = path; applyHighlight(); });
+          entry.g.addEventListener("mouseleave", () => { hovered = null; applyHighlight(); });
+        }
+
+        applyHighlight();
+        box.replaceChildren(canvas);
+
+        // ---- legend + hints -------------------------------------------
+        const types = [...new Set(real.map((n) => n.type).filter(Boolean))].sort();
+        const legend = el("div", { class: "kg-legend-bar" });
+        for (const t of types) {
+          legend.append(el("button", {
+            class: "kg-chip" + (d.typeFilter === t ? " active" : ""),
+            title: d.typeFilter === t ? "Show all types" : `Highlight only ${t}`,
+            onclick: () => {
+              d.typeFilter = d.typeFilter === t ? "" : t;
+              ctx.save();
+              renderSide();
+              renderMain();
+            },
+          }, [
+            el("span", { class: "kg-dot", style: `background:${typeColor(t)}` }),
+            el("span", { text: t }),
+          ]));
+        }
+        legend.append(el("span", { class: "spacer" }));
+        unpinBtn = el("button", {
+          class: "btn kg-chip", text: "Unpin all",
+          title: "Forget the positions you dragged nodes to",
+          onclick: () => { d.pins = {}; ctx.save(); renderMain(); },
+        });
+        if (!(d.pins && Object.keys(d.pins).length)) unpinBtn.style.display = "none";
+        legend.append(unpinBtn);
+        legend.append(el("button", {
+          class: "btn kg-chip", text: "Reset view", title: "Back to the default zoom and position",
+          onclick: () => { gView = null; renderMain(); },
+        }));
+        box.append(legend);
+
+        const hints = [];
+        if (graph.orphans && graph.orphans.length) {
+          hints.push(`${graph.orphans.length} unlinked concept(s) — link them from a related concept so they are discoverable`);
+        }
+        hints.push("scroll to zoom · drag the background to pan · drag a node to pin it · hover to isolate its links");
+        box.append(el("div", { class: "kg-hint", text: hints.join("  ·  ") }));
       }
 
       function docPane() {
@@ -5387,8 +5667,15 @@
         }
       }
 
-      search.addEventListener("input", debounce(() => { d.query = search.value; ctx.save(); renderSide(); }, 150));
-      typeSel.addEventListener("change", () => { d.typeFilter = typeSel.value; ctx.save(); renderSide(); });
+      // the filter dims the graph as well as the list, so both have to redraw
+      search.addEventListener("input", debounce(() => {
+        d.query = search.value; ctx.save(); renderSide();
+        if (d.view === "graph") renderMain();
+      }, 200));
+      typeSel.addEventListener("change", () => {
+        d.typeFilter = typeSel.value; ctx.save(); renderSide();
+        if (d.view === "graph") renderMain();
+      });
 
       root.append(status, el("div", { class: "api-layout" }, [sideBox, mainBox]));
       load();

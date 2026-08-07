@@ -93,8 +93,13 @@ single dependency-free binary (with an optional native desktop app).
 - A new tool for **Open Knowledge Format** bundles (v0.2): knowledge as plain
   markdown files with YAML frontmatter, where the file path is a concept's
   identity and markdown links form the graph
-- Force-directed graph view with type-coloured nodes, plus a concept editor
-  showing what each one links to and is linked from
+- **Interactive graph** — scroll to zoom, drag to pan, drag a node to pin it
+  (pins persist), hover to isolate a concept's neighbourhood, node size by how
+  many links a concept has, and a type legend that doubles as a filter
+- **Share a bundle**: export the whole thing as a zip, import someone else's.
+  Imports merge — your own concepts are never overwritten unless you ask — and
+  can land under a folder of their own
+- A concept editor showing what each one links to and is linked from
 - Agents read and write the **same bundle** over MCP, so what one records
   while it works is there for you to read, correct and commit
 
