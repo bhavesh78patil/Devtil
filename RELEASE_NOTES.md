@@ -37,12 +37,28 @@ single dependency-free binary (with an optional native desktop app).
 
 **Infra clients**
 - **Kafka** (multi-cluster): topic dropdown, read latest / from-beginning /
-  time-range, key & value search, newest-first messages with pretty-printed
+  time-range, newest-first messages with pretty-printed
   values (maximize with Value/Headers tabs), configurable timeout. **Produce**
   is its own mode with a full-height value editor that **pretty-prints JSON
   the moment you paste it**, Format/Minify/Copy buttons, and a live readout of
   the payload size and whether it parses — a broken payload reports itself
-  before the broker does
+  before the broker does. **Search** is a real query language now — a bare
+  word is still a substring, but `status:held` matches a field *inside* a JSON
+  payload, `customer.city:Pune` follows a path, `city:Pune` finds that key at
+  any depth, `amount:>100` compares numerically, `key:` and `header.traceId:`
+  reach the record itself, and terms combine with **AND / OR / NOT and
+  brackets**. Agents get the same syntax through `kafka_consume`
+- **Fixed — producing stopped working after a while.** Each send built a fresh
+  connection pool and never released it (a directly-constructed `kafka.Writer`
+  does not close a transport it was handed), so sockets accumulated until every
+  produce timed out. Pools are now shared per cluster, reused across sends —
+  which also removes a full TCP + TLS + SASL handshake from every message — and
+  a send that lands on a connection the broker had already closed reconnects
+  and retries once instead of reporting a hang-up as a failure
+- **Fixed — picking a console from the sidebar opened the first one.** Inner
+  tabs are identified by id, and that id was only assigned when the tool
+  rendered; the sidebar builds rows for every tab including ones never opened,
+  so selecting "the third console" of an unopened tab landed on the first
 - **Elastic / OpenSearch**: REST console + a **visual query builder** that
   generates clauses from each field's schema type (term/match/range/nested).
   The index picker, builder and body **fold away behind a ▸ Request toggle**,

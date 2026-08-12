@@ -251,7 +251,9 @@ func (s *Server) registerKafka() {
 		Name:  "kafka_consume",
 		Title: "Read Kafka messages",
 		Description: "Read messages from a Kafka topic — the latest N, from the beginning, or within a time window — " +
-			"with optional case-insensitive key and value filters. Reads history only; it never waits for new messages.",
+			"with optional key and value search. Reads history only; it never waits for new messages. " +
+			"Search is far more than a substring: use `field:value` to match inside a JSON payload, so you can find " +
+			"one order among thousands instead of reading them all back and filtering yourself.",
 		ReadOnly: true,
 		Schema: obj(merge(connectionArg("Kafka"), kafkaConnProps, map[string]any{
 			"topic":      str("Topic to read."),
@@ -259,8 +261,8 @@ func (s *Server) registerKafka() {
 			"from":       enum("latest (default), beginning, or time (use startMs/endMs).", "latest", "beginning", "time"),
 			"startMs":    num("Window start as epoch milliseconds, when from=time."),
 			"endMs":      num("Window end as epoch milliseconds, when from=time."),
-			"keyQuery":   str("Only return messages whose key contains this (case-insensitive)."),
-			"valueQuery": str("Only return messages whose value contains this (case-insensitive)."),
+			"keyQuery":   str("Search the message key. Same syntax as valueQuery; a bare word is a substring of the key."),
+			"valueQuery": str(kafkaSearchSyntax),
 		}), "topic"),
 		Run: func(a Args) (any, error) {
 			conn, chosen, err := s.kafkaConn(a)
@@ -822,3 +824,23 @@ func (s *Server) registerSSH() {
 		},
 	})
 }
+
+// kafkaSearchSyntax documents the message search language for an agent. It is
+// the same language the Kafka tool's search boxes take, so a query that works
+// in one works in the other.
+const kafkaSearchSyntax = "Search the message value. A bare word is a case-insensitive substring, " +
+	"but you can do much better than that:\n" +
+	"  status:held                 a JSON field in the payload contains this\n" +
+	"  status=held                 exact match rather than substring\n" +
+	"  customer.city:Pune          a dotted path\n" +
+	"  city:Pune                   any field with that name, at any depth\n" +
+	"  amount:>100                 numeric comparison: > >= < <=\n" +
+	"  key:ORD-8837                the message key\n" +
+	"  header.traceId:abc-123      a record header\n" +
+	"  \"awaiting stock\"            a phrase, spaces kept\n" +
+	"  status:held AND amount:>100 AND is also implied between terms\n" +
+	"  status:held OR status:cancelled\n" +
+	"  NOT status:shipped          also -status:shipped\n" +
+	"  (a OR b) AND NOT c          brackets group\n" +
+	"A field that is not present never matches. On a payload that is not JSON, " +
+	"bare terms still work and field lookups simply do not match."

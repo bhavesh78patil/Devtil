@@ -1011,3 +1011,19 @@ a.sftp-dir:hover, a.sftp-file:hover { color: var(--accent); text-decoration: und
 ::-webkit-scrollbar { width: 10px; height: 10px; }
 ::-webkit-scrollbar-thumb { background: var(--bg3); border-radius: 5px; }
 ::-webkit-scrollbar-thumb:hover { background: var(--border); }
+
+/* Kafka search syntax reference — folded away, but there when you want it */
+.search-help summary { font-size: 12px; }
+.search-help-body {
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--text-dim);
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-input);
+  padding: 10px 12px;
+  margin: 0;
+  overflow-x: auto;
+  white-space: pre;
+}

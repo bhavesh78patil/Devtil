@@ -2989,6 +2989,45 @@
   // ======================================================================
 
   function clientTool(cfg) {
+    // Consoles and connections saved before inner tabs had ids have none, and
+    // `undefined === undefined` matches the *first* entry — so every lookup
+    // resolved to console one and clicking a tab appeared to do nothing.
+    //
+    // This has to run before *anything* reads an id, and the sidebar's tab
+    // tree reads them too — for every tab in the workspace, including ones
+    // that have never been rendered. Leaving it inside render() meant a
+    // sidebar row for an unopened tab carried `id: undefined`, so selecting
+    // "the third console" set activeConsoleId to undefined and the tool then
+    // fell back to the first one. Both entry points normalise now.
+    const normalize = (d) => {
+      if (!Array.isArray(d.connections)) d.connections = [];
+      if (!Array.isArray(d.consoles)) d.consoles = [];
+      if (!d.consoles.length) d.consoles.push(cfg.newConsole());
+      let changed = false;
+      for (const c of d.consoles) if (!c.id) { c.id = uid(); changed = true; }
+      for (const c of d.connections) if (!c.id) { c.id = uid(); changed = true; }
+      // A connection that never had an id left activeConnId pointing at
+      // nothing, so a tool with saved clusters greeted you with "add one".
+      if (d.connections.length && !d.connections.some((c) => c.id === d.activeConnId)) {
+        d.activeConnId = d.connections[0].id;
+        changed = true;
+      }
+      if (!d.consoles.some((c) => c.id === d.activeConsoleId)) {
+        d.activeConsoleId = d.consoles[0].id;
+        changed = true;
+      }
+      // Bind every console to a connection, not just the one on screen. The
+      // sidebar names each console's cluster, and an unbound console used to
+      // borrow the first one purely because two undefined ids compared equal.
+      for (const c of d.consoles) {
+        if (!d.connections.some((x) => x.id === c.connId)) {
+          const next = d.activeConnId || (d.connections[0] && d.connections[0].id) || null;
+          if (c.connId !== next) { c.connId = next; changed = true; }
+        }
+      }
+      return changed;
+    };
+
     registerTool({
       type: cfg.type,
       icon: cfg.icon,
@@ -2996,41 +3035,26 @@
       desc: cfg.desc,
       defaults: () => ({ connections: [], activeConnId: null, consoles: [], activeConsoleId: null }),
       // inner console tabs, for the workspace tab tree in the sidebar
-      subTabs: (d) => (d.consoles || []).map((c) => {
-        const conn = (d.connections || []).find((x) => x.id === c.connId);
-        const where = conn ? (conn.name || cfg.connName(conn) || "") : "";
-        return {
-          id: c.id,
-          label: cfg.consoleLabel(c) + (where ? " · " + where : ""),
-          select: () => { d.activeConsoleId = c.id; if (c.connId) d.activeConnId = c.connId; },
-          remove: () => {
-            const i = d.consoles.findIndex((x) => x.id === c.id);
-            if (i >= 0) d.consoles.splice(i, 1);
-            if (d.activeConsoleId === c.id) d.activeConsoleId = d.consoles[0]?.id ?? null;
-          },
-        };
-      }),
+      subTabs: (d) => {
+        normalize(d);
+        return d.consoles.map((c) => {
+          const conn = d.connections.find((x) => x.id === c.connId);
+          const where = conn ? (conn.name || cfg.connName(conn) || "") : "";
+          return {
+            id: c.id,
+            label: cfg.consoleLabel(c) + (where ? " · " + where : ""),
+            select: () => { d.activeConsoleId = c.id; if (c.connId) d.activeConnId = c.connId; },
+            remove: () => {
+              const i = d.consoles.findIndex((x) => x.id === c.id);
+              if (i >= 0) d.consoles.splice(i, 1);
+              if (d.activeConsoleId === c.id) d.activeConsoleId = d.consoles[0]?.id ?? null;
+            },
+          };
+        });
+      },
       render(root, tab, ctx) {
         const d = tab.data;
-        if (!Array.isArray(d.connections)) d.connections = [];
-        if (!Array.isArray(d.consoles)) d.consoles = [];
-        if (!d.consoles.length) d.consoles.push(cfg.newConsole());
-        // Consoles and connections saved before inner tabs had ids have none,
-        // and `undefined === undefined` matches the *first* entry — so every
-        // lookup resolved to console one, every tab drew as active, and
-        // clicking a tab appeared to do nothing. Backfill before anything
-        // reads an id.
-        let backfilled = false;
-        for (const c of d.consoles) if (!c.id) { c.id = uid(); backfilled = true; }
-        for (const c of d.connections) if (!c.id) { c.id = uid(); backfilled = true; }
-        // A connection that never had an id left activeConnId pointing at
-        // nothing, so a tool with saved clusters greeted you with "add one".
-        if (d.connections.length && !d.connections.some((c) => c.id === d.activeConnId)) {
-          d.activeConnId = d.connections[0].id;
-          backfilled = true;
-        }
-        if (backfilled) ctx.save();
-        if (!d.consoles.some((c) => c.id === d.activeConsoleId)) d.activeConsoleId = d.consoles[0].id;
+        if (normalize(d)) ctx.save();
 
         const sideBox = el("div", { class: "api-side" });
         const mainBox = el("div", { class: "api-main" });
@@ -3700,12 +3724,41 @@
     };
     fromSel.addEventListener("change", () => { c.from = fromSel.value; ctx.save(); syncFrom(); });
 
-    const keyQ = el("input", { type: "text", placeholder: "search key contains…", style: "min-width:150px" });
+    // Both boxes take the same small query language (see kquery.go): a bare
+    // word is still a substring, so nothing anyone had typed before changes
+    // meaning, but `field:value`, comparisons and AND/OR/NOT are understood.
+    const SEARCH_HELP = [
+      "held                      substring",
+      '"order held"              phrase',
+      "status:held               a JSON field contains this",
+      "status=held               exact, not substring",
+      "customer.city:Pune        a dotted path",
+      "city:Pune                 any field with that name, any depth",
+      "amount:>100               numeric  >  >=  <  <=",
+      "key:ORD-8837              the message key",
+      "header.traceId:abc        a record header",
+      "status:held AND amount:>100",
+      "status:held OR status:cancelled",
+      "NOT status:shipped        also  -status:shipped",
+      "(a OR b) AND NOT c        brackets",
+    ].join("\n");
+    const keyQ = el("input", {
+      type: "text", placeholder: "search key…", style: "min-width:150px",
+      title: "Search the message key.\n\n" + SEARCH_HELP,
+    });
     keyQ.value = c.keyQ || "";
     keyQ.addEventListener("input", () => { c.keyQ = keyQ.value; ctx.save(); });
-    const valQ = el("input", { type: "text", placeholder: "search value contains…", style: "min-width:150px;flex:1" });
+    const valQ = el("input", {
+      type: "text", placeholder: "search value — try  status:held AND amount:>100", style: "min-width:150px;flex:1",
+      title: "Search the message value.\n\n" + SEARCH_HELP,
+    });
     valQ.value = c.valQ || "";
     valQ.addEventListener("input", () => { c.valQ = valQ.value; ctx.save(); });
+    // one place to see the syntax without hunting for a tooltip
+    const searchHelp = el("details", { class: "section search-help" }, [
+      el("summary", { text: "Search syntax — fields, comparisons, AND / OR / NOT" }),
+      el("pre", { class: "search-help-body", text: SEARCH_HELP }),
+    ]);
 
     const tryPretty = (v) => { try { return JSON.stringify(JSON.parse(v), null, 2); } catch { return v == null ? "" : String(v); } };
 
@@ -3988,6 +4041,7 @@
         el("span", { class: "pane-label", text: "Search" }),
         keyQ, valQ,
       ]),
+      searchHelp,
       status,
     ]);
     const producePane = el("div", { class: "console-controls produce-pane" }, [
