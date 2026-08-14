@@ -31,6 +31,18 @@ single dependency-free binary (with an optional native desktop app).
   copy into any collection, or a new one
 - **Swagger/OpenAPI import** lands in the collection you're in (and offers to
   name it from the document title) instead of scattering endpoints
+- **Import a curl command** — paste one and it is saved as a request, with
+  headers, body, method and URL filled in and `-u` turned into a Basic auth
+  block you can see and edit. Anything that cannot be carried over (`-F`
+  multipart, `-d @file`, `-o`) is named rather than dropped in silence
+- **⤓ Download the response** exactly as it arrived, with a filename taken
+  from the URL and an extension the server's content type justifies — an API
+  that answers in CSV, XML or PDF hands you a file instead of a wall of text
+- **A Timing tab** breaking each call into DNS, TCP connect, TLS handshake,
+  send, waiting (TTFB) and download, measured with `httptrace` rather than
+  guessed from the total. Sub-millisecond phases are reported to two decimals,
+  so "too fast to measure" is never confused with "did not happen", and a
+  reused connection says so
 - **Auth** (Basic / Bearer / API key) per request or inherited from the
   collection; **History**; export a collection to JSON and import it back as a
   new one. Requests are proxied through the backend so CORS is never in the way.
@@ -118,6 +130,8 @@ single dependency-free binary (with an optional native desktop app).
   not merely unusable
 - **Fixed**: Settings could fail to open on a fresh install, before any
   connection had been saved
+- **Fixed**: with more console tabs than fit, clicking one scrolled the strip
+  back to the first — the selection was right, the view had jumped
 - **Environment labels and a default per tool** — devtil never guesses which
   of your clusters an agent meant. With several and no default it refuses and
   tells the agent to ask you; a connection labelled **production** is never

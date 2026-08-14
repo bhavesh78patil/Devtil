@@ -58,6 +58,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/state", s.getState)
 	mux.HandleFunc("PUT /api/state", s.putState)
 	mux.HandleFunc("POST /api/proxy", s.doProxy)
+	mux.HandleFunc("POST /api/curl", s.parseCurl)
 
 	mux.HandleFunc("POST /api/kafka/topics", s.kafkaTopics)
 	mux.HandleFunc("POST /api/kafka/consume", s.kafkaConsume)
@@ -206,6 +207,25 @@ func (s *Server) doProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, resp)
+}
+
+// parseCurl turns a pasted curl command into a request the API client can
+// save. Parsing server-side keeps one implementation for the UI and any
+// future agent tool, and keeps it covered by Go tests.
+func (s *Server) parseCurl(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Command string `json:"command"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	parsed, err := proxy.ParseCurl(body.Command)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, parsed)
 }
 
 func connFromQuery(q url.Values) kube.Conn {

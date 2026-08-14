@@ -1122,3 +1122,40 @@ a.sftp-dir:hover, a.sftp-file:hover { color: var(--accent); text-decoration: und
   border-color: var(--accent);
   color: #fff;
 }
+
+/* ---------- API client: response timing breakdown ---------- */
+/* Where the time actually went — the phases come from httptrace on the Go
+   side, so this is the real connection lifecycle, not a guess. */
+.timing { display: flex; flex-direction: column; gap: 6px; padding: 4px 0; }
+.timing-row { display: flex; align-items: center; gap: 10px; font-size: 12.5px; }
+.timing-row.zero { opacity: 0.45; }
+.timing-label { width: 130px; flex-shrink: 0; color: var(--text-dim); }
+.timing-bar {
+  flex: 1;
+  height: 10px;
+  min-width: 60px;
+  background: var(--bg3);
+  border-radius: 5px;
+  overflow: hidden;
+}
+.timing-fill { display: block; height: 100%; background: var(--accent); border-radius: 5px; }
+.timing-ms {
+  width: 80px;
+  text-align: right;
+  font-family: var(--mono);
+  font-size: 12px;
+  flex-shrink: 0;
+}
+.timing-row.total { border-top: 1px solid var(--border); padding-top: 7px; margin-top: 2px; font-weight: 600; }
+.timing-row.total .timing-label, .timing-row.total .timing-ms { color: var(--text); }
+.timing-row.total .timing-bar { background: none; }
+
+/* curl import box */
+.curl-in {
+  width: 100%;
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.5;
+  resize: vertical;
+}
+.resp-meta .spacer { flex: 1; }

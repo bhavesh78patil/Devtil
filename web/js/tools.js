@@ -1614,6 +1614,7 @@
         if (col.auth && col.auth.type && col.auth.type !== "none") ga.open = true;
         mainBox.append(ga);
 
+        mainBox.append(curlSection(col, status));
         mainBox.append(swaggerSection(col, status));
         mainBox.append(shareSection(col, status));
 
@@ -1633,6 +1634,83 @@
           el("summary", { text: `Requests (${col.requests.length})` }),
           list,
         ]));
+      }
+
+      // ---- curl import -----------------------------------------------------
+      // Every API you have to call turns up as a curl command somewhere: a
+      // README, a Slack message, the browser's "copy as cURL". Retyping one
+      // into a form is tedious and gets details wrong, so paste it instead.
+      function curlSection(col, status) {
+        const box = el("textarea", {
+          rows: "5", class: "curl-in", spellcheck: "false",
+          placeholder: "curl 'https://api.example.com/v2/orders' \\\n  -X POST \\\n  -H 'authorization: Bearer …' \\\n  --data-raw '{\"orderId\":\"ORD-1\"}'",
+        });
+        const note = el("div", { class: "status-line dim" });
+
+        const doImport = async (openIt) => {
+          const cmd = box.value.trim();
+          if (!cmd) return setStatus(note, "✗ Paste a curl command first", "err");
+          setStatus(note, "Parsing…", "dim");
+          let parsed;
+          try {
+            parsed = await api("POST", "/api/curl", { command: cmd });
+          } catch (e) {
+            return setStatus(note, "✗ " + e.message, "err");
+          }
+          const headers = Object.entries(parsed.headers || {}).map(([k, v]) => ({ k, v }));
+          if (!headers.length) headers.push({ k: "", v: "" });
+          // -u lands in the auth block, not a header, so it stays visible
+          // and editable rather than being baked into base64 in a header row
+          const auth = parsed.username
+            ? { type: "basic", username: parsed.username, password: parsed.password || "", in: "header" }
+            : { type: "inherit", in: "header" };
+          const saved = newSavedRequest({
+            name: curlName(parsed),
+            method: parsed.method,
+            path: pathWithin(col, parsed.url),
+            headers,
+            body: parsed.body || "",
+            auth,
+          });
+          col.requests.push(saved);
+          ctx.save();
+          box.value = "";
+          const warn = (parsed.warnings || []).length
+            ? " · " + parsed.warnings.length + " thing(s) could not be carried over: " + parsed.warnings.join("; ")
+            : "";
+          if (parsed.insecure) {
+            setStatus(note, `✓ Added “${saved.name}” to ${col.name} — the command had -k, so tick “skip TLS verification” on the request${warn}`, warn ? "err" : "ok");
+          } else {
+            setStatus(note, `✓ Added “${saved.name}” to ${col.name}${warn}`, warn ? "err" : "ok");
+          }
+          renderSide();
+          if (openIt) openSavedRequest(col, saved);
+          else renderMain();
+        };
+
+        return el("details", { class: "section" }, [
+          el("summary", { text: "Import a curl command" }),
+          el("div", { class: "status-line dim", text: `Paste a curl command — it is saved as a request in “${col.name}”.` }),
+          box,
+          el("div", { class: "toolbar" }, [
+            el("button", { class: "btn primary", text: "Import", onclick: () => doImport(false) }),
+            el("button", { class: "btn", text: "Import & open", onclick: () => doImport(true) }),
+          ]),
+          note,
+        ]);
+      }
+
+      // A name you would recognise in the tree: the method and the last
+      // meaningful path segment, falling back to the host.
+      function curlName(parsed) {
+        try {
+          const u = new URL(parsed.url);
+          const segs = u.pathname.split("/").filter(Boolean);
+          const tail = segs.length ? segs[segs.length - 1] : u.hostname;
+          return `${parsed.method} ${tail}`;
+        } catch {
+          return `${parsed.method} request`;
+        }
       }
 
       // ---- Swagger / OpenAPI import, targeting this collection -------------
@@ -2010,17 +2088,30 @@
             el("span", { class: "badge s" + String(resp.status)[0], text: resp.status + " " + resp.statusText }),
             el("span", { text: resp.durationMs + " ms" }),
             el("span", { text: fmtBytes(resp.size) + (resp.truncated ? " (truncated)" : "") }),
-            copyBtn(() => resp.body, "Copy body"),
+            el("span", { class: "spacer" }),
+            copyBtn(() => resp.body, "Copy"),
+            el("button", {
+              class: "btn", text: "⤓ Download",
+              title: "Save the response body exactly as it arrived",
+              onclick: () => downloadResponse(r, resp),
+            }),
           ]));
         }
-        respArea.append(el("div", { class: "subtabs" }, [
-          el("button", { class: view === "body" ? "active" : "", text: "Response body", onclick: () => renderResponse(respArea, r, "body") }),
-          el("button", { class: view === "headers" ? "active" : "", text: "Response headers", onclick: () => renderResponse(respArea, r, "headers") }),
-        ]));
+        const tabs = [
+          el("button", { class: view === "body" ? "active" : "", text: "Body", onclick: () => renderResponse(respArea, r, "body") }),
+          el("button", { class: view === "headers" ? "active" : "", text: `Headers (${Object.keys((resp && resp.headers) || {}).length})`, onclick: () => renderResponse(respArea, r, "headers") }),
+        ];
+        // the timing breakdown only exists once something has been sent
+        if (resp && resp.timing) {
+          tabs.push(el("button", { class: view === "timing" ? "active" : "", text: "Timing", onclick: () => renderResponse(respArea, r, "timing") }));
+        }
+        respArea.append(el("div", { class: "subtabs" }, tabs));
         if (!resp) {
           return respArea.append(el("div", { class: "status-line dim", text: "Send the request to see the response here" }));
         }
-        if (view === "headers") {
+        if (view === "timing") {
+          respArea.append(timingPanel(resp.timing));
+        } else if (view === "headers") {
           respArea.append(el("table", { class: "kv" }, Object.entries(resp.headers || {}).map(([k, v]) =>
             el("tr", {}, [el("th", { text: k }), el("td", { text: v })])
           )));
@@ -2030,6 +2121,88 @@
           respArea.append(el("pre", { class: "output", text: body }));
         }
       }
+
+      // Not every API answers in JSON. A CSV, a PDF, an XML export — the
+      // useful thing to do with those is save the file, not stare at the text.
+      function downloadResponse(r, resp) {
+        const type = (resp.headers && (resp.headers["Content-Type"] || resp.headers["content-type"])) || "";
+        const blob = new Blob([resp.body], { type: type.split(";")[0].trim() || "application/octet-stream" });
+        const a = document.createElement("a");
+        a.href = URL.createObjectURL(blob);
+        a.download = responseFilename(r, resp, type);
+        document.body.append(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+      }
+
+      // A filename you would recognise later: the last path segment, and an
+      // extension the server's own content type justifies.
+      const CONTENT_EXT = {
+        "application/json": "json", "text/json": "json",
+        "text/csv": "csv", "application/csv": "csv",
+        "application/xml": "xml", "text/xml": "xml",
+        "text/html": "html", "text/plain": "txt",
+        "application/pdf": "pdf", "application/zip": "zip",
+        "application/x-ndjson": "ndjson", "text/yaml": "yaml", "application/yaml": "yaml",
+        "application/vnd.ms-excel": "xls",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "xlsx",
+      };
+      function responseFilename(r, resp, contentType) {
+        let stem = "response";
+        try {
+          const u = new URL(r.url.trim());
+          const segs = u.pathname.split("/").filter(Boolean);
+          if (segs.length) stem = segs[segs.length - 1].replace(/\.[^.]*$/, "") || "response";
+          else if (u.hostname) stem = u.hostname;
+        } catch { /* keep the fallback */ }
+        const mime = contentType.split(";")[0].trim().toLowerCase();
+        let ext = CONTENT_EXT[mime] || "";
+        if (!ext) {
+          // an unknown type is still a hint: text/* is readable, anything else is not
+          if (mime.startsWith("text/")) ext = "txt";
+          else { try { JSON.parse(resp.body); ext = "json"; } catch { ext = "bin"; } }
+        }
+        const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
+        return `${stem}-${stamp}.${ext}`;
+      }
+
+      // Where the time actually went. The phases come from the Go side's
+      // httptrace hooks, so this is the real connection lifecycle rather than
+      // a guess made from the total.
+      function timingPanel(t) {
+        const rows = [
+          ["DNS lookup", t.dnsMs, "resolving the hostname"],
+          ["TCP connect", t.connectMs, "opening the socket"],
+          ["TLS handshake", t.tlsMs, "negotiating https"],
+          ["Send", t.sendMs, "writing the request"],
+          ["Waiting (TTFB)", t.waitMs, "the server thinking"],
+          ["Download", t.downloadMs, "reading the body"],
+        ];
+        const total = t.totalMs || rows.reduce((n, [, ms]) => n + ms, 0) || 1;
+        const box = el("div", { class: "timing" });
+        for (const [label, ms, why] of rows) {
+          const pct = Math.max(0, Math.min(100, (ms / total) * 100));
+          box.append(el("div", { class: "timing-row" + (ms ? "" : " zero") }, [
+            el("span", { class: "timing-label", text: label, title: why }),
+            el("span", { class: "timing-bar" }, [el("span", { class: "timing-fill", style: `width:${pct}%` })]),
+            el("span", { class: "timing-ms", text: ms ? fmtMs(ms) : "—" }),
+          ]));
+        }
+        box.append(el("div", { class: "timing-row total" }, [
+          el("span", { class: "timing-label", text: "Total" }),
+          el("span", { class: "timing-bar" }),
+          el("span", { class: "timing-ms", text: fmtMs(t.totalMs) }),
+        ]));
+        const notes = [];
+        if (t.remoteAddr) notes.push("connected to " + t.remoteAddr);
+        // a phase that did not happen reads as "—" above; say why
+        if (t.reused) notes.push("reused an existing connection, so there was no DNS, connect or handshake");
+        else if (!t.tlsMs) notes.push("plain http — no TLS handshake");
+        box.append(el("div", { class: "status-line dim", text: notes.join(" · ") }));
+        return box;
+      }
+      const fmtMs = (ms) => (ms >= 100 ? Math.round(ms) + " ms" : ms >= 1 ? ms.toFixed(1) + " ms" : ms.toFixed(2) + " ms");
 
       renderSide();
       renderMain();
@@ -3190,8 +3363,13 @@
         }
 
         function renderMain() {
+          // The strip scrolls horizontally once there are more consoles than
+          // fit. Rebuilding it threw its scroll position away, so clicking the
+          // eighth tab snapped the strip back to the first one — it looked
+          // like the selection had jumped when only the view had.
+          const prevScroll = (mainBox.querySelector(".req-tabs") || {}).scrollLeft || 0;
           mainBox.replaceChildren();
-          mainBox.append(el("div", { class: "req-tabs" }, [
+          const strip = el("div", { class: "req-tabs" }, [
             ...d.consoles.map((c) => {
               const consoleConn = d.connections.find((x) => x.id === c.connId);
               const clusterName = consoleConn ? (consoleConn.name || cfg.connName(consoleConn) || "") : "";
@@ -3234,7 +3412,14 @@
                 renderMain();
               },
             }),
-          ]));
+          ]);
+          mainBox.append(strip);
+          // put the view back where it was, then make sure the active tab is
+          // actually on screen — selecting one from the sidebar can point at a
+          // console that was scrolled out of sight
+          strip.scrollLeft = prevScroll;
+          const activeTab = strip.querySelector(".req-tab.active");
+          if (activeTab) activeTab.scrollIntoView({ block: "nearest", inline: "nearest" });
 
           const consoleData = d.consoles.find((c) => c.id === d.activeConsoleId) || d.consoles[0];
           // each console remembers its own connection; migrate legacy consoles and
