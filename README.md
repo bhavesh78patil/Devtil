@@ -279,6 +279,10 @@ Two levels, consistent across the app:
   **expand (⤢) + copy (⧉) on every cell**, so a long key or value is never
   out of reach; expanding pretty-prints JSON; the SQL editor holds **multiple queries** — select one, or just
   put the cursor on it, and Run executes only that statement;
+  every Kafka/Elastic/Cassandra/SQL console has a **drag handle between its
+  controls and its results** (position remembered per console, double-click to
+  reset), export/copy sit on the **result's own header row**, and the
+  **connections panel collapses to a rail** of clickable chips.
   Kafka/Elastic/Cassandra/Relational-DB tools have a **connections side panel**
   (add/edit/delete clusters, click one to make it active — green dot) with
   **inner console tabs** on the right, so one tool tab can hold many parallel

@@ -142,6 +142,22 @@ single dependency-free binary (with an optional native desktop app).
 - Agents read and write the **same bundle** over MCP, so what one records
   while it works is there for you to read, correct and commit
 
+**Console layout**
+- **A drag handle between the controls and the results** on every Kafka,
+  Elastic, Cassandra and SQL console. How much room a query editor needs
+  depends on the query and how much a result needs depends on the result, so
+  that boundary is yours to set — dragged position is remembered per console,
+  double-click resets it
+- **Export and copy moved onto the result's own header row**, where the rows
+  they act on are — they used to sit in a bar above the request that you
+  scrolled past to reach the data
+- **The primary action shares the top line** with what it acts on (Run beside
+  the target and row cap; Consume beside the topic and read mode) instead of
+  wrapping onto a row of its own
+- **The connections panel collapses to a rail** of clickable chips — two or
+  three saved clusters did not justify holding 280px of window open — and is
+  narrower when expanded
+
 **Workspaces & UX**
 - Workspaces + tabs, all **autosaved**; rename tabs/workspaces; collapsible
   sidebar; **search your tabs** from the sidebar and collapse a workspace's

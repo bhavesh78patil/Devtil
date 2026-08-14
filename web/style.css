@@ -405,8 +405,8 @@ table.kv th { color: var(--text-dim); font-weight: 500; white-space: nowrap; }
 .api-layout { display: flex; gap: 12px; flex: 1; min-height: 0; }
 
 .api-side {
-  width: 280px;
-  min-width: 240px;
+  width: 210px;
+  min-width: 180px;
   border: 1px solid var(--border);
   border-radius: 8px;
   background: var(--bg2);
@@ -587,13 +587,70 @@ details.section[open] summary { margin-bottom: 8px; }
 .console-controls {
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  flex: 0 1 auto;
-  max-height: 55%;
+  gap: 8px;
+  flex: 0 0 auto;
+  /* a ceiling until you drag the splitter; after that the height you chose
+     wins, because how much room an editor needs is your call, not ours */
+  max-height: 42%;
   overflow-y: auto;
   padding-right: 2px;
 }
+.console-controls.sized { max-height: none; }
 .console-controls textarea { max-height: 22vh; }
+
+/* Drag handle between a console's controls and its results. */
+.split-bar {
+  flex: 0 0 auto;
+  height: 13px;
+  margin: 1px 0;
+  cursor: row-resize;
+  position: relative;
+}
+/* a hairline the width of the pane, so the boundary reads as a boundary */
+.split-bar::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 6px;
+  height: 1px;
+  background: var(--border);
+}
+/* and a grip in the middle, so it reads as draggable */
+.split-bar::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 4px;
+  width: 40px;
+  height: 5px;
+  margin-left: -20px;
+  border-radius: 3px;
+  background: var(--mute);
+  transition: background 0.12s, width 0.12s;
+}
+.split-bar:hover::after { background: var(--accent); width: 60px; margin-left: -30px; }
+
+/* The result's own header: count on the left, the actions that act on it
+   (export, copy) on the right. */
+.result-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  flex: 0 0 auto;
+}
+.result-head > .toolbar { margin-left: auto; }
+.result-head .pane-label { white-space: nowrap; }
+
+/* A console's top line: what you are pointed at on the left, the run
+   controls on the right, so the primary action never wraps onto its own row. */
+.console-head { flex-wrap: nowrap; }
+.console-head .spacer { flex: 1; min-width: 8px; }
+.console-head > .es-target { flex: 0 1 auto; min-width: 0; overflow: hidden; }
+@media (max-width: 1100px) {
+  .console-head { flex-wrap: wrap; }
+}
 
 /* Producing is a full-pane workflow — the results area is hidden in that
    mode, so the editor gets the room instead of being clamped to 55%. */
@@ -1026,4 +1083,42 @@ a.sftp-dir:hover, a.sftp-file:hover { color: var(--accent); text-decoration: und
   margin: 0;
   overflow-x: auto;
   white-space: pre;
+}
+
+/* Collapsed connections panel: a rail of clickable dots. Two or three saved
+   clusters did not justify holding 280px of the window open. */
+.api-side.collapsed {
+  width: 46px;
+  min-width: 46px;
+  background: var(--bg2);
+}
+.api-side-rail {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 0;
+  overflow-y: auto;
+}
+.side-head { display: flex; align-items: center; }
+.side-toggle { margin-left: auto; margin-right: 4px; opacity: 0.7; }
+.side-toggle:hover { opacity: 1; }
+.rail-conn {
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text-dim);
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.rail-conn:hover { border-color: var(--accent); color: var(--text); }
+.rail-conn.on {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
 }

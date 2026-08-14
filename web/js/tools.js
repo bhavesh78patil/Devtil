@@ -3110,10 +3110,42 @@
         }
 
         function renderSide() {
+          // Most people have two or three clusters, and the panel was holding
+          // ~280px of window open to show them. Collapsed it becomes a rail of
+          // dots you can still click, and the console gets the width back.
+          const collapsed = d.sideCollapsed === true;
+          sideBox.classList.toggle("collapsed", collapsed);
+          const toggle = el("button", {
+            class: "icon-btn side-toggle", text: collapsed ? "»" : "«",
+            title: collapsed ? `Show ${cfg.connLabel.toLowerCase()}` : "Collapse this panel",
+            onclick: () => { d.sideCollapsed = !collapsed; ctx.save(); renderSide(); },
+          });
+          if (collapsed) {
+            const rail = el("div", { class: "api-side-rail" }, [toggle]);
+            d.connections.forEach((c) => {
+              const label = c.name || cfg.connName(c) || cfg.connSingular;
+              rail.append(el("button", {
+                class: "rail-conn" + (c.id === d.activeConnId ? " on" : ""),
+                title: label,
+                text: label.slice(0, 2).toUpperCase(),
+                onclick: () => {
+                  d.activeConnId = c.id;
+                  const cur = d.consoles.find((x) => x.id === d.activeConsoleId);
+                  if (cur) cur.connId = c.id;
+                  ctx.save();
+                  renderSide();
+                  renderMain();
+                },
+              }));
+            });
+            sideBox.replaceChildren(rail);
+            return;
+          }
           const box = el("div", { class: "api-side-content" });
           sideBox.replaceChildren(
-            el("div", { class: "subtabs" }, [
+            el("div", { class: "subtabs side-head" }, [
               el("button", { class: "active", text: `${cfg.connLabel} (${d.connections.length})` }),
+              toggle,
             ]),
             box
           );
@@ -3309,14 +3341,20 @@
     return el("div", { class: "rg-wrap" }, [table]);
   }
 
-  function resultGrid(res) {
+  // `actions` (the export controls) ride on the result's own header line:
+  // exporting acts on what is on screen, so putting it anywhere else made you
+  // hunt for it — and it cost a whole row above the results.
+  function resultGrid(res, actions) {
     if (!res) return el("div", { class: "status-line dim", text: "Run a query to see results here" });
     if (res.error) return el("div", { class: "status-line err", text: "✗ " + res.error });
     if (!res.columns || !res.columns.length) {
       return el("div", { class: "status-line ok", text: `✓ OK — ${res.rowsAffected ?? 0} row(s) affected · ${res.durationMs ?? 0} ms` });
     }
     return el("div", { class: "tool", style: "flex:1;min-height:0" }, [
-      el("div", { class: "status-line ok", text: `✓ ${res.rows.length} row(s)${res.truncated ? " (truncated)" : ""} · ${res.durationMs} ms` }),
+      el("div", { class: "result-head" }, [
+        el("span", { class: "status-line ok", text: `✓ ${res.rows.length} row(s)${res.truncated ? " (truncated)" : ""} · ${res.durationMs} ms` }),
+        actions || null,
+      ]),
       dataTable(res.columns, res.rows),
     ]);
   }
@@ -3381,6 +3419,51 @@
   // shared "Export [n] rows [CSV] [Excel]" toolbar row; doExport(fmt, n).
   // `extras` are appended after the export buttons (e.g. a copy-response
   // button) so each console can add its own action without a second toolbar.
+  /**
+   * A drag handle between a console's controls and its results.
+   *
+   * The controls used to be capped at a percentage of the pane, which is the
+   * wrong model: how much room a query editor needs depends on the query, and
+   * how much room a result needs depends on the result. Every database tool
+   * lets you drag that boundary, so this one does too — and remembers where
+   * you put it, per console.
+   *
+   * `controls` is sized in pixels while dragging; the result area below is
+   * flex:1, so it takes whatever is left.
+   */
+  function splitter(controls, c, ctx) {
+    const bar = el("div", { class: "split-bar", title: "Drag to resize · double-click to reset" });
+    const apply = () => {
+      if (c.splitH > 0) controls.style.height = c.splitH + "px";
+      else controls.style.removeProperty("height");
+      controls.classList.toggle("sized", c.splitH > 0);
+    };
+    apply();
+    bar.addEventListener("mousedown", (e) => {
+      e.preventDefault();
+      const startY = e.clientY;
+      const startH = controls.getBoundingClientRect().height;
+      const pane = controls.parentElement;
+      const move = (ev) => {
+        // leave room for the result: never let the controls eat the pane
+        const paneH = pane ? pane.getBoundingClientRect().height : window.innerHeight;
+        const next = Math.max(64, Math.min(paneH - 140, startH + ev.clientY - startY));
+        controls.style.height = next + "px";
+        controls.classList.add("sized");
+      };
+      const up = () => {
+        document.removeEventListener("mousemove", move);
+        document.removeEventListener("mouseup", up);
+        c.splitH = Math.round(controls.getBoundingClientRect().height);
+        ctx.save();
+      };
+      document.addEventListener("mousemove", move);
+      document.addEventListener("mouseup", up);
+    });
+    bar.addEventListener("dblclick", () => { delete c.splitH; ctx.save(); apply(); });
+    return bar;
+  }
+
   function exportBar(c, ctx, doExport, extras = []) {
     const n = el("input", { type: "number", min: "1", max: String(EXPORT_MAX), style: "width:90px", title: `Rows to export (max ${EXPORT_MAX})` });
     n.value = c.exportN || String(EXPORT_DEFAULT);
@@ -3493,6 +3576,8 @@
       return { text: cur.text.trim(), how: `statement ${stmts.indexOf(cur) + 1} of ${stmts.length}` };
     };
 
+    // assigned once the result pane exists; run() only calls it later
+    let drawResult = () => {};
     const run = async () => {
       const picked = pickStatement();
       if (!picked.text) return setStatus(status, "✗ Enter a query", "err");
@@ -3513,7 +3598,7 @@
       }
       c.name = consoleName(picked.text, "query");
       ctx.save();
-      out.replaceChildren(resultGrid(c.result));
+      drawResult();
     };
     query.addEventListener("keydown", (e) => { if ((e.ctrlKey || e.metaKey) && e.key === "Enter") run(); });
 
@@ -3622,21 +3707,25 @@
     fillTables();
     drawCols();
 
-    body.append(
-      el("div", { class: "console-controls" }, [
+    // Run sits on the same line as the target and the row caps, so the
+    // primary action is where the eye already is instead of on a line of its
+    // own; export moves down to the result header, where the rows it exports
+    // actually are.
+    const controls = el("div", { class: "console-controls" }, [
+      el("div", { class: "toolbar console-head" }, [
         target,
-        helper,
-        query,
-        el("div", { class: "toolbar" }, [
-          el("button", { class: "btn primary", text: "Run (Ctrl+Enter)", onclick: run }),
-          el("label", { class: "inline" }, ["Max rows", maxRows]),
-          status,
-        ]),
-        exportBar(c, ctx, doExport),
+        el("span", { class: "spacer" }),
+        el("label", { class: "inline" }, ["Max rows", maxRows]),
+        el("button", { class: "btn primary", text: "Run  ⌘⏎", onclick: run }),
       ]),
-      out
-    );
-    out.replaceChildren(resultGrid(c.result));
+      helper,
+      query,
+      status,
+    ]);
+    body.append(controls, splitter(controls, c, ctx), out);
+    const draw = () => out.replaceChildren(resultGrid(c.result, exportBar(c, ctx, doExport)));
+    drawResult = draw;
+    draw();
   };
 
   /** Kafka console: topics browser, consumer (latest/beginning/time-range
@@ -3795,7 +3884,12 @@
         // newest first (backend returns chronological; reverse for display)
         const rows = c.messages.slice().reverse();
         out.append(
-          el("span", { class: "pane-label", text: `Messages (${c.messages.length}, newest first)` }),
+          el("div", { class: "result-head" }, [
+            el("span", { class: "pane-label", text: `Messages (${c.messages.length}, newest first)` }),
+            el("div", { class: "toolbar" }, [
+              copyBtn(() => JSON.stringify(c.messages, null, 2), "Copy all"),
+            ]),
+          ]),
           // same table treatment as the SQL/Elastic grids: resizable columns,
           // every cell expandable and copyable (so a long key is reachable)
           dataTable(["P/Offset", "Time", "Key", "Value"], rows.map((m) => [
@@ -4026,15 +4120,18 @@
 
     // Consume and Produce are separate modes: each is a full workflow and
     // showing both at once left neither enough room.
+    // Two rows, not four: what to read on the first, how to filter it on the
+    // second, with Consume pinned to the right of row one so it stops
+    // wrapping onto a line of its own.
     const consumePane = el("div", { class: "console-controls" }, [
-      el("div", { class: "toolbar" }, [
-        el("button", { class: "btn", text: "List topics", onclick: listTopics }),
+      el("div", { class: "toolbar console-head" }, [
+        el("button", { class: "btn", text: "Topics", title: "List the cluster's topics", onclick: listTopics }),
         topicSel,
-        el("label", { class: "inline" }, ["or", topic]),
+        topic,
         el("label", { class: "inline" }, ["Read", fromSel]),
         startWrap,
         endWrap,
-        el("label", { class: "inline" }, ["Max", max, "msgs"]),
+        el("label", { class: "inline" }, ["Max", max]),
         el("button", { class: "btn primary", text: "▶ Consume", onclick: consume }),
       ]),
       el("div", { class: "toolbar" }, [
@@ -4064,10 +4161,14 @@
       consumePane.style.display = producing ? "none" : "";
       producePane.style.display = producing ? "" : "none";
       out.style.display = producing ? "none" : "";
+      split.style.display = producing ? "none" : "";
       if (producing) syncTopicInputs();
     };
 
-    body.append(modeBar, consumePane, producePane, out);
+    // the splitter only belongs to Consume — Produce hides the result pane
+    // and takes the whole console, so there is nothing to divide
+    const split = splitter(consumePane, c, ctx);
+    body.append(modeBar, consumePane, split, producePane, out);
     syncFrom();
     fillTopics();
     renderProduce();
@@ -4132,11 +4233,20 @@
         const j = JSON.parse(text);
         if (j && j.hits && Array.isArray(j.hits.hits)) hits = j.hits.hits;
       } catch { /* not JSON — show it raw */ }
-      if (!hits) { out.append(rawPre()); return; }
+      if (!hits) {
+        out.append(el("div", { class: "result-head" }, [
+          el("span", { class: "pane-label", text: "Response" }),
+          responseActions(),
+        ]), rawPre());
+        return;
+      }
 
-      out.append(el("div", { class: "subtabs" }, [
-        el("button", { class: esView === "table" ? "active" : "", text: `Table (${hits.length})`, onclick: () => { esView = "table"; drawResponse(); } }),
-        el("button", { class: esView === "raw" ? "active" : "", text: "Raw JSON", onclick: () => { esView = "raw"; drawResponse(); } }),
+      out.append(el("div", { class: "result-head" }, [
+        el("div", { class: "subtabs" }, [
+          el("button", { class: esView === "table" ? "active" : "", text: `Table (${hits.length})`, onclick: () => { esView = "table"; drawResponse(); } }),
+          el("button", { class: esView === "raw" ? "active" : "", text: "Raw JSON", onclick: () => { esView = "raw"; drawResponse(); } }),
+        ]),
+        responseActions(),
       ]));
       if (esView === "raw" || !hits.length) { out.append(rawPre()); return; }
       const flat = hits.map((h) => flatten(h._source, "", { _id: h._id }));
@@ -4147,7 +4257,7 @@
 
     // copies the whole response body exactly as shown (pretty-printed JSON)
     const copyResponseBtn = () => {
-      const btn = el("button", { class: "btn", text: "Copy response" });
+      const btn = el("button", { class: "btn", text: "Copy" });
       btn.addEventListener("click", () => {
         const text = c.response || "";
         if (!text) return say("✗ Nothing to copy — send a request first", "err");
@@ -4155,6 +4265,9 @@
       });
       return btn;
     };
+    // Export and copy belong to the response, so they render with it rather
+    // than in a bar above the request that you had to scroll past.
+    const responseActions = () => exportBar(c, ctx, doExport, [copyResponseBtn()]);
 
     // Visible target so it's unambiguous which cluster this console talks to.
     const target = el("div", { class: "es-target" });
@@ -4489,14 +4602,18 @@
     // part, and once a response is on screen it is usually the response you
     // want the room for. Everything except the send line folds away, and the
     // choice is remembered per console.
+    // the target and the one-click endpoints share a line: they are both
+    // "which cluster, and what shall I ask it", and two rows for that was one
+    // row too many above a response you are trying to read
     const reqBlock = el("div", { class: "es-req" }, [
-      target,
-      builder,
-      el("div", { class: "toolbar" }, [
-        quick("Cluster health", "GET", "_cluster/health"),
+      el("div", { class: "toolbar console-head" }, [
+        target,
+        el("span", { class: "spacer" }),
+        quick("Health", "GET", "_cluster/health"),
         quick("Indices", "GET", "_cat/indices?v&format=json"),
         quick("Nodes", "GET", "_cat/nodes?v&format=json"),
       ]),
+      builder,
       el("div", {}, [el("span", { class: "pane-label", text: "Body (JSON, for _search etc.)" }), reqBody]),
     ]);
     const reqToggle = el("button", { class: "btn req-toggle" });
@@ -4513,20 +4630,15 @@
     });
     applyReqOpen();
 
-    body.append(
-      el("div", { class: "console-controls" }, [
-        reqBlock,
-        el("div", { class: "req-line" }, [
-          reqToggle, methodSel, path,
-          el("button", { class: "btn primary", text: "Send", onclick: () => send(c.method || "GET", c.path, c.body) }),
-        ]),
-        // copy sits with the export actions so it's available for every
-        // response, not just the _search ones that render as a table
-        exportBar(c, ctx, doExport, [copyResponseBtn()]),
-        status,
+    const controls = el("div", { class: "console-controls" }, [
+      el("div", { class: "req-line" }, [
+        reqToggle, methodSel, path,
+        el("button", { class: "btn primary", text: "Send", onclick: () => send(c.method || "GET", c.path, c.body) }),
       ]),
-      out
-    );
+      reqBlock,
+      status,
+    ]);
+    body.append(controls, splitter(controls, c, ctx), out);
     drawResponse();
     // put the last result back, so returning to this console shows it exactly
     // as you left it
