@@ -156,6 +156,34 @@ single dependency-free binary (with an optional native desktop app).
 - Agents read and write the **same bundle** over MCP, so what one records
   while it works is there for you to read, correct and commit
 
+**Coming back to where you left off**
+- Switching away from a tab and back used to reset it: you were dropped on
+  row one of six hundred, back on Body instead of the Timing tab you were
+  reading, back on the grid instead of the raw JSON. Scroll positions and
+  every sub-tab choice now survive a tab switch, and the choices survive a
+  reload as well
+- **Find in result** on the Elastic console — a notepad-style search over the
+  response with a match count, next/previous, match-case and regex toggles,
+  and an option to hide the rows that don't match. It works on both the grid
+  and the raw JSON, and a search you had typed still applies after a re-run
+
+**Notepad**
+- **Format on paste**: paste minified JSON, XML or a JWT into an empty pad and
+  it is laid out for you — the JWT into its header, payload and signature.
+  Prose is left exactly as it was, and a paste into the middle of text you are
+  editing is never rewritten. A **{ } Format** button does the same on demand
+- **Fixed the find/replace bar**, which had no layout of its own: the label,
+  both inputs and seven buttons ran together as inline content and the search
+  field was squeezed to nothing
+
+**Knowledge Graph**
+- The concept list is now the **folder tree the bundle actually forms** —
+  `/services`, `/tables`, `/runbooks` — with collapsible folders, per-folder
+  counts, and a type dot and label on each concept. **Group by type** is still
+  a click away, and which you chose is remembered
+- **Search** filters the tree and opens every folder holding a match, so a hit
+  is never hidden inside something collapsed
+
 **Console layout**
 - **A drag handle between the controls and the results** on every Kafka,
   Elastic, Cassandra and SQL console. How much room a query editor needs

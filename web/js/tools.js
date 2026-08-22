@@ -9,6 +9,41 @@
   // alive after that tab is closed, before tearing them down.
   const SESSION_TTL_MS = 5 * 60 * 1000;
 
+  // ---- remembering where you were ----------------------------------------
+  // Switching outer tabs tears the tool down and builds it again, which threw
+  // away everything that lived in the DOM: how far you had scrolled through a
+  // result, which pane of a response you were reading. Coming back to a tab
+  // and finding it reset is the single most irritating thing a workbench can
+  // do, so the two kinds of view state are both kept.
+  //
+  // Scroll offsets go in a module-level registry: they change constantly and
+  // have no business churning the state file, but they must survive a
+  // re-render. Discrete choices (which sub-tab is open) go on the tool's own
+  // data instead, so they also survive a reload.
+  const scrollReg = new Map();
+
+  /**
+   * Restore a node's scroll position and keep recording it.
+   * `key` must identify the node across re-renders — a tab or console id plus
+   * a name for the pane.
+   */
+  function keepScroll(node, key) {
+    if (!node || !key) return node;
+    const saved = scrollReg.get(key);
+    if (saved) {
+      // the node is not laid out yet on the frame it is created
+      requestAnimationFrame(() => {
+        node.scrollTop = saved.top;
+        node.scrollLeft = saved.left;
+      });
+    }
+    node.addEventListener("scroll", () => {
+      scrollReg.set(key, { top: node.scrollTop, left: node.scrollLeft });
+    }, { passive: true });
+    return node;
+  }
+
+
   /** Full-screen overlay showing text JSON pretty-printed (falls back to raw). */
   function showJsonModal(title, raw) {
     let pretty = raw == null ? "" : String(raw);
@@ -641,6 +676,50 @@
     return obj;
   }
 
+  // Indent XML without changing it. Uses the browser's own parser, so a
+  // document that does not parse is left alone rather than mangled.
+  function prettyXml(text, indent = 2) {
+    let doc;
+    try {
+      doc = new DOMParser().parseFromString(text, "application/xml");
+    } catch { return null; }
+    if (!doc || doc.querySelector("parsererror")) return null;
+    const pad = " ".repeat(indent);
+    const out = [];
+    const walk = (node, depth) => {
+      const gap = pad.repeat(depth);
+      if (node.nodeType === 3) { // text
+        const t = node.nodeValue.trim();
+        if (t) out.push(gap + t);
+        return;
+      }
+      if (node.nodeType === 8) { // comment
+        out.push(gap + "<!--" + node.nodeValue + "-->");
+        return;
+      }
+      if (node.nodeType !== 1) return;
+      const attrs = [...node.attributes].map((a) => ` ${a.name}="${a.value}"`).join("");
+      const kids = [...node.childNodes].filter((n) => n.nodeType !== 3 || n.nodeValue.trim());
+      if (!kids.length) {
+        out.push(`${gap}<${node.nodeName}${attrs}/>`);
+        return;
+      }
+      // an element holding only text stays on one line — splitting it makes
+      // a document of small values twice as tall and no easier to read
+      if (kids.length === 1 && kids[0].nodeType === 3) {
+        out.push(`${gap}<${node.nodeName}${attrs}>${kids[0].nodeValue.trim()}</${node.nodeName}>`);
+        return;
+      }
+      out.push(`${gap}<${node.nodeName}${attrs}>`);
+      for (const k of kids) walk(k, depth + 1);
+      out.push(`${gap}</${node.nodeName}>`);
+    };
+    for (const n of doc.childNodes) walk(n, 0);
+    const body = out.join("\n");
+    const decl = text.trim().startsWith("<?xml") ? text.trim().slice(0, text.indexOf("?>") + 2) + "\n" : "";
+    return body ? decl + body : null;
+  }
+
   function xmlToJson(xml, indent) {
     const doc = new DOMParser().parseFromString(String(xml).trim(), "application/xml");
     const perr = doc.querySelector("parsererror");
@@ -1261,7 +1340,9 @@
       const sideBox = el("div", { class: "api-side" });
       const mainBox = el("div", { class: "api-main" });
       root.append(el("div", { class: "api-layout" }, [sideBox, mainBox]));
-      let sideView = "collections";
+      // which side panel you had open is a choice, so it is remembered;
+      // the filter text is transient and deliberately is not
+      if (d.sideView !== "history") d.sideView = "collections";
       let query = "";              // sidebar filter — a view concern, not persisted
       let shareMsg = null;         // survives the renderSide() an import triggers
       // An import or a save rebuilds the pane it was triggered from, which
@@ -1275,9 +1356,9 @@
 
       function renderSide() {
         const subtab = (view, label) => el("button", {
-          class: sideView === view ? "active" : "",
+          class: d.sideView === view ? "active" : "",
           text: label,
-          onclick: () => { sideView = view; renderSide(); },
+          onclick: () => { d.sideView = view; ctx.save(); renderSide(); },
         });
         const total = d.collections.reduce((n, c) => n + c.requests.length, 0);
         sideBox.replaceChildren(
@@ -1285,7 +1366,7 @@
             subtab("collections", `Collections (${total})`),
             subtab("history", `History (${d.history.length})`),
           ]),
-          sideView === "history" ? historyPanel() : collectionsPanel()
+          d.sideView === "history" ? historyPanel() : collectionsPanel()
         );
       }
 
@@ -1515,11 +1596,14 @@
 
       // ======================= main: tab bar + panes =======================
 
-      function renderMain(view = "body") {
+      function renderMain(view) {
+        // the strip scrolls once there are more tabs than fit; rebuilding it
+        // must not throw that away (same bug the Kafka console had)
+        const prevScroll = (mainBox.querySelector(".req-tabs") || {}).scrollLeft || 0;
         mainBox.replaceChildren();
 
         // tab bar: request tabs and collection tabs side by side
-        mainBox.append(el("div", { class: "req-tabs" }, [
+        const strip = el("div", { class: "req-tabs" }, [
           ...d.tabs.map((t) => {
             const isCol = t.kind === "collection";
             const label = isCol ? "📁 " + ((colById(t.colId) || {}).name || "collection") : (t.name || "request");
@@ -1552,11 +1636,15 @@
             ]);
           }),
           el("button", { class: "icon-btn", text: "+", title: "New request tab", onclick: () => openAdHoc() }),
-        ]));
+        ]);
+        mainBox.append(strip);
+        strip.scrollLeft = prevScroll;
+        const activeStripTab = strip.querySelector(".req-tab.active");
+        if (activeStripTab) activeStripTab.scrollIntoView({ block: "nearest", inline: "nearest" });
 
         const t = activeTab();
         if (t.kind === "collection") renderCollectionPane(t);
-        else renderRequestPane(t, view);
+        else renderRequestPane(t, view || t.respView || "body");
       }
 
       // ---- collection pane: everything about one collection ---------------
@@ -2007,7 +2095,7 @@
           target.collapsed = false;
           ctx.save();
           setFlash(`✓ Saved to ${target.name}`, "ok");
-          sideView = "collections";
+          d.sideView = "collections";
           renderSide();
           renderMain(view);
         }
@@ -2080,6 +2168,14 @@
         });
       }
 
+      // Which pane you were reading is a choice, so it is remembered on the
+      // tab — switching away and back should not drop you on Body again.
+      function showRespView(respArea, r, view) {
+        r.respView = view;
+        ctx.save();
+        renderResponse(respArea, r, view);
+      }
+
       function renderResponse(respArea, r, view) {
         respArea.replaceChildren();
         const resp = r.response;
@@ -2098,12 +2194,12 @@
           ]));
         }
         const tabs = [
-          el("button", { class: view === "body" ? "active" : "", text: "Body", onclick: () => renderResponse(respArea, r, "body") }),
-          el("button", { class: view === "headers" ? "active" : "", text: `Headers (${Object.keys((resp && resp.headers) || {}).length})`, onclick: () => renderResponse(respArea, r, "headers") }),
+          el("button", { class: view === "body" ? "active" : "", text: "Body", onclick: () => showRespView(respArea, r, "body") }),
+          el("button", { class: view === "headers" ? "active" : "", text: `Headers (${Object.keys((resp && resp.headers) || {}).length})`, onclick: () => showRespView(respArea, r, "headers") }),
         ];
         // the timing breakdown only exists once something has been sent
         if (resp && resp.timing) {
-          tabs.push(el("button", { class: view === "timing" ? "active" : "", text: "Timing", onclick: () => renderResponse(respArea, r, "timing") }));
+          tabs.push(el("button", { class: view === "timing" ? "active" : "", text: "Timing", onclick: () => showRespView(respArea, r, "timing") }));
         }
         respArea.append(el("div", { class: "subtabs" }, tabs));
         if (!resp) {
@@ -3508,7 +3604,10 @@
    * Build a result table. `columns` are header labels; `rows` are arrays of
    * values, or of {text, extra} to add per-cell buttons.
    */
-  function dataTable(columns, rows) {
+  // `scrollKey`, when given, makes the grid remember how far you had scrolled
+  // through it across re-renders — switching tabs and coming back to row one
+  // of six hundred is not where you left off.
+  function dataTable(columns, rows, scrollKey) {
     const table = el("table", { class: "kv rg" });
     const headRow = el("tr");
     for (const name of columns) {
@@ -3523,13 +3622,162 @@
         return gridCell(cell.text, columns[i], cell.extra || []);
       })));
     }
-    return el("div", { class: "rg-wrap" }, [table]);
+    return keepScroll(el("div", { class: "rg-wrap" }, [table]), scrollKey);
+  }
+
+  // ---- find in result ----------------------------------------------------
+  // Reading a 30-hit _search response or six hundred rows means hunting for
+  // one value, and Ctrl+F in the browser searches the whole app rather than
+  // the result. This is the notepad-style find people expect: match count,
+  // next/previous, case and regex toggles, and — for a grid — the option to
+  // hide the rows that do not match.
+  //
+  // `scope` is called each time, because the result is re-rendered underneath
+  // the bar whenever a query is re-run.
+  function findInResult(scope, opts = {}) {
+    const st = opts.state || {};
+    const input = el("input", {
+      type: "text", class: "find-in", spellcheck: "false",
+      placeholder: opts.placeholder || "Find in result…", value: st.q || "",
+    });
+    const count = el("span", { class: "find-count" });
+    const mkToggle = (label, key, title) => {
+      const b = el("button", { class: "btn find-toggle" + (st[key] ? " on" : ""), text: label, title });
+      b.addEventListener("click", () => {
+        st[key] = !st[key];
+        b.classList.toggle("on", !!st[key]);
+        if (opts.onChange) opts.onChange();
+        run(0);
+      });
+      return b;
+    };
+    const caseBtn = mkToggle("Aa", "caseSensitive", "Match case");
+    const reBtn = mkToggle(".*", "regex", "Treat the search as a regular expression");
+    const onlyBtn = opts.rows ? mkToggle("≡", "rowsOnly", "Show only matching rows") : null;
+
+    let hits = [], at = -1;
+
+    const unmark = (root) => {
+      if (!root) return;
+      root.querySelectorAll("mark.find-hit").forEach((m) => m.replaceWith(document.createTextNode(m.textContent)));
+      root.normalize();
+      root.querySelectorAll(".find-hidden").forEach((n) => n.classList.remove("find-hidden"));
+    };
+
+    const matcher = () => {
+      const q = input.value;
+      if (!q) return null;
+      if (st.regex) {
+        try { return new RegExp(q, st.caseSensitive ? "g" : "gi"); }
+        catch { return "bad"; }
+      }
+      const esc = q.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      return new RegExp(esc, st.caseSensitive ? "g" : "gi");
+    };
+
+    // Walk the text nodes and wrap every match. Working on text nodes rather
+    // than innerHTML keeps the grid's own markup (and its click handlers)
+    // intact — replacing HTML would break expand and copy on every cell.
+    const run = (moveBy) => {
+      const root = scope();
+      unmark(root);
+      hits = [];
+      const re = matcher();
+      if (re === "bad") {
+        count.textContent = "bad pattern";
+        count.className = "find-count bad";
+        return;
+      }
+      count.className = "find-count";
+      if (!root || !re) {
+        count.textContent = "";
+        return;
+      }
+      const texts = [];
+      const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+        acceptNode: (n) => (n.nodeValue && n.nodeValue.trim() && n.parentElement && n.parentElement.tagName !== "MARK")
+          ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT,
+      });
+      for (let n = walker.nextNode(); n; n = walker.nextNode()) texts.push(n);
+
+      for (const node of texts) {
+        re.lastIndex = 0;
+        const text = node.nodeValue;
+        let m, last = 0;
+        const frag = document.createDocumentFragment();
+        while ((m = re.exec(text))) {
+          if (m[0] === "") { re.lastIndex++; continue; } // a pattern that matches nothing
+          if (m.index > last) frag.append(document.createTextNode(text.slice(last, m.index)));
+          const mark = el("mark", { class: "find-hit", text: m[0] });
+          frag.append(mark);
+          hits.push(mark);
+          last = m.index + m[0].length;
+        }
+        if (!hits.length || last === 0) continue;
+        if (last < text.length) frag.append(document.createTextNode(text.slice(last)));
+        node.replaceWith(frag);
+      }
+
+      // hide the rows with nothing in them, when asked
+      if (opts.rows && st.rowsOnly) {
+        const rows = root.querySelectorAll("tr");
+        rows.forEach((tr, i) => {
+          if (i === 0 && tr.querySelector("th")) return; // keep the header
+          if (!tr.querySelector("mark.find-hit")) tr.classList.add("find-hidden");
+        });
+      }
+
+      if (!hits.length) {
+        count.textContent = "no matches";
+        return;
+      }
+      at = Math.max(0, Math.min(hits.length - 1, (at < 0 ? 0 : at) + (moveBy || 0)));
+      if (moveBy) at = (at + hits.length) % hits.length;
+      focusHit();
+    };
+
+    const focusHit = () => {
+      hits.forEach((h, i) => h.classList.toggle("on", i === at));
+      count.textContent = `${at + 1} / ${hits.length}`;
+      const cur = hits[at];
+      if (cur) cur.scrollIntoView({ block: "center", inline: "nearest" });
+    };
+
+    const step = (by) => {
+      if (!hits.length) return run(0);
+      at = (at + by + hits.length) % hits.length;
+      focusHit();
+    };
+
+    input.addEventListener("input", debounce(() => {
+      st.q = input.value;
+      if (opts.onChange) opts.onChange();
+      at = -1;
+      run(0);
+    }, 150));
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") { e.preventDefault(); step(e.shiftKey ? -1 : 1); }
+      if (e.key === "Escape") { input.value = ""; st.q = ""; at = -1; run(0); }
+    });
+
+    const bar = el("div", { class: "result-find" }, [
+      el("span", { class: "find-icon", text: "⌕" }),
+      input,
+      count,
+      el("button", { class: "btn find-step", text: "↑", title: "Previous match (Shift+Enter)", onclick: () => step(-1) }),
+      el("button", { class: "btn find-step", text: "↓", title: "Next match (Enter)", onclick: () => step(1) }),
+      caseBtn, reBtn, onlyBtn,
+    ]);
+    // re-apply after the result is redrawn, so a search survives a re-run
+    bar.rerun = () => { at = -1; run(0); };
+    bar.focus = () => input.focus();
+    return bar;
   }
 
   // `actions` (the export controls) ride on the result's own header line:
   // exporting acts on what is on screen, so putting it anywhere else made you
   // hunt for it — and it cost a whole row above the results.
-  function resultGrid(res, actions) {
+  function resultGrid(res, actions, scrollKey) {
     if (!res) return el("div", { class: "status-line dim", text: "Run a query to see results here" });
     if (res.error) return el("div", { class: "status-line err", text: "✗ " + res.error });
     if (!res.columns || !res.columns.length) {
@@ -3540,7 +3788,7 @@
         el("span", { class: "status-line ok", text: `✓ ${res.rows.length} row(s)${res.truncated ? " (truncated)" : ""} · ${res.durationMs} ms` }),
         actions || null,
       ]),
-      dataTable(res.columns, res.rows),
+      dataTable(res.columns, res.rows, scrollKey),
     ]);
   }
 
@@ -3715,7 +3963,9 @@
     const cluster = () => (getConn && getConn()) || conn;
     const cfg0 = resolve(cluster());
     const status = el("div", { class: "status-line dim" });
-    const out = el("div", { style: "flex:1;overflow:auto;display:flex;flex-direction:column" });
+    const out = keepScroll(
+      el("div", { style: "flex:1;overflow:auto;display:flex;flex-direction:column" }),
+      "sql:" + c.id + ":out");
 
     // visible target so it's clear which engine/schema this tab queries
     const target = el("div", { class: "es-target" });
@@ -3908,7 +4158,7 @@
       status,
     ]);
     body.append(controls, splitter(controls, c, ctx), out);
-    const draw = () => out.replaceChildren(resultGrid(c.result, exportBar(c, ctx, doExport)));
+    const draw = () => out.replaceChildren(resultGrid(c.result, exportBar(c, ctx, doExport), "sql:" + c.id + ":grid"));
     drawResult = draw;
     draw();
   };
@@ -3926,7 +4176,9 @@
       else if (c[key]) { delete c[key]; ctx.save(); }
       setStatus(node, text, kind);
     };
-    const out = el("div", { style: "flex:1;overflow:auto;display:flex;flex-direction:column;gap:10px" });
+    const out = keepScroll(
+      el("div", { style: "flex:1;overflow:auto;display:flex;flex-direction:column;gap:10px" }),
+      "kafka:" + c.id + ":out");
 
     // connection payload with numeric timeout (form fields store strings)
     const kconn = () => ({ ...conn, timeoutMs: Number(conn.timeoutMs) || 1000 });
@@ -4082,7 +4334,7 @@
             (m.time || "").replace("T", " ").replace("Z", ""),
             m.key,
             { text: tryPretty(m.value), extra: [maximizeBtn(m)] },
-          ]))
+          ]), "kafka:" + c.id + ":grid")
         );
       }
     };
@@ -4260,7 +4512,9 @@
     };
 
     // produce area with Message / Headers subtabs
-    let prodTab = "msg";
+    // remembered per console: coming back to a producer you had left on the
+    // Headers tab should not silently drop you on Message
+    if (c.prodTab !== "hdr") c.prodTab = "msg";
     const produceBox = el("div", { class: "produce-box" });
     const renderProduce = () => {
       produceBox.replaceChildren();
@@ -4268,12 +4522,12 @@
       produceBox.append(el("div", { class: "toolbar" }, [
         el("span", { class: "pane-label", text: "Produce" }),
         el("div", { class: "subtabs" }, [
-          el("button", { class: prodTab === "msg" ? "active" : "", text: "Message", onclick: () => { prodTab = "msg"; renderProduce(); } }),
-          el("button", { class: prodTab === "hdr" ? "active" : "", text: `Headers (${hdrCount})`, onclick: () => { prodTab = "hdr"; renderProduce(); } }),
+          el("button", { class: c.prodTab === "msg" ? "active" : "", text: "Message", onclick: () => { c.prodTab = "msg"; ctx.save(); renderProduce(); } }),
+          el("button", { class: c.prodTab === "hdr" ? "active" : "", text: `Headers (${hdrCount})`, onclick: () => { c.prodTab = "hdr"; ctx.save(); renderProduce(); } }),
         ]),
         el("button", { class: "btn primary", text: "Send", onclick: produce }),
       ]));
-      if (prodTab === "msg") {
+      if (c.prodTab === "msg") {
         produceBox.append(
           el("div", { class: "toolbar" }, [
             el("label", { class: "inline" }, ["Key", prodKey]),
@@ -4395,8 +4649,10 @@
       else if (c.lastStatus) { delete c.lastStatus; ctx.save(); }
       setStatus(status, text, kind);
     };
-    const out = el("div", { class: "tool", style: "flex:1;min-height:160px" });
-    let esView = "table"; // _search results render as a grid by default
+    const out = keepScroll(el("div", { class: "tool", style: "flex:1;min-height:160px;overflow:auto" }), "es:" + c.id + ":out");
+    // table vs raw is a choice worth keeping: someone reading raw JSON does
+    // not want to be put back on the grid every time they switch tabs
+    if (c.esView !== "raw") c.esView = "table";
 
     // Search responses get the same table treatment as the SQL/Kafka grids —
     // hits are flattened to dot-notation columns, every cell expandable and
@@ -4418,26 +4674,44 @@
         const j = JSON.parse(text);
         if (j && j.hits && Array.isArray(j.hits.hits)) hits = j.hits.hits;
       } catch { /* not JSON — show it raw */ }
+      // one find bar over whichever view is on screen — the raw JSON and the
+      // grid are both just text once rendered
+      const body = el("div", { class: "es-body" });
+      if (!c.find) c.find = {};
+      const finder = findInResult(() => body, {
+        state: c.find,
+        rows: true,
+        placeholder: "Find in response…  (Enter next · Shift+Enter previous)",
+        onChange: () => ctx.save(),
+      });
+
       if (!hits) {
         out.append(el("div", { class: "result-head" }, [
           el("span", { class: "pane-label", text: "Response" }),
           responseActions(),
-        ]), rawPre());
+        ]), finder, body);
+        body.append(rawPre());
+        finder.rerun();
         return;
       }
 
       out.append(el("div", { class: "result-head" }, [
         el("div", { class: "subtabs" }, [
-          el("button", { class: esView === "table" ? "active" : "", text: `Table (${hits.length})`, onclick: () => { esView = "table"; drawResponse(); } }),
-          el("button", { class: esView === "raw" ? "active" : "", text: "Raw JSON", onclick: () => { esView = "raw"; drawResponse(); } }),
+          el("button", { class: c.esView === "table" ? "active" : "", text: `Table (${hits.length})`, onclick: () => { c.esView = "table"; ctx.save(); drawResponse(); } }),
+          el("button", { class: c.esView === "raw" ? "active" : "", text: "Raw JSON", onclick: () => { c.esView = "raw"; ctx.save(); drawResponse(); } }),
         ]),
         responseActions(),
-      ]));
-      if (esView === "raw" || !hits.length) { out.append(rawPre()); return; }
-      const flat = hits.map((h) => flatten(h._source, "", { _id: h._id }));
-      const cols = [];
-      for (const row of flat) for (const k of Object.keys(row)) if (!cols.includes(k)) cols.push(k);
-      out.append(dataTable(cols, flat.map((row) => cols.map((k) => row[k] ?? ""))));
+      ]), finder, body);
+      if (c.esView === "raw" || !hits.length) {
+        body.append(rawPre());
+      } else {
+        const flat = hits.map((h) => flatten(h._source, "", { _id: h._id }));
+        const cols = [];
+        for (const row of flat) for (const k of Object.keys(row)) if (!cols.includes(k)) cols.push(k);
+        body.append(dataTable(cols, flat.map((row) => cols.map((k) => row[k] ?? "")), "es:" + c.id + ":grid"));
+      }
+      // a search you had typed still applies after a re-run
+      finder.rerun();
     };
 
     // copies the whole response body exactly as shown (pretty-printed JSON)
@@ -5122,6 +5396,64 @@
           counter.textContent = `${text.length} chars · ${words} words · ${text ? text.split("\n").length : 0} lines`;
         };
         area.addEventListener("input", () => { p.text = area.value; ctx.save(); update(); });
+
+        // ---- format on paste -------------------------------------------------
+        // A pad is where you dump the thing you are about to read: a payload
+        // out of a log, a config, a row of CSV. Pasting it minified and then
+        // reaching for a different tool to make it legible is a wasted step,
+        // so the pad recognises what it was handed and lays it out.
+        //
+        // Only a paste that lands in an empty pad (or replaces everything) is
+        // reformatted — quietly rewriting text you are in the middle of
+        // editing would be worse than doing nothing.
+        const detectAndFormat = (text) => {
+          const t = text.trim();
+          if (!t) return null;
+          // JSON, or a stream of JSON objects one per line
+          if (/^[[{]/.test(t)) {
+            try { return { kind: "JSON", text: JSON.stringify(JSON.parse(t), null, 2) }; } catch { /* keep looking */ }
+          }
+          if (/^\{.*\}$/m.test(t) && t.split("\n").length > 1) {
+            const lines = t.split("\n").filter((l) => l.trim());
+            const parsed = [];
+            for (const l of lines) {
+              try { parsed.push(JSON.stringify(JSON.parse(l), null, 2)); } catch { parsed.length = 0; break; }
+            }
+            if (parsed.length === lines.length && parsed.length > 1) {
+              return { kind: `${parsed.length} JSON lines`, text: parsed.join("\n\n") };
+            }
+          }
+          if (/^</.test(t)) {
+            const xml = prettyXml(t);
+            if (xml) return { kind: "XML", text: xml };
+          }
+          // a JWT is three base64url chunks; showing the claims is the point
+          const jwt = t.match(/^([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]*)$/);
+          if (jwt) {
+            try {
+              const part = (x) => JSON.stringify(JSON.parse(b64decode(x)), null, 2);
+              return { kind: "JWT", text: `// header\n${part(jwt[1])}\n\n// payload\n${part(jwt[2])}\n\n// signature\n${jwt[3]}` };
+            } catch { /* not a JWT after all */ }
+          }
+          return null;
+        };
+
+        const pasteNote = el("span", { class: "status-line dim paste-note" });
+        area.addEventListener("paste", (e) => {
+          const before = area.value;
+          const wholeThing = area.selectionStart === 0 && area.selectionEnd === before.length;
+          if (!wholeThing && before.trim()) return; // mid-edit: leave it alone
+          setTimeout(() => {
+            const got = detectAndFormat(area.value);
+            if (!got || got.text === area.value) return;
+            area.value = got.text;
+            p.text = got.text;
+            ctx.save();
+            update();
+            pasteNote.textContent = `formatted as ${got.kind}`;
+            setTimeout(() => { pasteNote.textContent = ""; }, 4000);
+          }, 0);
+        });
         mono.addEventListener("change", () => { p.mono = mono.checked; ctx.save(); update(); });
         wrap.addEventListener("change", () => { p.wrap = wrap.checked; ctx.save(); update(); });
 
@@ -5281,7 +5613,18 @@
             el("label", { class: "inline" }, [wrap, "Wrap"]),
             el("label", { class: "inline" }, [mono, "Monospace"]),
             copyBtn(() => p.text || "", "Copy all"),
+            el("button", {
+              class: "btn", text: "{ } Format", title: "Lay out this pad's contents — JSON, XML or a JWT",
+              onclick: () => {
+                const got = detectAndFormat(area.value);
+                if (!got) return (pasteNote.textContent = "nothing recognisable to format");
+                area.value = got.text; p.text = got.text; ctx.save(); update();
+                pasteNote.textContent = `formatted as ${got.kind}`;
+                setTimeout(() => { pasteNote.textContent = ""; }, 4000);
+              },
+            }),
             counter,
+            pasteNote,
           ]),
           findBar,
           area
@@ -5700,7 +6043,10 @@
       let problems = [];
       let bundleRoot = "";
 
-      const search = el("input", { type: "search", placeholder: "Search concepts…", value: d.query || "", style: "min-width:200px" });
+      const search = el("input", {
+        type: "search", class: "kg-search", value: d.query || "",
+        placeholder: "Search titles, paths, descriptions and tags…",
+      });
       const typeSel = el("select", {});
 
       // ---- data -----------------------------------------------------------
@@ -5749,40 +6095,109 @@
       }
 
       // ---- concept list ---------------------------------------------------
+      // A bundle's structure lives in its paths — /services/checkout.md,
+      // /tables/orders.md — and a flat list of titles threw that away, so
+      // "which of these is a runbook and which a table?" meant reading every
+      // line. The default view is the folder tree the files actually form.
+      // Grouping by type is still there, because "show me every Bug" is the
+      // other question people ask, and the choice is remembered.
+      if (d.grouping !== "type") d.grouping = "folder";
+      if (!d.collapsed || typeof d.collapsed !== "object") d.collapsed = {};
+
+      // build a folder tree out of the concept paths
+      function folderTree(items) {
+        const root = { dirs: new Map(), files: [] };
+        for (const c of items) {
+          const parts = c.path.replace(/^\//, "").split("/");
+          const file = parts.pop();
+          let node = root;
+          let prefix = "";
+          for (const part of parts) {
+            prefix += "/" + part;
+            if (!node.dirs.has(part)) node.dirs.set(part, { name: part, path: prefix, dirs: new Map(), files: [] });
+            node = node.dirs.get(part);
+          }
+          node.files.push({ ...c, file });
+        }
+        return root;
+      }
+
+      const conceptRow = (c, depth) => el("div", {
+        class: "kg-item" + (c.path === d.path ? " active" : ""),
+        style: `padding-left:${8 + depth * 14}px`,
+        title: c.path + (c.description ? "\n" + c.description : ""),
+        onclick: () => open(c.path),
+      }, [
+        el("span", { class: "kg-dot", style: `background:${typeColor(c.type || "Untyped")}` }),
+        el("span", { class: "kg-item-title", text: c.title || c.file || c.path }),
+        el("span", { class: "kg-item-type", text: c.type || "" }),
+      ]);
+
+      function renderTree(list, node, depth, forceOpen) {
+        for (const [, dir] of [...node.dirs].sort((a, b) => a[0].localeCompare(b[0]))) {
+          const count = countFiles(dir);
+          const open_ = forceOpen || !d.collapsed[dir.path];
+          list.append(el("div", {
+            class: "kg-folder", style: `padding-left:${6 + depth * 14}px`,
+            title: dir.path,
+            onclick: () => { d.collapsed[dir.path] = open_; ctx.save(); renderSide(); },
+          }, [
+            el("span", { class: "kg-caret", text: open_ ? "▾" : "▸" }),
+            el("span", { class: "kg-folder-name", text: dir.name }),
+            el("span", { class: "kg-folder-count", text: String(count) }),
+          ]));
+          if (open_) renderTree(list, dir, depth + 1, forceOpen);
+        }
+        for (const c of node.files.sort((a, b) => (a.title || a.file).localeCompare(b.title || b.file))) {
+          list.append(conceptRow(c, depth));
+        }
+      }
+      const countFiles = (node) => node.files.length + [...node.dirs.values()].reduce((n, x) => n + countFiles(x), 0);
+
       function renderSide() {
         const list = el("div", { class: "kg-list" });
         const shown = visible();
         if (!shown.length) {
           list.append(el("div", { class: "kg-empty", text: concepts.length ? "Nothing matches that filter." : "No concepts yet. Create one, or let an agent write the first." }));
-        }
-        const byType = new Map();
-        for (const c of shown) {
-          const key = c.type || "Untyped";
-          if (!byType.has(key)) byType.set(key, []);
-          byType.get(key).push(c);
-        }
-        for (const [type, items] of [...byType].sort((a, b) => a[0].localeCompare(b[0]))) {
-          list.append(el("div", { class: "kg-group" }, [
-            el("span", { class: "kg-dot", style: `background:${typeColor(type)}` }),
-            el("span", { text: `${type} (${items.length})` }),
-          ]));
-          for (const c of items) {
-            list.append(el("div", {
-              class: "kg-item" + (c.path === d.path ? " active" : ""),
-              title: c.path + (c.description ? "\n" + c.description : ""),
-              onclick: () => open(c.path),
-            }, [
-              el("span", { class: "kg-item-title", text: c.title }),
-              el("span", { class: "kg-item-path", text: c.path }),
-            ]));
+        } else if (d.grouping === "type") {
+          const byType = new Map();
+          for (const c of shown) {
+            const key = c.type || "Untyped";
+            if (!byType.has(key)) byType.set(key, []);
+            byType.get(key).push(c);
           }
+          for (const [type, items] of [...byType].sort((a, b) => a[0].localeCompare(b[0]))) {
+            list.append(el("div", { class: "kg-group" }, [
+              el("span", { class: "kg-dot", style: `background:${typeColor(type)}` }),
+              el("span", { text: `${type} (${items.length})` }),
+            ]));
+            for (const c of items) list.append(conceptRow(c, 1));
+          }
+        } else {
+          // while searching, every folder is open: hiding a match inside a
+          // collapsed folder is the same as not finding it
+          renderTree(list, folderTree(shown), 0, !!(d.query || "").trim());
         }
         // The type filter can also be set from the graph's legend, so keep
         // the dropdown in step rather than letting it claim "All types" while
         // the list is filtered.
         if (typeSel.value !== (d.typeFilter || "")) typeSel.value = d.typeFilter || "";
+        const groupBtn = (id, label, title) => el("button", {
+          class: d.grouping === id ? "active" : "", text: label, title,
+          onclick: () => { d.grouping = id; ctx.save(); renderSide(); },
+        });
         sideBox.replaceChildren(
-          el("div", { class: "toolbar" }, [search, typeSel]),
+          el("div", { class: "kg-side-head" }, [
+            search,
+            typeSel,
+            el("div", { class: "kg-head-row" }, [
+              el("div", { class: "subtabs kg-group-pick" }, [
+                groupBtn("folder", "Folders", "Group by the bundle's own directory structure"),
+                groupBtn("type", "Types", "Group by concept type"),
+              ]),
+              el("span", { class: "kg-count", text: `${shown.length} of ${concepts.length}` }),
+            ]),
+          ]),
           el("div", { class: "api-side-content" }, [list])
         );
       }
