@@ -6,9 +6,14 @@ scratch pads…) organised into **workspaces and tabs**, with **everything
 autosaved** so you can close it and resume exactly where you left off.
 
 It ships as a **single Go binary** with the web UI embedded — run it and it
-opens in your browser. For a native Mac/Windows app experience there is an
-**Electron shell** (Node) in `desktop/` that spawns the same binary and wraps
-the UI in an app window.
+opens in your browser. There is also a **native desktop app** (Electron, in
+`desktop/`) that runs the same binary inside a real window: the UI *is* the
+title bar (traffic lights inset on macOS, Mica on Windows 11), with a proper
+application menu and shortcuts (`Cmd/Ctrl+T` new tab, `Cmd/Ctrl+W` close tab,
+`Cmd/Ctrl+,` settings, `Cmd/Ctrl+B` sidebar, `Cmd/Ctrl+Shift+D` theme), an app
+icon, remembered window geometry, and a frame that follows the UI's theme. It
+picks a free port, so opening the app while `devtil` is already running in a
+browser starts its own instance instead of quietly attaching to the other one.
 
 Devtil is **local-first**: the backend binds to `127.0.0.1` only, sends **no
 telemetry**, and keeps all your data on your machine. See

@@ -200,6 +200,31 @@ single dependency-free binary (with an optional native desktop app).
   three saved clusters did not justify holding 280px of window open — and is
   narrower when expanded
 
+**The desktop app is a real app now**
+- **The UI is the title bar.** macOS hides the system bar and insets the
+  traffic lights over Devtil's own header; Windows 11 draws its controls over
+  the tab strip with **Mica** behind the window. The header and the empty part
+  of the tab strip are draggable
+- **An application menu with the shortcuts you'd expect** — `Cmd/Ctrl+T` new
+  tab, `Cmd/Ctrl+W` close tab, `Cmd/Ctrl+,` settings, `Cmd/Ctrl+B` sidebar,
+  `Cmd/Ctrl+Shift+D` theme, `Cmd/Ctrl+P` search tabs. The app previously
+  removed its menu entirely, so it had no shortcuts at all
+- **An app icon.** There wasn't one — it shipped with the stock Electron icon
+- **No launch flash**: the window is painted in your theme's colour and only
+  shown once it has something to display
+- **It reopens where you left it** — size, position and maximised state, with a
+  window saved on a monitor you've since unplugged pulled back onto a visible
+  one
+- **The window frame follows the UI's theme**, so a dark workbench no longer
+  sits inside a light frame
+- **Fixed**: the app hardcoded port 8347 and, when it was taken, silently
+  attached to whatever was already listening — so opening the app while
+  `devtil` ran in a browser gave you a second window onto another process. It
+  now takes a free port and reads the URL back from the backend
+- **Tightened** the renderer: a minimal preload bridge, `sandbox: true` and
+  `nodeIntegration: false`, so the page that talks to a backend running SSH and
+  kubectl has no reach into Node
+
 **Workspaces & UX**
 - Workspaces + tabs, all **autosaved**; rename tabs/workspaces; collapsible
   sidebar; **search your tabs** from the sidebar and collapse a workspace's

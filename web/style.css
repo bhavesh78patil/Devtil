@@ -1248,3 +1248,56 @@ mark.find-hit.on {
 tr.find-hidden { display: none; }
 .es-body { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: auto; }
 .paste-note { color: var(--accent); }
+
+/* ==========================================================================
+   Desktop app (Electron)
+   ==========================================================================
+   Every rule here is gated on body.desktop, which only the Electron preload
+   sets — browser mode is completely unaffected. The app hides the OS title bar
+   and lets this UI be the title bar instead, so two things have to be true:
+   the header has to be draggable, and it has to leave room for the window
+   controls the OS still draws on top of it. */
+
+/* The brand row becomes the drag handle, and on macOS it has to clear the
+   traffic lights sitting at 18px from the top-left. */
+body.desktop .brand {
+  -webkit-app-region: drag;
+  user-select: none;
+}
+body.desktop.platform-darwin .brand {
+  padding-top: 34px;
+}
+
+/* The tab bar is the other draggable strip. Its children are interactive, so
+   they opt back out below — miss one and the button silently stops clicking,
+   which is the classic mistake with this pattern. */
+body.desktop #tabbar {
+  -webkit-app-region: drag;
+}
+body.desktop #tabbar > *,
+body.desktop .brand > * {
+  -webkit-app-region: no-drag;
+}
+
+/* Windows draws minimise/maximise/close over the right of the tab bar. */
+body.desktop.platform-win32 #tabbar {
+  padding-right: 148px;
+}
+
+/* Under macOS vibrancy the window's own material shows through anywhere the
+   UI is transparent. The tool surfaces stay opaque — a translucent data grid
+   is unreadable — so only the sidebar picks it up, which is where the effect
+   reads as depth rather than noise. */
+body.desktop.platform-darwin #sidebar {
+  background: color-mix(in srgb, var(--bg2) 82%, transparent);
+  backdrop-filter: saturate(160%) blur(18px);
+}
+body.desktop.platform-darwin #tabbar {
+  background: color-mix(in srgb, var(--bg2) 88%, transparent);
+}
+
+/* A hairline between the sidebar and the content reads better than a hard
+   edge once the window has no frame of its own. */
+body.desktop #sidebar {
+  border-right: 1px solid var(--border);
+}
