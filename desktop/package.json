@@ -7,7 +7,8 @@
   "main": "main.js",
   "scripts": {
     "start": "electron .",
-    "dist": "electron-builder --publish never"
+    "dist": "electron-builder --publish never",
+    "icons": "node ../scripts/render-icon.js"
   },
   "dependencies": {
     "electron-updater": "^6.3.9"
@@ -19,20 +20,63 @@
   "build": {
     "appId": "dev.devtil.app",
     "productName": "Devtil",
-    "files": ["main.js", "updater.js", "package.json", "node_modules/**/*"],
-    "extraResources": [{ "from": "../bin", "to": "bin" }],
+    "files": [
+      "main.js",
+      "preload.js",
+      "menu.js",
+      "state.js",
+      "updater.js",
+      "package.json",
+      "node_modules/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "../bin",
+        "to": "bin"
+      }
+    ],
     "afterPack": "build/afterPack.js",
     "publish": [
-      { "provider": "github", "owner": "bhavesh78patil", "repo": "Devtil" }
+      {
+        "provider": "github",
+        "owner": "bhavesh78patil",
+        "repo": "Devtil"
+      }
     ],
     "mac": {
       "category": "public.app-category.developer-tools",
       "identity": null,
       "target": [
-        { "target": "dmg", "arch": ["arm64", "x64"] },
-        { "target": "zip", "arch": ["arm64", "x64"] }
-      ]
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        }
+      ],
+      "icon": "build/icon.png",
+      "darkModeSupport": true
     },
-    "win": { "target": "nsis" }
+    "win": {
+      "target": "nsis",
+      "icon": "build/icon.png"
+    },
+    "icon": "build/icon.png",
+    "linux": {
+      "target": [
+        "AppImage",
+        "deb"
+      ],
+      "category": "Development",
+      "icon": "build/icons"
+    }
   }
 }

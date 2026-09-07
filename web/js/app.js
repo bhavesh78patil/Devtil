@@ -389,8 +389,12 @@
   const themeSelect = document.getElementById("theme-select");
 
   function applyTheme(theme) {
-    document.documentElement.setAttribute("data-theme", theme === "dark" ? "dark" : "light");
-    themeSelect.value = theme === "dark" ? "dark" : "light";
+    const next = theme === "dark" ? "dark" : "light";
+    document.documentElement.setAttribute("data-theme", next);
+    themeSelect.value = next;
+    // In the desktop app the window frame is drawn by the OS around this UI;
+    // tell the shell which way we went so the two never disagree.
+    window.devtilDesktop?.setTheme(next);
   }
 
   themeSelect.addEventListener("change", () => {
@@ -793,6 +797,50 @@ still a delete.`;
     applyTheme(state.theme || "light");
     applyNav();
     renderAll();
+    connectDesktopShell();
+  }
+
+  // ---- desktop shell ----
+  // Nothing here is new behaviour: the application menu needs keyboard reach
+  // to the same handlers the buttons already use. In a browser
+  // window.devtilDesktop is undefined and none of this runs.
+
+  function connectDesktopShell() {
+    const shell = window.devtilDesktop;
+    if (!shell) return;
+
+    // Desktop-only styling (draggable title bar, room for the window
+    // controls) is gated on these classes, so browser mode is untouched.
+    document.body.classList.add("desktop", "platform-" + shell.platform);
+    shell.setTheme(state.theme === "dark" ? "dark" : "light");
+
+    const actions = {
+      "new-tab": () => openPicker(),
+      "new-workspace": () => document.getElementById("add-workspace").click(),
+      "close-tab": () => {
+        const ws = activeWorkspace();
+        if (ws && ws.activeTabId) { closeTab(ws, ws.activeTabId); }
+      },
+      settings: () => openSettings(),
+      "toggle-sidebar": () => navToggle.click(),
+      "toggle-theme": () => {
+        themeSelect.value = themeSelect.value === "dark" ? "light" : "dark";
+        themeSelect.dispatchEvent(new Event("change"));
+      },
+      "search-tabs": () => { tabSearch.focus(); tabSearch.select(); },
+      // Find belongs to whichever tool is open, so it is forwarded as the
+      // keystroke those tools already listen for rather than reimplemented.
+      find: () => {
+        const target = document.querySelector(".tool textarea, .tool input[type=\"search\"]") || document.body;
+        target.dispatchEvent(new KeyboardEvent("keydown", {
+          key: "f", ctrlKey: true, bubbles: true, cancelable: true,
+        }));
+        document.querySelector(".result-find .find-in")?.focus();
+      },
+    };
+    shell.onMenu((action) => {
+      try { actions[action]?.(); } catch (e) { reportClientError("menu " + action + ": " + e.message); }
+    });
   }
 
   boot();

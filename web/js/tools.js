@@ -9,6 +9,41 @@
   // alive after that tab is closed, before tearing them down.
   const SESSION_TTL_MS = 5 * 60 * 1000;
 
+  // ---- remembering where you were ----------------------------------------
+  // Switching outer tabs tears the tool down and builds it again, which threw
+  // away everything that lived in the DOM: how far you had scrolled through a
+  // result, which pane of a response you were reading. Coming back to a tab
+  // and finding it reset is the single most irritating thing a workbench can
+  // do, so the two kinds of view state are both kept.
+  //
+  // Scroll offsets go in a module-level registry: they change constantly and
+  // have no business churning the state file, but they must survive a
+  // re-render. Discrete choices (which sub-tab is open) go on the tool's own
+  // data instead, so they also survive a reload.
+  const scrollReg = new Map();
+
+  /**
+   * Restore a node's scroll position and keep recording it.
+   * `key` must identify the node across re-renders — a tab or console id plus
+   * a name for the pane.
+   */
+  function keepScroll(node, key) {
+    if (!node || !key) return node;
+    const saved = scrollReg.get(key);
+    if (saved) {
+      // the node is not laid out yet on the frame it is created
+      requestAnimationFrame(() => {
+        node.scrollTop = saved.top;
+        node.scrollLeft = saved.left;
+      });
+    }
+    node.addEventListener("scroll", () => {
+      scrollReg.set(key, { top: node.scrollTop, left: node.scrollLeft });
+    }, { passive: true });
+    return node;
+  }
+
+
   /** Full-screen overlay showing text JSON pretty-printed (falls back to raw). */
   function showJsonModal(title, raw) {
     let pretty = raw == null ? "" : String(raw);
@@ -641,6 +676,50 @@
     return obj;
   }
 
+  // Indent XML without changing it. Uses the browser's own parser, so a
+  // document that does not parse is left alone rather than mangled.
+  function prettyXml(text, indent = 2) {
+    let doc;
+    try {
+      doc = new DOMParser().parseFromString(text, "application/xml");
+    } catch { return null; }
+    if (!doc || doc.querySelector("parsererror")) return null;
+    const pad = " ".repeat(indent);
+    const out = [];
+    const walk = (node, depth) => {
+      const gap = pad.repeat(depth);
+      if (node.nodeType === 3) { // text
+        const t = node.nodeValue.trim();
+        if (t) out.push(gap + t);
+        return;
+      }
+      if (node.nodeType === 8) { // comment
+        out.push(gap + "<!--" + node.nodeValue + "-->");
+        return;
+      }
+      if (node.nodeType !== 1) return;
+      const attrs = [...node.attributes].map((a) => ` ${a.name}="${a.value}"`).join("");
+      const kids = [...node.childNodes].filter((n) => n.nodeType !== 3 || n.nodeValue.trim());
+      if (!kids.length) {
+        out.push(`${gap}<${node.nodeName}${attrs}/>`);
+        return;
+      }
+      // an element holding only text stays on one line — splitting it makes
+      // a document of small values twice as tall and no easier to read
+      if (kids.length === 1 && kids[0].nodeType === 3) {
+        out.push(`${gap}<${node.nodeName}${attrs}>${kids[0].nodeValue.trim()}</${node.nodeName}>`);
+        return;
+      }
+      out.push(`${gap}<${node.nodeName}${attrs}>`);
+      for (const k of kids) walk(k, depth + 1);
+      out.push(`${gap}</${node.nodeName}>`);
+    };
+    for (const n of doc.childNodes) walk(n, 0);
+    const body = out.join("\n");
+    const decl = text.trim().startsWith("<?xml") ? text.trim().slice(0, text.indexOf("?>") + 2) + "\n" : "";
+    return body ? decl + body : null;
+  }
+
   function xmlToJson(xml, indent) {
     const doc = new DOMParser().parseFromString(String(xml).trim(), "application/xml");
     const perr = doc.querySelector("parsererror");
@@ -1261,7 +1340,9 @@
       const sideBox = el("div", { class: "api-side" });
       const mainBox = el("div", { class: "api-main" });
       root.append(el("div", { class: "api-layout" }, [sideBox, mainBox]));
-      let sideView = "collections";
+      // which side panel you had open is a choice, so it is remembered;
+      // the filter text is transient and deliberately is not
+      if (d.sideView !== "history") d.sideView = "collections";
       let query = "";              // sidebar filter — a view concern, not persisted
       let shareMsg = null;         // survives the renderSide() an import triggers
       // An import or a save rebuilds the pane it was triggered from, which
@@ -1275,9 +1356,9 @@
 
       function renderSide() {
         const subtab = (view, label) => el("button", {
-          class: sideView === view ? "active" : "",
+          class: d.sideView === view ? "active" : "",
           text: label,
-          onclick: () => { sideView = view; renderSide(); },
+          onclick: () => { d.sideView = view; ctx.save(); renderSide(); },
         });
         const total = d.collections.reduce((n, c) => n + c.requests.length, 0);
         sideBox.replaceChildren(
@@ -1285,7 +1366,7 @@
             subtab("collections", `Collections (${total})`),
             subtab("history", `History (${d.history.length})`),
           ]),
-          sideView === "history" ? historyPanel() : collectionsPanel()
+          d.sideView === "history" ? historyPanel() : collectionsPanel()
         );
       }
 
@@ -1515,11 +1596,14 @@
 
       // ======================= main: tab bar + panes =======================
 
-      function renderMain(view = "body") {
+      function renderMain(view) {
+        // the strip scrolls once there are more tabs than fit; rebuilding it
+        // must not throw that away (same bug the Kafka console had)
+        const prevScroll = (mainBox.querySelector(".req-tabs") || {}).scrollLeft || 0;
         mainBox.replaceChildren();
 
         // tab bar: request tabs and collection tabs side by side
-        mainBox.append(el("div", { class: "req-tabs" }, [
+        const strip = el("div", { class: "req-tabs" }, [
           ...d.tabs.map((t) => {
             const isCol = t.kind === "collection";
             const label = isCol ? "📁 " + ((colById(t.colId) || {}).name || "collection") : (t.name || "request");
@@ -1552,11 +1636,15 @@
             ]);
           }),
           el("button", { class: "icon-btn", text: "+", title: "New request tab", onclick: () => openAdHoc() }),
-        ]));
+        ]);
+        mainBox.append(strip);
+        strip.scrollLeft = prevScroll;
+        const activeStripTab = strip.querySelector(".req-tab.active");
+        if (activeStripTab) activeStripTab.scrollIntoView({ block: "nearest", inline: "nearest" });
 
         const t = activeTab();
         if (t.kind === "collection") renderCollectionPane(t);
-        else renderRequestPane(t, view);
+        else renderRequestPane(t, view || t.respView || "body");
       }
 
       // ---- collection pane: everything about one collection ---------------
@@ -1614,6 +1702,7 @@
         if (col.auth && col.auth.type && col.auth.type !== "none") ga.open = true;
         mainBox.append(ga);
 
+        mainBox.append(curlSection(col, status));
         mainBox.append(swaggerSection(col, status));
         mainBox.append(shareSection(col, status));
 
@@ -1633,6 +1722,83 @@
           el("summary", { text: `Requests (${col.requests.length})` }),
           list,
         ]));
+      }
+
+      // ---- curl import -----------------------------------------------------
+      // Every API you have to call turns up as a curl command somewhere: a
+      // README, a Slack message, the browser's "copy as cURL". Retyping one
+      // into a form is tedious and gets details wrong, so paste it instead.
+      function curlSection(col, status) {
+        const box = el("textarea", {
+          rows: "5", class: "curl-in", spellcheck: "false",
+          placeholder: "curl 'https://api.example.com/v2/orders' \\\n  -X POST \\\n  -H 'authorization: Bearer …' \\\n  --data-raw '{\"orderId\":\"ORD-1\"}'",
+        });
+        const note = el("div", { class: "status-line dim" });
+
+        const doImport = async (openIt) => {
+          const cmd = box.value.trim();
+          if (!cmd) return setStatus(note, "✗ Paste a curl command first", "err");
+          setStatus(note, "Parsing…", "dim");
+          let parsed;
+          try {
+            parsed = await api("POST", "/api/curl", { command: cmd });
+          } catch (e) {
+            return setStatus(note, "✗ " + e.message, "err");
+          }
+          const headers = Object.entries(parsed.headers || {}).map(([k, v]) => ({ k, v }));
+          if (!headers.length) headers.push({ k: "", v: "" });
+          // -u lands in the auth block, not a header, so it stays visible
+          // and editable rather than being baked into base64 in a header row
+          const auth = parsed.username
+            ? { type: "basic", username: parsed.username, password: parsed.password || "", in: "header" }
+            : { type: "inherit", in: "header" };
+          const saved = newSavedRequest({
+            name: curlName(parsed),
+            method: parsed.method,
+            path: pathWithin(col, parsed.url),
+            headers,
+            body: parsed.body || "",
+            auth,
+          });
+          col.requests.push(saved);
+          ctx.save();
+          box.value = "";
+          const warn = (parsed.warnings || []).length
+            ? " · " + parsed.warnings.length + " thing(s) could not be carried over: " + parsed.warnings.join("; ")
+            : "";
+          if (parsed.insecure) {
+            setStatus(note, `✓ Added “${saved.name}” to ${col.name} — the command had -k, so tick “skip TLS verification” on the request${warn}`, warn ? "err" : "ok");
+          } else {
+            setStatus(note, `✓ Added “${saved.name}” to ${col.name}${warn}`, warn ? "err" : "ok");
+          }
+          renderSide();
+          if (openIt) openSavedRequest(col, saved);
+          else renderMain();
+        };
+
+        return el("details", { class: "section" }, [
+          el("summary", { text: "Import a curl command" }),
+          el("div", { class: "status-line dim", text: `Paste a curl command — it is saved as a request in “${col.name}”.` }),
+          box,
+          el("div", { class: "toolbar" }, [
+            el("button", { class: "btn primary", text: "Import", onclick: () => doImport(false) }),
+            el("button", { class: "btn", text: "Import & open", onclick: () => doImport(true) }),
+          ]),
+          note,
+        ]);
+      }
+
+      // A name you would recognise in the tree: the method and the last
+      // meaningful path segment, falling back to the host.
+      function curlName(parsed) {
+        try {
+          const u = new URL(parsed.url);
+          const segs = u.pathname.split("/").filter(Boolean);
+          const tail = segs.length ? segs[segs.length - 1] : u.hostname;
+          return `${parsed.method} ${tail}`;
+        } catch {
+          return `${parsed.method} request`;
+        }
       }
 
       // ---- Swagger / OpenAPI import, targeting this collection -------------
@@ -1929,7 +2095,7 @@
           target.collapsed = false;
           ctx.save();
           setFlash(`✓ Saved to ${target.name}`, "ok");
-          sideView = "collections";
+          d.sideView = "collections";
           renderSide();
           renderMain(view);
         }
@@ -2002,6 +2168,14 @@
         });
       }
 
+      // Which pane you were reading is a choice, so it is remembered on the
+      // tab — switching away and back should not drop you on Body again.
+      function showRespView(respArea, r, view) {
+        r.respView = view;
+        ctx.save();
+        renderResponse(respArea, r, view);
+      }
+
       function renderResponse(respArea, r, view) {
         respArea.replaceChildren();
         const resp = r.response;
@@ -2010,17 +2184,30 @@
             el("span", { class: "badge s" + String(resp.status)[0], text: resp.status + " " + resp.statusText }),
             el("span", { text: resp.durationMs + " ms" }),
             el("span", { text: fmtBytes(resp.size) + (resp.truncated ? " (truncated)" : "") }),
-            copyBtn(() => resp.body, "Copy body"),
+            el("span", { class: "spacer" }),
+            copyBtn(() => resp.body, "Copy"),
+            el("button", {
+              class: "btn", text: "⤓ Download",
+              title: "Save the response body exactly as it arrived",
+              onclick: () => downloadResponse(r, resp),
+            }),
           ]));
         }
-        respArea.append(el("div", { class: "subtabs" }, [
-          el("button", { class: view === "body" ? "active" : "", text: "Response body", onclick: () => renderResponse(respArea, r, "body") }),
-          el("button", { class: view === "headers" ? "active" : "", text: "Response headers", onclick: () => renderResponse(respArea, r, "headers") }),
-        ]));
+        const tabs = [
+          el("button", { class: view === "body" ? "active" : "", text: "Body", onclick: () => showRespView(respArea, r, "body") }),
+          el("button", { class: view === "headers" ? "active" : "", text: `Headers (${Object.keys((resp && resp.headers) || {}).length})`, onclick: () => showRespView(respArea, r, "headers") }),
+        ];
+        // the timing breakdown only exists once something has been sent
+        if (resp && resp.timing) {
+          tabs.push(el("button", { class: view === "timing" ? "active" : "", text: "Timing", onclick: () => showRespView(respArea, r, "timing") }));
+        }
+        respArea.append(el("div", { class: "subtabs" }, tabs));
         if (!resp) {
           return respArea.append(el("div", { class: "status-line dim", text: "Send the request to see the response here" }));
         }
-        if (view === "headers") {
+        if (view === "timing") {
+          respArea.append(timingPanel(resp.timing));
+        } else if (view === "headers") {
           respArea.append(el("table", { class: "kv" }, Object.entries(resp.headers || {}).map(([k, v]) =>
             el("tr", {}, [el("th", { text: k }), el("td", { text: v })])
           )));
@@ -2030,6 +2217,88 @@
           respArea.append(el("pre", { class: "output", text: body }));
         }
       }
+
+      // Not every API answers in JSON. A CSV, a PDF, an XML export — the
+      // useful thing to do with those is save the file, not stare at the text.
+      function downloadResponse(r, resp) {
+        const type = (resp.headers && (resp.headers["Content-Type"] || resp.headers["content-type"])) || "";
+        const blob = new Blob([resp.body], { type: type.split(";")[0].trim() || "application/octet-stream" });
+        const a = document.createElement("a");
+        a.href = URL.createObjectURL(blob);
+        a.download = responseFilename(r, resp, type);
+        document.body.append(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+      }
+
+      // A filename you would recognise later: the last path segment, and an
+      // extension the server's own content type justifies.
+      const CONTENT_EXT = {
+        "application/json": "json", "text/json": "json",
+        "text/csv": "csv", "application/csv": "csv",
+        "application/xml": "xml", "text/xml": "xml",
+        "text/html": "html", "text/plain": "txt",
+        "application/pdf": "pdf", "application/zip": "zip",
+        "application/x-ndjson": "ndjson", "text/yaml": "yaml", "application/yaml": "yaml",
+        "application/vnd.ms-excel": "xls",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "xlsx",
+      };
+      function responseFilename(r, resp, contentType) {
+        let stem = "response";
+        try {
+          const u = new URL(r.url.trim());
+          const segs = u.pathname.split("/").filter(Boolean);
+          if (segs.length) stem = segs[segs.length - 1].replace(/\.[^.]*$/, "") || "response";
+          else if (u.hostname) stem = u.hostname;
+        } catch { /* keep the fallback */ }
+        const mime = contentType.split(";")[0].trim().toLowerCase();
+        let ext = CONTENT_EXT[mime] || "";
+        if (!ext) {
+          // an unknown type is still a hint: text/* is readable, anything else is not
+          if (mime.startsWith("text/")) ext = "txt";
+          else { try { JSON.parse(resp.body); ext = "json"; } catch { ext = "bin"; } }
+        }
+        const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
+        return `${stem}-${stamp}.${ext}`;
+      }
+
+      // Where the time actually went. The phases come from the Go side's
+      // httptrace hooks, so this is the real connection lifecycle rather than
+      // a guess made from the total.
+      function timingPanel(t) {
+        const rows = [
+          ["DNS lookup", t.dnsMs, "resolving the hostname"],
+          ["TCP connect", t.connectMs, "opening the socket"],
+          ["TLS handshake", t.tlsMs, "negotiating https"],
+          ["Send", t.sendMs, "writing the request"],
+          ["Waiting (TTFB)", t.waitMs, "the server thinking"],
+          ["Download", t.downloadMs, "reading the body"],
+        ];
+        const total = t.totalMs || rows.reduce((n, [, ms]) => n + ms, 0) || 1;
+        const box = el("div", { class: "timing" });
+        for (const [label, ms, why] of rows) {
+          const pct = Math.max(0, Math.min(100, (ms / total) * 100));
+          box.append(el("div", { class: "timing-row" + (ms ? "" : " zero") }, [
+            el("span", { class: "timing-label", text: label, title: why }),
+            el("span", { class: "timing-bar" }, [el("span", { class: "timing-fill", style: `width:${pct}%` })]),
+            el("span", { class: "timing-ms", text: ms ? fmtMs(ms) : "—" }),
+          ]));
+        }
+        box.append(el("div", { class: "timing-row total" }, [
+          el("span", { class: "timing-label", text: "Total" }),
+          el("span", { class: "timing-bar" }),
+          el("span", { class: "timing-ms", text: fmtMs(t.totalMs) }),
+        ]));
+        const notes = [];
+        if (t.remoteAddr) notes.push("connected to " + t.remoteAddr);
+        // a phase that did not happen reads as "—" above; say why
+        if (t.reused) notes.push("reused an existing connection, so there was no DNS, connect or handshake");
+        else if (!t.tlsMs) notes.push("plain http — no TLS handshake");
+        box.append(el("div", { class: "status-line dim", text: notes.join(" · ") }));
+        return box;
+      }
+      const fmtMs = (ms) => (ms >= 100 ? Math.round(ms) + " ms" : ms >= 1 ? ms.toFixed(1) + " ms" : ms.toFixed(2) + " ms");
 
       renderSide();
       renderMain();
@@ -2989,6 +3258,45 @@
   // ======================================================================
 
   function clientTool(cfg) {
+    // Consoles and connections saved before inner tabs had ids have none, and
+    // `undefined === undefined` matches the *first* entry — so every lookup
+    // resolved to console one and clicking a tab appeared to do nothing.
+    //
+    // This has to run before *anything* reads an id, and the sidebar's tab
+    // tree reads them too — for every tab in the workspace, including ones
+    // that have never been rendered. Leaving it inside render() meant a
+    // sidebar row for an unopened tab carried `id: undefined`, so selecting
+    // "the third console" set activeConsoleId to undefined and the tool then
+    // fell back to the first one. Both entry points normalise now.
+    const normalize = (d) => {
+      if (!Array.isArray(d.connections)) d.connections = [];
+      if (!Array.isArray(d.consoles)) d.consoles = [];
+      if (!d.consoles.length) d.consoles.push(cfg.newConsole());
+      let changed = false;
+      for (const c of d.consoles) if (!c.id) { c.id = uid(); changed = true; }
+      for (const c of d.connections) if (!c.id) { c.id = uid(); changed = true; }
+      // A connection that never had an id left activeConnId pointing at
+      // nothing, so a tool with saved clusters greeted you with "add one".
+      if (d.connections.length && !d.connections.some((c) => c.id === d.activeConnId)) {
+        d.activeConnId = d.connections[0].id;
+        changed = true;
+      }
+      if (!d.consoles.some((c) => c.id === d.activeConsoleId)) {
+        d.activeConsoleId = d.consoles[0].id;
+        changed = true;
+      }
+      // Bind every console to a connection, not just the one on screen. The
+      // sidebar names each console's cluster, and an unbound console used to
+      // borrow the first one purely because two undefined ids compared equal.
+      for (const c of d.consoles) {
+        if (!d.connections.some((x) => x.id === c.connId)) {
+          const next = d.activeConnId || (d.connections[0] && d.connections[0].id) || null;
+          if (c.connId !== next) { c.connId = next; changed = true; }
+        }
+      }
+      return changed;
+    };
+
     registerTool({
       type: cfg.type,
       icon: cfg.icon,
@@ -2996,41 +3304,26 @@
       desc: cfg.desc,
       defaults: () => ({ connections: [], activeConnId: null, consoles: [], activeConsoleId: null }),
       // inner console tabs, for the workspace tab tree in the sidebar
-      subTabs: (d) => (d.consoles || []).map((c) => {
-        const conn = (d.connections || []).find((x) => x.id === c.connId);
-        const where = conn ? (conn.name || cfg.connName(conn) || "") : "";
-        return {
-          id: c.id,
-          label: cfg.consoleLabel(c) + (where ? " · " + where : ""),
-          select: () => { d.activeConsoleId = c.id; if (c.connId) d.activeConnId = c.connId; },
-          remove: () => {
-            const i = d.consoles.findIndex((x) => x.id === c.id);
-            if (i >= 0) d.consoles.splice(i, 1);
-            if (d.activeConsoleId === c.id) d.activeConsoleId = d.consoles[0]?.id ?? null;
-          },
-        };
-      }),
+      subTabs: (d) => {
+        normalize(d);
+        return d.consoles.map((c) => {
+          const conn = d.connections.find((x) => x.id === c.connId);
+          const where = conn ? (conn.name || cfg.connName(conn) || "") : "";
+          return {
+            id: c.id,
+            label: cfg.consoleLabel(c) + (where ? " · " + where : ""),
+            select: () => { d.activeConsoleId = c.id; if (c.connId) d.activeConnId = c.connId; },
+            remove: () => {
+              const i = d.consoles.findIndex((x) => x.id === c.id);
+              if (i >= 0) d.consoles.splice(i, 1);
+              if (d.activeConsoleId === c.id) d.activeConsoleId = d.consoles[0]?.id ?? null;
+            },
+          };
+        });
+      },
       render(root, tab, ctx) {
         const d = tab.data;
-        if (!Array.isArray(d.connections)) d.connections = [];
-        if (!Array.isArray(d.consoles)) d.consoles = [];
-        if (!d.consoles.length) d.consoles.push(cfg.newConsole());
-        // Consoles and connections saved before inner tabs had ids have none,
-        // and `undefined === undefined` matches the *first* entry — so every
-        // lookup resolved to console one, every tab drew as active, and
-        // clicking a tab appeared to do nothing. Backfill before anything
-        // reads an id.
-        let backfilled = false;
-        for (const c of d.consoles) if (!c.id) { c.id = uid(); backfilled = true; }
-        for (const c of d.connections) if (!c.id) { c.id = uid(); backfilled = true; }
-        // A connection that never had an id left activeConnId pointing at
-        // nothing, so a tool with saved clusters greeted you with "add one".
-        if (d.connections.length && !d.connections.some((c) => c.id === d.activeConnId)) {
-          d.activeConnId = d.connections[0].id;
-          backfilled = true;
-        }
-        if (backfilled) ctx.save();
-        if (!d.consoles.some((c) => c.id === d.activeConsoleId)) d.activeConsoleId = d.consoles[0].id;
+        if (normalize(d)) ctx.save();
 
         const sideBox = el("div", { class: "api-side" });
         const mainBox = el("div", { class: "api-main" });
@@ -3086,10 +3379,42 @@
         }
 
         function renderSide() {
+          // Most people have two or three clusters, and the panel was holding
+          // ~280px of window open to show them. Collapsed it becomes a rail of
+          // dots you can still click, and the console gets the width back.
+          const collapsed = d.sideCollapsed === true;
+          sideBox.classList.toggle("collapsed", collapsed);
+          const toggle = el("button", {
+            class: "icon-btn side-toggle", text: collapsed ? "»" : "«",
+            title: collapsed ? `Show ${cfg.connLabel.toLowerCase()}` : "Collapse this panel",
+            onclick: () => { d.sideCollapsed = !collapsed; ctx.save(); renderSide(); },
+          });
+          if (collapsed) {
+            const rail = el("div", { class: "api-side-rail" }, [toggle]);
+            d.connections.forEach((c) => {
+              const label = c.name || cfg.connName(c) || cfg.connSingular;
+              rail.append(el("button", {
+                class: "rail-conn" + (c.id === d.activeConnId ? " on" : ""),
+                title: label,
+                text: label.slice(0, 2).toUpperCase(),
+                onclick: () => {
+                  d.activeConnId = c.id;
+                  const cur = d.consoles.find((x) => x.id === d.activeConsoleId);
+                  if (cur) cur.connId = c.id;
+                  ctx.save();
+                  renderSide();
+                  renderMain();
+                },
+              }));
+            });
+            sideBox.replaceChildren(rail);
+            return;
+          }
           const box = el("div", { class: "api-side-content" });
           sideBox.replaceChildren(
-            el("div", { class: "subtabs" }, [
+            el("div", { class: "subtabs side-head" }, [
               el("button", { class: "active", text: `${cfg.connLabel} (${d.connections.length})` }),
+              toggle,
             ]),
             box
           );
@@ -3134,8 +3459,13 @@
         }
 
         function renderMain() {
+          // The strip scrolls horizontally once there are more consoles than
+          // fit. Rebuilding it threw its scroll position away, so clicking the
+          // eighth tab snapped the strip back to the first one — it looked
+          // like the selection had jumped when only the view had.
+          const prevScroll = (mainBox.querySelector(".req-tabs") || {}).scrollLeft || 0;
           mainBox.replaceChildren();
-          mainBox.append(el("div", { class: "req-tabs" }, [
+          const strip = el("div", { class: "req-tabs" }, [
             ...d.consoles.map((c) => {
               const consoleConn = d.connections.find((x) => x.id === c.connId);
               const clusterName = consoleConn ? (consoleConn.name || cfg.connName(consoleConn) || "") : "";
@@ -3178,7 +3508,14 @@
                 renderMain();
               },
             }),
-          ]));
+          ]);
+          mainBox.append(strip);
+          // put the view back where it was, then make sure the active tab is
+          // actually on screen — selecting one from the sidebar can point at a
+          // console that was scrolled out of sight
+          strip.scrollLeft = prevScroll;
+          const activeTab = strip.querySelector(".req-tab.active");
+          if (activeTab) activeTab.scrollIntoView({ block: "nearest", inline: "nearest" });
 
           const consoleData = d.consoles.find((c) => c.id === d.activeConsoleId) || d.consoles[0];
           // each console remembers its own connection; migrate legacy consoles and
@@ -3267,7 +3604,10 @@
    * Build a result table. `columns` are header labels; `rows` are arrays of
    * values, or of {text, extra} to add per-cell buttons.
    */
-  function dataTable(columns, rows) {
+  // `scrollKey`, when given, makes the grid remember how far you had scrolled
+  // through it across re-renders — switching tabs and coming back to row one
+  // of six hundred is not where you left off.
+  function dataTable(columns, rows, scrollKey) {
     const table = el("table", { class: "kv rg" });
     const headRow = el("tr");
     for (const name of columns) {
@@ -3282,18 +3622,173 @@
         return gridCell(cell.text, columns[i], cell.extra || []);
       })));
     }
-    return el("div", { class: "rg-wrap" }, [table]);
+    return keepScroll(el("div", { class: "rg-wrap" }, [table]), scrollKey);
   }
 
-  function resultGrid(res) {
+  // ---- find in result ----------------------------------------------------
+  // Reading a 30-hit _search response or six hundred rows means hunting for
+  // one value, and Ctrl+F in the browser searches the whole app rather than
+  // the result. This is the notepad-style find people expect: match count,
+  // next/previous, case and regex toggles, and — for a grid — the option to
+  // hide the rows that do not match.
+  //
+  // `scope` is called each time, because the result is re-rendered underneath
+  // the bar whenever a query is re-run.
+  function findInResult(scope, opts = {}) {
+    const st = opts.state || {};
+    const input = el("input", {
+      type: "text", class: "find-in", spellcheck: "false",
+      placeholder: opts.placeholder || "Find in result…", value: st.q || "",
+    });
+    const count = el("span", { class: "find-count" });
+    const mkToggle = (label, key, title) => {
+      const b = el("button", { class: "btn find-toggle" + (st[key] ? " on" : ""), text: label, title });
+      b.addEventListener("click", () => {
+        st[key] = !st[key];
+        b.classList.toggle("on", !!st[key]);
+        if (opts.onChange) opts.onChange();
+        run(0);
+      });
+      return b;
+    };
+    const caseBtn = mkToggle("Aa", "caseSensitive", "Match case");
+    const reBtn = mkToggle(".*", "regex", "Treat the search as a regular expression");
+    const onlyBtn = opts.rows ? mkToggle("≡", "rowsOnly", "Show only matching rows") : null;
+
+    let hits = [], at = -1;
+
+    const unmark = (root) => {
+      if (!root) return;
+      root.querySelectorAll("mark.find-hit").forEach((m) => m.replaceWith(document.createTextNode(m.textContent)));
+      root.normalize();
+      root.querySelectorAll(".find-hidden").forEach((n) => n.classList.remove("find-hidden"));
+    };
+
+    const matcher = () => {
+      const q = input.value;
+      if (!q) return null;
+      if (st.regex) {
+        try { return new RegExp(q, st.caseSensitive ? "g" : "gi"); }
+        catch { return "bad"; }
+      }
+      const esc = q.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      return new RegExp(esc, st.caseSensitive ? "g" : "gi");
+    };
+
+    // Walk the text nodes and wrap every match. Working on text nodes rather
+    // than innerHTML keeps the grid's own markup (and its click handlers)
+    // intact — replacing HTML would break expand and copy on every cell.
+    const run = (moveBy) => {
+      const root = scope();
+      unmark(root);
+      hits = [];
+      const re = matcher();
+      if (re === "bad") {
+        count.textContent = "bad pattern";
+        count.className = "find-count bad";
+        return;
+      }
+      count.className = "find-count";
+      if (!root || !re) {
+        count.textContent = "";
+        return;
+      }
+      const texts = [];
+      const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+        acceptNode: (n) => (n.nodeValue && n.nodeValue.trim() && n.parentElement && n.parentElement.tagName !== "MARK")
+          ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT,
+      });
+      for (let n = walker.nextNode(); n; n = walker.nextNode()) texts.push(n);
+
+      for (const node of texts) {
+        re.lastIndex = 0;
+        const text = node.nodeValue;
+        let m, last = 0;
+        const frag = document.createDocumentFragment();
+        while ((m = re.exec(text))) {
+          if (m[0] === "") { re.lastIndex++; continue; } // a pattern that matches nothing
+          if (m.index > last) frag.append(document.createTextNode(text.slice(last, m.index)));
+          const mark = el("mark", { class: "find-hit", text: m[0] });
+          frag.append(mark);
+          hits.push(mark);
+          last = m.index + m[0].length;
+        }
+        if (!hits.length || last === 0) continue;
+        if (last < text.length) frag.append(document.createTextNode(text.slice(last)));
+        node.replaceWith(frag);
+      }
+
+      // hide the rows with nothing in them, when asked
+      if (opts.rows && st.rowsOnly) {
+        const rows = root.querySelectorAll("tr");
+        rows.forEach((tr, i) => {
+          if (i === 0 && tr.querySelector("th")) return; // keep the header
+          if (!tr.querySelector("mark.find-hit")) tr.classList.add("find-hidden");
+        });
+      }
+
+      if (!hits.length) {
+        count.textContent = "no matches";
+        return;
+      }
+      at = Math.max(0, Math.min(hits.length - 1, (at < 0 ? 0 : at) + (moveBy || 0)));
+      if (moveBy) at = (at + hits.length) % hits.length;
+      focusHit();
+    };
+
+    const focusHit = () => {
+      hits.forEach((h, i) => h.classList.toggle("on", i === at));
+      count.textContent = `${at + 1} / ${hits.length}`;
+      const cur = hits[at];
+      if (cur) cur.scrollIntoView({ block: "center", inline: "nearest" });
+    };
+
+    const step = (by) => {
+      if (!hits.length) return run(0);
+      at = (at + by + hits.length) % hits.length;
+      focusHit();
+    };
+
+    input.addEventListener("input", debounce(() => {
+      st.q = input.value;
+      if (opts.onChange) opts.onChange();
+      at = -1;
+      run(0);
+    }, 150));
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") { e.preventDefault(); step(e.shiftKey ? -1 : 1); }
+      if (e.key === "Escape") { input.value = ""; st.q = ""; at = -1; run(0); }
+    });
+
+    const bar = el("div", { class: "result-find" }, [
+      el("span", { class: "find-icon", text: "⌕" }),
+      input,
+      count,
+      el("button", { class: "btn find-step", text: "↑", title: "Previous match (Shift+Enter)", onclick: () => step(-1) }),
+      el("button", { class: "btn find-step", text: "↓", title: "Next match (Enter)", onclick: () => step(1) }),
+      caseBtn, reBtn, onlyBtn,
+    ]);
+    // re-apply after the result is redrawn, so a search survives a re-run
+    bar.rerun = () => { at = -1; run(0); };
+    bar.focus = () => input.focus();
+    return bar;
+  }
+
+  // `actions` (the export controls) ride on the result's own header line:
+  // exporting acts on what is on screen, so putting it anywhere else made you
+  // hunt for it — and it cost a whole row above the results.
+  function resultGrid(res, actions, scrollKey) {
     if (!res) return el("div", { class: "status-line dim", text: "Run a query to see results here" });
     if (res.error) return el("div", { class: "status-line err", text: "✗ " + res.error });
     if (!res.columns || !res.columns.length) {
       return el("div", { class: "status-line ok", text: `✓ OK — ${res.rowsAffected ?? 0} row(s) affected · ${res.durationMs ?? 0} ms` });
     }
     return el("div", { class: "tool", style: "flex:1;min-height:0" }, [
-      el("div", { class: "status-line ok", text: `✓ ${res.rows.length} row(s)${res.truncated ? " (truncated)" : ""} · ${res.durationMs} ms` }),
-      dataTable(res.columns, res.rows),
+      el("div", { class: "result-head" }, [
+        el("span", { class: "status-line ok", text: `✓ ${res.rows.length} row(s)${res.truncated ? " (truncated)" : ""} · ${res.durationMs} ms` }),
+        actions || null,
+      ]),
+      dataTable(res.columns, res.rows, scrollKey),
     ]);
   }
 
@@ -3357,6 +3852,51 @@
   // shared "Export [n] rows [CSV] [Excel]" toolbar row; doExport(fmt, n).
   // `extras` are appended after the export buttons (e.g. a copy-response
   // button) so each console can add its own action without a second toolbar.
+  /**
+   * A drag handle between a console's controls and its results.
+   *
+   * The controls used to be capped at a percentage of the pane, which is the
+   * wrong model: how much room a query editor needs depends on the query, and
+   * how much room a result needs depends on the result. Every database tool
+   * lets you drag that boundary, so this one does too — and remembers where
+   * you put it, per console.
+   *
+   * `controls` is sized in pixels while dragging; the result area below is
+   * flex:1, so it takes whatever is left.
+   */
+  function splitter(controls, c, ctx) {
+    const bar = el("div", { class: "split-bar", title: "Drag to resize · double-click to reset" });
+    const apply = () => {
+      if (c.splitH > 0) controls.style.height = c.splitH + "px";
+      else controls.style.removeProperty("height");
+      controls.classList.toggle("sized", c.splitH > 0);
+    };
+    apply();
+    bar.addEventListener("mousedown", (e) => {
+      e.preventDefault();
+      const startY = e.clientY;
+      const startH = controls.getBoundingClientRect().height;
+      const pane = controls.parentElement;
+      const move = (ev) => {
+        // leave room for the result: never let the controls eat the pane
+        const paneH = pane ? pane.getBoundingClientRect().height : window.innerHeight;
+        const next = Math.max(64, Math.min(paneH - 140, startH + ev.clientY - startY));
+        controls.style.height = next + "px";
+        controls.classList.add("sized");
+      };
+      const up = () => {
+        document.removeEventListener("mousemove", move);
+        document.removeEventListener("mouseup", up);
+        c.splitH = Math.round(controls.getBoundingClientRect().height);
+        ctx.save();
+      };
+      document.addEventListener("mousemove", move);
+      document.addEventListener("mouseup", up);
+    });
+    bar.addEventListener("dblclick", () => { delete c.splitH; ctx.save(); apply(); });
+    return bar;
+  }
+
   function exportBar(c, ctx, doExport, extras = []) {
     const n = el("input", { type: "number", min: "1", max: String(EXPORT_MAX), style: "width:90px", title: `Rows to export (max ${EXPORT_MAX})` });
     n.value = c.exportN || String(EXPORT_DEFAULT);
@@ -3423,7 +3963,9 @@
     const cluster = () => (getConn && getConn()) || conn;
     const cfg0 = resolve(cluster());
     const status = el("div", { class: "status-line dim" });
-    const out = el("div", { style: "flex:1;overflow:auto;display:flex;flex-direction:column" });
+    const out = keepScroll(
+      el("div", { style: "flex:1;overflow:auto;display:flex;flex-direction:column" }),
+      "sql:" + c.id + ":out");
 
     // visible target so it's clear which engine/schema this tab queries
     const target = el("div", { class: "es-target" });
@@ -3469,6 +4011,8 @@
       return { text: cur.text.trim(), how: `statement ${stmts.indexOf(cur) + 1} of ${stmts.length}` };
     };
 
+    // assigned once the result pane exists; run() only calls it later
+    let drawResult = () => {};
     const run = async () => {
       const picked = pickStatement();
       if (!picked.text) return setStatus(status, "✗ Enter a query", "err");
@@ -3489,7 +4033,7 @@
       }
       c.name = consoleName(picked.text, "query");
       ctx.save();
-      out.replaceChildren(resultGrid(c.result));
+      drawResult();
     };
     query.addEventListener("keydown", (e) => { if ((e.ctrlKey || e.metaKey) && e.key === "Enter") run(); });
 
@@ -3598,21 +4142,25 @@
     fillTables();
     drawCols();
 
-    body.append(
-      el("div", { class: "console-controls" }, [
+    // Run sits on the same line as the target and the row caps, so the
+    // primary action is where the eye already is instead of on a line of its
+    // own; export moves down to the result header, where the rows it exports
+    // actually are.
+    const controls = el("div", { class: "console-controls" }, [
+      el("div", { class: "toolbar console-head" }, [
         target,
-        helper,
-        query,
-        el("div", { class: "toolbar" }, [
-          el("button", { class: "btn primary", text: "Run (Ctrl+Enter)", onclick: run }),
-          el("label", { class: "inline" }, ["Max rows", maxRows]),
-          status,
-        ]),
-        exportBar(c, ctx, doExport),
+        el("span", { class: "spacer" }),
+        el("label", { class: "inline" }, ["Max rows", maxRows]),
+        el("button", { class: "btn primary", text: "Run  ⌘⏎", onclick: run }),
       ]),
-      out
-    );
-    out.replaceChildren(resultGrid(c.result));
+      helper,
+      query,
+      status,
+    ]);
+    body.append(controls, splitter(controls, c, ctx), out);
+    const draw = () => out.replaceChildren(resultGrid(c.result, exportBar(c, ctx, doExport), "sql:" + c.id + ":grid"));
+    drawResult = draw;
+    draw();
   };
 
   /** Kafka console: topics browser, consumer (latest/beginning/time-range
@@ -3628,7 +4176,9 @@
       else if (c[key]) { delete c[key]; ctx.save(); }
       setStatus(node, text, kind);
     };
-    const out = el("div", { style: "flex:1;overflow:auto;display:flex;flex-direction:column;gap:10px" });
+    const out = keepScroll(
+      el("div", { style: "flex:1;overflow:auto;display:flex;flex-direction:column;gap:10px" }),
+      "kafka:" + c.id + ":out");
 
     // connection payload with numeric timeout (form fields store strings)
     const kconn = () => ({ ...conn, timeoutMs: Number(conn.timeoutMs) || 1000 });
@@ -3700,12 +4250,41 @@
     };
     fromSel.addEventListener("change", () => { c.from = fromSel.value; ctx.save(); syncFrom(); });
 
-    const keyQ = el("input", { type: "text", placeholder: "search key contains…", style: "min-width:150px" });
+    // Both boxes take the same small query language (see kquery.go): a bare
+    // word is still a substring, so nothing anyone had typed before changes
+    // meaning, but `field:value`, comparisons and AND/OR/NOT are understood.
+    const SEARCH_HELP = [
+      "held                      substring",
+      '"order held"              phrase',
+      "status:held               a JSON field contains this",
+      "status=held               exact, not substring",
+      "customer.city:Pune        a dotted path",
+      "city:Pune                 any field with that name, any depth",
+      "amount:>100               numeric  >  >=  <  <=",
+      "key:ORD-8837              the message key",
+      "header.traceId:abc        a record header",
+      "status:held AND amount:>100",
+      "status:held OR status:cancelled",
+      "NOT status:shipped        also  -status:shipped",
+      "(a OR b) AND NOT c        brackets",
+    ].join("\n");
+    const keyQ = el("input", {
+      type: "text", placeholder: "search key…", style: "min-width:150px",
+      title: "Search the message key.\n\n" + SEARCH_HELP,
+    });
     keyQ.value = c.keyQ || "";
     keyQ.addEventListener("input", () => { c.keyQ = keyQ.value; ctx.save(); });
-    const valQ = el("input", { type: "text", placeholder: "search value contains…", style: "min-width:150px;flex:1" });
+    const valQ = el("input", {
+      type: "text", placeholder: "search value — try  status:held AND amount:>100", style: "min-width:150px;flex:1",
+      title: "Search the message value.\n\n" + SEARCH_HELP,
+    });
     valQ.value = c.valQ || "";
     valQ.addEventListener("input", () => { c.valQ = valQ.value; ctx.save(); });
+    // one place to see the syntax without hunting for a tooltip
+    const searchHelp = el("details", { class: "section search-help" }, [
+      el("summary", { text: "Search syntax — fields, comparisons, AND / OR / NOT" }),
+      el("pre", { class: "search-help-body", text: SEARCH_HELP }),
+    ]);
 
     const tryPretty = (v) => { try { return JSON.stringify(JSON.parse(v), null, 2); } catch { return v == null ? "" : String(v); } };
 
@@ -3742,7 +4321,12 @@
         // newest first (backend returns chronological; reverse for display)
         const rows = c.messages.slice().reverse();
         out.append(
-          el("span", { class: "pane-label", text: `Messages (${c.messages.length}, newest first)` }),
+          el("div", { class: "result-head" }, [
+            el("span", { class: "pane-label", text: `Messages (${c.messages.length}, newest first)` }),
+            el("div", { class: "toolbar" }, [
+              copyBtn(() => JSON.stringify(c.messages, null, 2), "Copy all"),
+            ]),
+          ]),
           // same table treatment as the SQL/Elastic grids: resizable columns,
           // every cell expandable and copyable (so a long key is reachable)
           dataTable(["P/Offset", "Time", "Key", "Value"], rows.map((m) => [
@@ -3750,7 +4334,7 @@
             (m.time || "").replace("T", " ").replace("Z", ""),
             m.key,
             { text: tryPretty(m.value), extra: [maximizeBtn(m)] },
-          ]))
+          ]), "kafka:" + c.id + ":grid")
         );
       }
     };
@@ -3928,7 +4512,9 @@
     };
 
     // produce area with Message / Headers subtabs
-    let prodTab = "msg";
+    // remembered per console: coming back to a producer you had left on the
+    // Headers tab should not silently drop you on Message
+    if (c.prodTab !== "hdr") c.prodTab = "msg";
     const produceBox = el("div", { class: "produce-box" });
     const renderProduce = () => {
       produceBox.replaceChildren();
@@ -3936,12 +4522,12 @@
       produceBox.append(el("div", { class: "toolbar" }, [
         el("span", { class: "pane-label", text: "Produce" }),
         el("div", { class: "subtabs" }, [
-          el("button", { class: prodTab === "msg" ? "active" : "", text: "Message", onclick: () => { prodTab = "msg"; renderProduce(); } }),
-          el("button", { class: prodTab === "hdr" ? "active" : "", text: `Headers (${hdrCount})`, onclick: () => { prodTab = "hdr"; renderProduce(); } }),
+          el("button", { class: c.prodTab === "msg" ? "active" : "", text: "Message", onclick: () => { c.prodTab = "msg"; ctx.save(); renderProduce(); } }),
+          el("button", { class: c.prodTab === "hdr" ? "active" : "", text: `Headers (${hdrCount})`, onclick: () => { c.prodTab = "hdr"; ctx.save(); renderProduce(); } }),
         ]),
         el("button", { class: "btn primary", text: "Send", onclick: produce }),
       ]));
-      if (prodTab === "msg") {
+      if (c.prodTab === "msg") {
         produceBox.append(
           el("div", { class: "toolbar" }, [
             el("label", { class: "inline" }, ["Key", prodKey]),
@@ -3973,21 +4559,25 @@
 
     // Consume and Produce are separate modes: each is a full workflow and
     // showing both at once left neither enough room.
+    // Two rows, not four: what to read on the first, how to filter it on the
+    // second, with Consume pinned to the right of row one so it stops
+    // wrapping onto a line of its own.
     const consumePane = el("div", { class: "console-controls" }, [
-      el("div", { class: "toolbar" }, [
-        el("button", { class: "btn", text: "List topics", onclick: listTopics }),
+      el("div", { class: "toolbar console-head" }, [
+        el("button", { class: "btn", text: "Topics", title: "List the cluster's topics", onclick: listTopics }),
         topicSel,
-        el("label", { class: "inline" }, ["or", topic]),
+        topic,
         el("label", { class: "inline" }, ["Read", fromSel]),
         startWrap,
         endWrap,
-        el("label", { class: "inline" }, ["Max", max, "msgs"]),
+        el("label", { class: "inline" }, ["Max", max]),
         el("button", { class: "btn primary", text: "▶ Consume", onclick: consume }),
       ]),
       el("div", { class: "toolbar" }, [
         el("span", { class: "pane-label", text: "Search" }),
         keyQ, valQ,
       ]),
+      searchHelp,
       status,
     ]);
     const producePane = el("div", { class: "console-controls produce-pane" }, [
@@ -4010,10 +4600,14 @@
       consumePane.style.display = producing ? "none" : "";
       producePane.style.display = producing ? "" : "none";
       out.style.display = producing ? "none" : "";
+      split.style.display = producing ? "none" : "";
       if (producing) syncTopicInputs();
     };
 
-    body.append(modeBar, consumePane, producePane, out);
+    // the splitter only belongs to Consume — Produce hides the result pane
+    // and takes the whole console, so there is nothing to divide
+    const split = splitter(consumePane, c, ctx);
+    body.append(modeBar, consumePane, split, producePane, out);
     syncFrom();
     fillTopics();
     renderProduce();
@@ -4055,8 +4649,10 @@
       else if (c.lastStatus) { delete c.lastStatus; ctx.save(); }
       setStatus(status, text, kind);
     };
-    const out = el("div", { class: "tool", style: "flex:1;min-height:160px" });
-    let esView = "table"; // _search results render as a grid by default
+    const out = keepScroll(el("div", { class: "tool", style: "flex:1;min-height:160px;overflow:auto" }), "es:" + c.id + ":out");
+    // table vs raw is a choice worth keeping: someone reading raw JSON does
+    // not want to be put back on the grid every time they switch tabs
+    if (c.esView !== "raw") c.esView = "table";
 
     // Search responses get the same table treatment as the SQL/Kafka grids —
     // hits are flattened to dot-notation columns, every cell expandable and
@@ -4078,22 +4674,49 @@
         const j = JSON.parse(text);
         if (j && j.hits && Array.isArray(j.hits.hits)) hits = j.hits.hits;
       } catch { /* not JSON — show it raw */ }
-      if (!hits) { out.append(rawPre()); return; }
+      // one find bar over whichever view is on screen — the raw JSON and the
+      // grid are both just text once rendered
+      const body = el("div", { class: "es-body" });
+      if (!c.find) c.find = {};
+      const finder = findInResult(() => body, {
+        state: c.find,
+        rows: true,
+        placeholder: "Find in response…  (Enter next · Shift+Enter previous)",
+        onChange: () => ctx.save(),
+      });
 
-      out.append(el("div", { class: "subtabs" }, [
-        el("button", { class: esView === "table" ? "active" : "", text: `Table (${hits.length})`, onclick: () => { esView = "table"; drawResponse(); } }),
-        el("button", { class: esView === "raw" ? "active" : "", text: "Raw JSON", onclick: () => { esView = "raw"; drawResponse(); } }),
-      ]));
-      if (esView === "raw" || !hits.length) { out.append(rawPre()); return; }
-      const flat = hits.map((h) => flatten(h._source, "", { _id: h._id }));
-      const cols = [];
-      for (const row of flat) for (const k of Object.keys(row)) if (!cols.includes(k)) cols.push(k);
-      out.append(dataTable(cols, flat.map((row) => cols.map((k) => row[k] ?? ""))));
+      if (!hits) {
+        out.append(el("div", { class: "result-head" }, [
+          el("span", { class: "pane-label", text: "Response" }),
+          responseActions(),
+        ]), finder, body);
+        body.append(rawPre());
+        finder.rerun();
+        return;
+      }
+
+      out.append(el("div", { class: "result-head" }, [
+        el("div", { class: "subtabs" }, [
+          el("button", { class: c.esView === "table" ? "active" : "", text: `Table (${hits.length})`, onclick: () => { c.esView = "table"; ctx.save(); drawResponse(); } }),
+          el("button", { class: c.esView === "raw" ? "active" : "", text: "Raw JSON", onclick: () => { c.esView = "raw"; ctx.save(); drawResponse(); } }),
+        ]),
+        responseActions(),
+      ]), finder, body);
+      if (c.esView === "raw" || !hits.length) {
+        body.append(rawPre());
+      } else {
+        const flat = hits.map((h) => flatten(h._source, "", { _id: h._id }));
+        const cols = [];
+        for (const row of flat) for (const k of Object.keys(row)) if (!cols.includes(k)) cols.push(k);
+        body.append(dataTable(cols, flat.map((row) => cols.map((k) => row[k] ?? "")), "es:" + c.id + ":grid"));
+      }
+      // a search you had typed still applies after a re-run
+      finder.rerun();
     };
 
     // copies the whole response body exactly as shown (pretty-printed JSON)
     const copyResponseBtn = () => {
-      const btn = el("button", { class: "btn", text: "Copy response" });
+      const btn = el("button", { class: "btn", text: "Copy" });
       btn.addEventListener("click", () => {
         const text = c.response || "";
         if (!text) return say("✗ Nothing to copy — send a request first", "err");
@@ -4101,6 +4724,9 @@
       });
       return btn;
     };
+    // Export and copy belong to the response, so they render with it rather
+    // than in a bar above the request that you had to scroll past.
+    const responseActions = () => exportBar(c, ctx, doExport, [copyResponseBtn()]);
 
     // Visible target so it's unambiguous which cluster this console talks to.
     const target = el("div", { class: "es-target" });
@@ -4435,14 +5061,18 @@
     // part, and once a response is on screen it is usually the response you
     // want the room for. Everything except the send line folds away, and the
     // choice is remembered per console.
+    // the target and the one-click endpoints share a line: they are both
+    // "which cluster, and what shall I ask it", and two rows for that was one
+    // row too many above a response you are trying to read
     const reqBlock = el("div", { class: "es-req" }, [
-      target,
-      builder,
-      el("div", { class: "toolbar" }, [
-        quick("Cluster health", "GET", "_cluster/health"),
+      el("div", { class: "toolbar console-head" }, [
+        target,
+        el("span", { class: "spacer" }),
+        quick("Health", "GET", "_cluster/health"),
         quick("Indices", "GET", "_cat/indices?v&format=json"),
         quick("Nodes", "GET", "_cat/nodes?v&format=json"),
       ]),
+      builder,
       el("div", {}, [el("span", { class: "pane-label", text: "Body (JSON, for _search etc.)" }), reqBody]),
     ]);
     const reqToggle = el("button", { class: "btn req-toggle" });
@@ -4459,20 +5089,15 @@
     });
     applyReqOpen();
 
-    body.append(
-      el("div", { class: "console-controls" }, [
-        reqBlock,
-        el("div", { class: "req-line" }, [
-          reqToggle, methodSel, path,
-          el("button", { class: "btn primary", text: "Send", onclick: () => send(c.method || "GET", c.path, c.body) }),
-        ]),
-        // copy sits with the export actions so it's available for every
-        // response, not just the _search ones that render as a table
-        exportBar(c, ctx, doExport, [copyResponseBtn()]),
-        status,
+    const controls = el("div", { class: "console-controls" }, [
+      el("div", { class: "req-line" }, [
+        reqToggle, methodSel, path,
+        el("button", { class: "btn primary", text: "Send", onclick: () => send(c.method || "GET", c.path, c.body) }),
       ]),
-      out
-    );
+      reqBlock,
+      status,
+    ]);
+    body.append(controls, splitter(controls, c, ctx), out);
     drawResponse();
     // put the last result back, so returning to this console shows it exactly
     // as you left it
@@ -4771,6 +5396,64 @@
           counter.textContent = `${text.length} chars · ${words} words · ${text ? text.split("\n").length : 0} lines`;
         };
         area.addEventListener("input", () => { p.text = area.value; ctx.save(); update(); });
+
+        // ---- format on paste -------------------------------------------------
+        // A pad is where you dump the thing you are about to read: a payload
+        // out of a log, a config, a row of CSV. Pasting it minified and then
+        // reaching for a different tool to make it legible is a wasted step,
+        // so the pad recognises what it was handed and lays it out.
+        //
+        // Only a paste that lands in an empty pad (or replaces everything) is
+        // reformatted — quietly rewriting text you are in the middle of
+        // editing would be worse than doing nothing.
+        const detectAndFormat = (text) => {
+          const t = text.trim();
+          if (!t) return null;
+          // JSON, or a stream of JSON objects one per line
+          if (/^[[{]/.test(t)) {
+            try { return { kind: "JSON", text: JSON.stringify(JSON.parse(t), null, 2) }; } catch { /* keep looking */ }
+          }
+          if (/^\{.*\}$/m.test(t) && t.split("\n").length > 1) {
+            const lines = t.split("\n").filter((l) => l.trim());
+            const parsed = [];
+            for (const l of lines) {
+              try { parsed.push(JSON.stringify(JSON.parse(l), null, 2)); } catch { parsed.length = 0; break; }
+            }
+            if (parsed.length === lines.length && parsed.length > 1) {
+              return { kind: `${parsed.length} JSON lines`, text: parsed.join("\n\n") };
+            }
+          }
+          if (/^</.test(t)) {
+            const xml = prettyXml(t);
+            if (xml) return { kind: "XML", text: xml };
+          }
+          // a JWT is three base64url chunks; showing the claims is the point
+          const jwt = t.match(/^([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]*)$/);
+          if (jwt) {
+            try {
+              const part = (x) => JSON.stringify(JSON.parse(b64decode(x)), null, 2);
+              return { kind: "JWT", text: `// header\n${part(jwt[1])}\n\n// payload\n${part(jwt[2])}\n\n// signature\n${jwt[3]}` };
+            } catch { /* not a JWT after all */ }
+          }
+          return null;
+        };
+
+        const pasteNote = el("span", { class: "status-line dim paste-note" });
+        area.addEventListener("paste", (e) => {
+          const before = area.value;
+          const wholeThing = area.selectionStart === 0 && area.selectionEnd === before.length;
+          if (!wholeThing && before.trim()) return; // mid-edit: leave it alone
+          setTimeout(() => {
+            const got = detectAndFormat(area.value);
+            if (!got || got.text === area.value) return;
+            area.value = got.text;
+            p.text = got.text;
+            ctx.save();
+            update();
+            pasteNote.textContent = `formatted as ${got.kind}`;
+            setTimeout(() => { pasteNote.textContent = ""; }, 4000);
+          }, 0);
+        });
         mono.addEventListener("change", () => { p.mono = mono.checked; ctx.save(); update(); });
         wrap.addEventListener("change", () => { p.wrap = wrap.checked; ctx.save(); update(); });
 
@@ -4930,7 +5613,18 @@
             el("label", { class: "inline" }, [wrap, "Wrap"]),
             el("label", { class: "inline" }, [mono, "Monospace"]),
             copyBtn(() => p.text || "", "Copy all"),
+            el("button", {
+              class: "btn", text: "{ } Format", title: "Lay out this pad's contents — JSON, XML or a JWT",
+              onclick: () => {
+                const got = detectAndFormat(area.value);
+                if (!got) return (pasteNote.textContent = "nothing recognisable to format");
+                area.value = got.text; p.text = got.text; ctx.save(); update();
+                pasteNote.textContent = `formatted as ${got.kind}`;
+                setTimeout(() => { pasteNote.textContent = ""; }, 4000);
+              },
+            }),
             counter,
+            pasteNote,
           ]),
           findBar,
           area
@@ -5349,7 +6043,10 @@
       let problems = [];
       let bundleRoot = "";
 
-      const search = el("input", { type: "search", placeholder: "Search concepts…", value: d.query || "", style: "min-width:200px" });
+      const search = el("input", {
+        type: "search", class: "kg-search", value: d.query || "",
+        placeholder: "Search titles, paths, descriptions and tags…",
+      });
       const typeSel = el("select", {});
 
       // ---- data -----------------------------------------------------------
@@ -5398,40 +6095,109 @@
       }
 
       // ---- concept list ---------------------------------------------------
+      // A bundle's structure lives in its paths — /services/checkout.md,
+      // /tables/orders.md — and a flat list of titles threw that away, so
+      // "which of these is a runbook and which a table?" meant reading every
+      // line. The default view is the folder tree the files actually form.
+      // Grouping by type is still there, because "show me every Bug" is the
+      // other question people ask, and the choice is remembered.
+      if (d.grouping !== "type") d.grouping = "folder";
+      if (!d.collapsed || typeof d.collapsed !== "object") d.collapsed = {};
+
+      // build a folder tree out of the concept paths
+      function folderTree(items) {
+        const root = { dirs: new Map(), files: [] };
+        for (const c of items) {
+          const parts = c.path.replace(/^\//, "").split("/");
+          const file = parts.pop();
+          let node = root;
+          let prefix = "";
+          for (const part of parts) {
+            prefix += "/" + part;
+            if (!node.dirs.has(part)) node.dirs.set(part, { name: part, path: prefix, dirs: new Map(), files: [] });
+            node = node.dirs.get(part);
+          }
+          node.files.push({ ...c, file });
+        }
+        return root;
+      }
+
+      const conceptRow = (c, depth) => el("div", {
+        class: "kg-item" + (c.path === d.path ? " active" : ""),
+        style: `padding-left:${8 + depth * 14}px`,
+        title: c.path + (c.description ? "\n" + c.description : ""),
+        onclick: () => open(c.path),
+      }, [
+        el("span", { class: "kg-dot", style: `background:${typeColor(c.type || "Untyped")}` }),
+        el("span", { class: "kg-item-title", text: c.title || c.file || c.path }),
+        el("span", { class: "kg-item-type", text: c.type || "" }),
+      ]);
+
+      function renderTree(list, node, depth, forceOpen) {
+        for (const [, dir] of [...node.dirs].sort((a, b) => a[0].localeCompare(b[0]))) {
+          const count = countFiles(dir);
+          const open_ = forceOpen || !d.collapsed[dir.path];
+          list.append(el("div", {
+            class: "kg-folder", style: `padding-left:${6 + depth * 14}px`,
+            title: dir.path,
+            onclick: () => { d.collapsed[dir.path] = open_; ctx.save(); renderSide(); },
+          }, [
+            el("span", { class: "kg-caret", text: open_ ? "▾" : "▸" }),
+            el("span", { class: "kg-folder-name", text: dir.name }),
+            el("span", { class: "kg-folder-count", text: String(count) }),
+          ]));
+          if (open_) renderTree(list, dir, depth + 1, forceOpen);
+        }
+        for (const c of node.files.sort((a, b) => (a.title || a.file).localeCompare(b.title || b.file))) {
+          list.append(conceptRow(c, depth));
+        }
+      }
+      const countFiles = (node) => node.files.length + [...node.dirs.values()].reduce((n, x) => n + countFiles(x), 0);
+
       function renderSide() {
         const list = el("div", { class: "kg-list" });
         const shown = visible();
         if (!shown.length) {
           list.append(el("div", { class: "kg-empty", text: concepts.length ? "Nothing matches that filter." : "No concepts yet. Create one, or let an agent write the first." }));
-        }
-        const byType = new Map();
-        for (const c of shown) {
-          const key = c.type || "Untyped";
-          if (!byType.has(key)) byType.set(key, []);
-          byType.get(key).push(c);
-        }
-        for (const [type, items] of [...byType].sort((a, b) => a[0].localeCompare(b[0]))) {
-          list.append(el("div", { class: "kg-group" }, [
-            el("span", { class: "kg-dot", style: `background:${typeColor(type)}` }),
-            el("span", { text: `${type} (${items.length})` }),
-          ]));
-          for (const c of items) {
-            list.append(el("div", {
-              class: "kg-item" + (c.path === d.path ? " active" : ""),
-              title: c.path + (c.description ? "\n" + c.description : ""),
-              onclick: () => open(c.path),
-            }, [
-              el("span", { class: "kg-item-title", text: c.title }),
-              el("span", { class: "kg-item-path", text: c.path }),
-            ]));
+        } else if (d.grouping === "type") {
+          const byType = new Map();
+          for (const c of shown) {
+            const key = c.type || "Untyped";
+            if (!byType.has(key)) byType.set(key, []);
+            byType.get(key).push(c);
           }
+          for (const [type, items] of [...byType].sort((a, b) => a[0].localeCompare(b[0]))) {
+            list.append(el("div", { class: "kg-group" }, [
+              el("span", { class: "kg-dot", style: `background:${typeColor(type)}` }),
+              el("span", { text: `${type} (${items.length})` }),
+            ]));
+            for (const c of items) list.append(conceptRow(c, 1));
+          }
+        } else {
+          // while searching, every folder is open: hiding a match inside a
+          // collapsed folder is the same as not finding it
+          renderTree(list, folderTree(shown), 0, !!(d.query || "").trim());
         }
         // The type filter can also be set from the graph's legend, so keep
         // the dropdown in step rather than letting it claim "All types" while
         // the list is filtered.
         if (typeSel.value !== (d.typeFilter || "")) typeSel.value = d.typeFilter || "";
+        const groupBtn = (id, label, title) => el("button", {
+          class: d.grouping === id ? "active" : "", text: label, title,
+          onclick: () => { d.grouping = id; ctx.save(); renderSide(); },
+        });
         sideBox.replaceChildren(
-          el("div", { class: "toolbar" }, [search, typeSel]),
+          el("div", { class: "kg-side-head" }, [
+            search,
+            typeSel,
+            el("div", { class: "kg-head-row" }, [
+              el("div", { class: "subtabs kg-group-pick" }, [
+                groupBtn("folder", "Folders", "Group by the bundle's own directory structure"),
+                groupBtn("type", "Types", "Group by concept type"),
+              ]),
+              el("span", { class: "kg-count", text: `${shown.length} of ${concepts.length}` }),
+            ]),
+          ]),
           el("div", { class: "api-side-content" }, [list])
         );
       }

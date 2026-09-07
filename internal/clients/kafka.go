@@ -5,12 +5,17 @@ package clients
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
+	"net"
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/segmentio/kafka-go"
@@ -73,7 +78,7 @@ func (c KafkaConn) dialer() *kafka.Dialer {
 	return d
 }
 
-func (c KafkaConn) transport() *kafka.Transport {
+func (c KafkaConn) newTransport() *kafka.Transport {
 	// Producing has to complete a TLS + SASL handshake to the partition
 	// leader. The connection timeout is tuned for "fail fast when the broker
 	// is unreachable" (1s by default) and is far too tight for that, so give
@@ -91,6 +96,106 @@ func (c KafkaConn) transport() *kafka.Transport {
 		t.SASL = plain.Mechanism{Username: c.Username, Password: c.Password}
 	}
 	return t
+}
+
+// A kafka.Transport owns a pool of live broker connections and is designed to
+// be long-lived. Building one per send was wrong twice over: every message
+// paid a fresh TCP + TLS + SASL handshake, and the old pool was never
+// released — kafka.Writer.Close() only closes a transport the writer created
+// itself, so a directly-constructed Writer leaves it open. Sockets and their
+// goroutines accumulated until sends started timing out, which is exactly the
+// "worked for a while, then every produce times out" failure.
+//
+// Transports are keyed by everything that changes their behaviour, so two
+// clusters (or two sets of credentials) never share a pool.
+type cachedTransport struct {
+	t    *kafka.Transport
+	used time.Time
+}
+
+var (
+	transportMu    sync.Mutex
+	transportCache = map[string]*cachedTransport{}
+)
+
+// transportIdleTTL drops a pool nobody has produced through for a while, so
+// leaving devtil open overnight doesn't hold connections to every cluster the
+// developer touched.
+const transportIdleTTL = 10 * time.Minute
+
+func (c KafkaConn) transportKey() string {
+	// the password is part of the identity but has no business sitting in a
+	// map key, so the whole thing is hashed
+	sum := sha256.Sum256([]byte(strings.Join([]string{
+		strings.Join(c.brokerList(), ","),
+		fmt.Sprint(c.TLS), fmt.Sprint(c.Insecure),
+		c.Username, c.Password, fmt.Sprint(c.timeout()),
+	}, "\x00")))
+	return hex.EncodeToString(sum[:])
+}
+
+func sharedTransport(c KafkaConn) *kafka.Transport {
+	transportMu.Lock()
+	defer transportMu.Unlock()
+	evictIdleTransportsLocked()
+	key := c.transportKey()
+	if e, ok := transportCache[key]; ok {
+		e.used = time.Now()
+		return e.t
+	}
+	t := c.newTransport()
+	transportCache[key] = &cachedTransport{t: t, used: time.Now()}
+	return t
+}
+
+func evictIdleTransportsLocked() {
+	cutoff := time.Now().Add(-transportIdleTTL)
+	for k, e := range transportCache {
+		if e.used.Before(cutoff) {
+			e.t.CloseIdleConnections()
+			delete(transportCache, k)
+		}
+	}
+}
+
+// dropTransport closes a cluster's pooled connections and forgets the pool, so
+// the next produce dials fresh. Used when a send fails on a connection the
+// broker had already hung up on.
+func dropTransport(c KafkaConn) {
+	transportMu.Lock()
+	defer transportMu.Unlock()
+	key := c.transportKey()
+	if e, ok := transportCache[key]; ok {
+		e.t.CloseIdleConnections()
+		delete(transportCache, key)
+	}
+}
+
+// isStaleConn reports whether an error looks like a connection the broker
+// closed under us rather than a real rejection. Brokers drop idle connections
+// (connections.max.idle.ms, 10 minutes by default), and a pooled connection
+// can be dead well before we try to use it — the first write is how we find
+// out. These are worth one silent retry; anything else is a genuine failure
+// and must be shown to the developer as-is.
+func isStaleConn(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) ||
+		errors.Is(err, syscall.EPIPE) || errors.Is(err, syscall.ECONNRESET) ||
+		errors.Is(err, net.ErrClosed) {
+		return true
+	}
+	s := strings.ToLower(err.Error())
+	for _, frag := range []string{
+		"broken pipe", "connection reset", "unexpected eof",
+		"use of closed network connection", "connection refused",
+	} {
+		if strings.Contains(s, frag) {
+			return true
+		}
+	}
+	return false
 }
 
 type KafkaTopic struct {
@@ -168,14 +273,16 @@ const (
 )
 
 type KafkaConsumeRequest struct {
-	Conn       KafkaConn `json:"conn"`
-	Topic      string    `json:"topic"`
-	Max        int       `json:"max"`
-	From       string    `json:"from"` // "latest" (default), "beginning", "time"
-	StartMs    int64     `json:"startMs"`
-	EndMs      int64     `json:"endMs"`
-	KeyQuery   string    `json:"keyQuery"`   // case-insensitive substring
-	ValueQuery string    `json:"valueQuery"` // case-insensitive substring
+	Conn    KafkaConn `json:"conn"`
+	Topic   string    `json:"topic"`
+	Max     int       `json:"max"`
+	From    string    `json:"from"` // "latest" (default), "beginning", "time"
+	StartMs int64     `json:"startMs"`
+	EndMs   int64     `json:"endMs"`
+	// Search expressions (see kquery.go): a bare word is a substring, and
+	// `field:value`, AND/OR/NOT and brackets are all understood.
+	KeyQuery   string `json:"keyQuery"`
+	ValueQuery string `json:"valueQuery"`
 }
 
 type KafkaConsumeResponse struct {
@@ -198,7 +305,7 @@ type partRead struct {
 // window and reads up to limit messages, keeping the ones that match the
 // key/value filters. It never waits for new messages: reading stops at the
 // high watermark, or as soon as a fetch comes back empty.
-func readPartitionWindow(ctx context.Context, dialer *kafka.Dialer, broker string, req KafkaConsumeRequest, partID, limit int, keyQ, valQ string, emit func(KafkaMessage)) (out partRead) {
+func readPartitionWindow(ctx context.Context, dialer *kafka.Dialer, broker string, req KafkaConsumeRequest, partID, limit int, keyQ, valQ *Query, emit func(KafkaMessage)) (out partRead) {
 	started := time.Now()
 	defer func() { out.elapsed = time.Since(started) }()
 
@@ -269,12 +376,14 @@ func readPartitionWindow(ctx context.Context, dialer *kafka.Dialer, broker strin
 			}
 			out.scanned++
 			key, value := string(m.Key), string(m.Value)
-			if (keyQ == "" || strings.Contains(strings.ToLower(key), keyQ)) &&
-				(valQ == "" || strings.Contains(strings.ToLower(value), valQ)) {
-				var hdrs []KafkaHeader
-				for _, h := range m.Headers {
-					hdrs = append(hdrs, KafkaHeader{Key: h.Key, Value: string(h.Value)})
-				}
+			var hdrs []KafkaHeader
+			for _, h := range m.Headers {
+				hdrs = append(hdrs, KafkaHeader{Key: h.Key, Value: string(h.Value)})
+			}
+			// one MsgFields per message: it caches the parsed JSON, so a query
+			// with several field tests decodes the payload once
+			fields := MsgFields{Key: key, Value: value, Headers: hdrs}
+			if keyQ.Match(&fields) && valQ.Match(&fields) {
 				km := KafkaMessage{
 					Partition: partID,
 					Offset:    m.Offset,
@@ -338,12 +447,19 @@ func KafkaConsumeStream(req KafkaConsumeRequest, onMessage func(KafkaMessage)) (
 	}
 
 	consumeStart := time.Now()
-	keyQ := strings.ToLower(strings.TrimSpace(req.KeyQuery))
-	valQ := strings.ToLower(strings.TrimSpace(req.ValueQuery))
+	keyQ, err := ParseQuery(req.KeyQuery, MatchKey)
+	if err != nil {
+		return nil, fmt.Errorf("key %v", err)
+	}
+	valQ, err := ParseQuery(req.ValueQuery, MatchValue)
+	if err != nil {
+		return nil, fmt.Errorf("value %v", err)
+	}
+	searching := !keyQ.IsEmpty() || !valQ.IsEmpty()
 	// searching or reading forward needs a wider scan window than the
 	// result size, so matches aren't limited to the newest few messages
 	scanCap := max
-	if keyQ != "" || valQ != "" || req.From == "beginning" || req.From == "time" {
+	if searching || req.From == "beginning" || req.From == "time" {
 		scanCap = max * 20
 		if scanCap > 10000 {
 			scanCap = 10000
@@ -363,7 +479,7 @@ func KafkaConsumeStream(req KafkaConsumeRequest, onMessage func(KafkaMessage)) (
 	defer cancel()
 
 	logging.Logf("kafka: consume topic=%s from=%s max=%d scanCap=%d keyQ=%q valQ=%q startMs=%d endMs=%d timeout=%s opTimeout=%s",
-		req.Topic, req.From, max, scanCap, keyQ, valQ, req.StartMs, req.EndMs, conn.timeout(), opTimeout)
+		req.Topic, req.From, max, scanCap, req.KeyQuery, req.ValueQuery, req.StartMs, req.EndMs, conn.timeout(), opTimeout)
 
 	lookupStart := time.Now()
 	parts, err := dialer.LookupPartitions(ctx, "tcp", brokers[0], req.Topic)
@@ -504,22 +620,6 @@ func KafkaProduce(conn KafkaConn, topic, key, value string, headers []KafkaHeade
 		return err
 	}
 
-	w := &kafka.Writer{
-		Addr:      kafka.TCP(brokers...),
-		Topic:     topic,
-		Balancer:  &kafka.Hash{},
-		Transport: conn.transport(),
-		// wait for the leader to acknowledge, so a reported success means the
-		// broker really took the record (the zero value acknowledges nothing)
-		RequiredAcks: kafka.RequireOne,
-		// this is an interactive single-message send: don't sit in the batch
-		// window, and surface the real error instead of retrying it away
-		BatchTimeout: 10 * time.Millisecond,
-		BatchSize:    1,
-		MaxAttempts:  3,
-	}
-	defer w.Close()
-
 	msg := kafka.Message{Value: []byte(value)}
 	if key != "" {
 		msg.Key = []byte(key)
@@ -530,7 +630,39 @@ func KafkaProduce(conn KafkaConn, topic, key, value string, headers []KafkaHeade
 		}
 		msg.Headers = append(msg.Headers, kafka.Header{Key: h.Key, Value: []byte(h.Value)})
 	}
-	if err := w.WriteMessages(ctx, msg); err != nil {
+
+	write := func() error {
+		w := &kafka.Writer{
+			Addr:  kafka.TCP(brokers...),
+			Topic: topic,
+			// Hash keeps same-key records on one partition and round-robins
+			// keyless ones, which is what a developer sending by hand expects
+			Balancer: &kafka.Hash{},
+			// the pool is shared and outlives this send — Close() below does
+			// not touch it, because the writer did not create it
+			Transport: sharedTransport(conn),
+			// wait for the leader to acknowledge, so a reported success means the
+			// broker really took the record (the zero value acknowledges nothing)
+			RequiredAcks: kafka.RequireOne,
+			// this is an interactive single-message send: don't sit in the batch
+			// window, and surface the real error instead of retrying it away
+			BatchTimeout: 10 * time.Millisecond,
+			BatchSize:    1,
+			MaxAttempts:  3,
+		}
+		defer w.Close()
+		return w.WriteMessages(ctx, msg)
+	}
+
+	err := write()
+	if isStaleConn(err) {
+		// the broker had already closed this pooled connection; drop the pool
+		// and dial fresh rather than reporting a hang-up as a failure
+		logging.Logf("kafka: produce hit a dead connection (%v) — reconnecting and retrying once", err)
+		dropTransport(conn)
+		err = write()
+	}
+	if err != nil {
 		logging.Logf("kafka: produce failed after %s: %v", time.Since(started).Round(time.Millisecond), err)
 		if errors.Is(err, context.DeadlineExceeded) {
 			return fmt.Errorf("kafka: produce timed out after %s — the topic exists, but the write was never acknowledged. "+

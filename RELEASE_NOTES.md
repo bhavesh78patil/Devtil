@@ -31,18 +31,46 @@ single dependency-free binary (with an optional native desktop app).
   copy into any collection, or a new one
 - **Swagger/OpenAPI import** lands in the collection you're in (and offers to
   name it from the document title) instead of scattering endpoints
+- **Import a curl command** — paste one and it is saved as a request, with
+  headers, body, method and URL filled in and `-u` turned into a Basic auth
+  block you can see and edit. Anything that cannot be carried over (`-F`
+  multipart, `-d @file`, `-o`) is named rather than dropped in silence
+- **⤓ Download the response** exactly as it arrived, with a filename taken
+  from the URL and an extension the server's content type justifies — an API
+  that answers in CSV, XML or PDF hands you a file instead of a wall of text
+- **A Timing tab** breaking each call into DNS, TCP connect, TLS handshake,
+  send, waiting (TTFB) and download, measured with `httptrace` rather than
+  guessed from the total. Sub-millisecond phases are reported to two decimals,
+  so "too fast to measure" is never confused with "did not happen", and a
+  reused connection says so
 - **Auth** (Basic / Bearer / API key) per request or inherited from the
   collection; **History**; export a collection to JSON and import it back as a
   new one. Requests are proxied through the backend so CORS is never in the way.
 
 **Infra clients**
 - **Kafka** (multi-cluster): topic dropdown, read latest / from-beginning /
-  time-range, key & value search, newest-first messages with pretty-printed
+  time-range, newest-first messages with pretty-printed
   values (maximize with Value/Headers tabs), configurable timeout. **Produce**
   is its own mode with a full-height value editor that **pretty-prints JSON
   the moment you paste it**, Format/Minify/Copy buttons, and a live readout of
   the payload size and whether it parses — a broken payload reports itself
-  before the broker does
+  before the broker does. **Search** is a real query language now — a bare
+  word is still a substring, but `status:held` matches a field *inside* a JSON
+  payload, `customer.city:Pune` follows a path, `city:Pune` finds that key at
+  any depth, `amount:>100` compares numerically, `key:` and `header.traceId:`
+  reach the record itself, and terms combine with **AND / OR / NOT and
+  brackets**. Agents get the same syntax through `kafka_consume`
+- **Fixed — producing stopped working after a while.** Each send built a fresh
+  connection pool and never released it (a directly-constructed `kafka.Writer`
+  does not close a transport it was handed), so sockets accumulated until every
+  produce timed out. Pools are now shared per cluster, reused across sends —
+  which also removes a full TCP + TLS + SASL handshake from every message — and
+  a send that lands on a connection the broker had already closed reconnects
+  and retries once instead of reporting a hang-up as a failure
+- **Fixed — picking a console from the sidebar opened the first one.** Inner
+  tabs are identified by id, and that id was only assigned when the tool
+  rendered; the sidebar builds rows for every tab including ones never opened,
+  so selecting "the third console" of an unopened tab landed on the first
 - **Elastic / OpenSearch**: REST console + a **visual query builder** that
   generates clauses from each field's schema type (term/match/range/nested).
   The index picker, builder and body **fold away behind a ▸ Request toggle**,
@@ -102,6 +130,8 @@ single dependency-free binary (with an optional native desktop app).
   not merely unusable
 - **Fixed**: Settings could fail to open on a fresh install, before any
   connection had been saved
+- **Fixed**: with more console tabs than fit, clicking one scrolled the strip
+  back to the first — the selection was right, the view had jumped
 - **Environment labels and a default per tool** — devtil never guesses which
   of your clusters an agent meant. With several and no default it refuses and
   tells the agent to ask you; a connection labelled **production** is never
@@ -125,6 +155,75 @@ single dependency-free binary (with an optional native desktop app).
 - A concept editor showing what each one links to and is linked from
 - Agents read and write the **same bundle** over MCP, so what one records
   while it works is there for you to read, correct and commit
+
+**Coming back to where you left off**
+- Switching away from a tab and back used to reset it: you were dropped on
+  row one of six hundred, back on Body instead of the Timing tab you were
+  reading, back on the grid instead of the raw JSON. Scroll positions and
+  every sub-tab choice now survive a tab switch, and the choices survive a
+  reload as well
+- **Find in result** on the Elastic console — a notepad-style search over the
+  response with a match count, next/previous, match-case and regex toggles,
+  and an option to hide the rows that don't match. It works on both the grid
+  and the raw JSON, and a search you had typed still applies after a re-run
+
+**Notepad**
+- **Format on paste**: paste minified JSON, XML or a JWT into an empty pad and
+  it is laid out for you — the JWT into its header, payload and signature.
+  Prose is left exactly as it was, and a paste into the middle of text you are
+  editing is never rewritten. A **{ } Format** button does the same on demand
+- **Fixed the find/replace bar**, which had no layout of its own: the label,
+  both inputs and seven buttons ran together as inline content and the search
+  field was squeezed to nothing
+
+**Knowledge Graph**
+- The concept list is now the **folder tree the bundle actually forms** —
+  `/services`, `/tables`, `/runbooks` — with collapsible folders, per-folder
+  counts, and a type dot and label on each concept. **Group by type** is still
+  a click away, and which you chose is remembered
+- **Search** filters the tree and opens every folder holding a match, so a hit
+  is never hidden inside something collapsed
+
+**Console layout**
+- **A drag handle between the controls and the results** on every Kafka,
+  Elastic, Cassandra and SQL console. How much room a query editor needs
+  depends on the query and how much a result needs depends on the result, so
+  that boundary is yours to set — dragged position is remembered per console,
+  double-click resets it
+- **Export and copy moved onto the result's own header row**, where the rows
+  they act on are — they used to sit in a bar above the request that you
+  scrolled past to reach the data
+- **The primary action shares the top line** with what it acts on (Run beside
+  the target and row cap; Consume beside the topic and read mode) instead of
+  wrapping onto a row of its own
+- **The connections panel collapses to a rail** of clickable chips — two or
+  three saved clusters did not justify holding 280px of window open — and is
+  narrower when expanded
+
+**The desktop app is a real app now**
+- **The UI is the title bar.** macOS hides the system bar and insets the
+  traffic lights over Devtil's own header; Windows 11 draws its controls over
+  the tab strip with **Mica** behind the window. The header and the empty part
+  of the tab strip are draggable
+- **An application menu with the shortcuts you'd expect** — `Cmd/Ctrl+T` new
+  tab, `Cmd/Ctrl+W` close tab, `Cmd/Ctrl+,` settings, `Cmd/Ctrl+B` sidebar,
+  `Cmd/Ctrl+Shift+D` theme, `Cmd/Ctrl+P` search tabs. The app previously
+  removed its menu entirely, so it had no shortcuts at all
+- **An app icon.** There wasn't one — it shipped with the stock Electron icon
+- **No launch flash**: the window is painted in your theme's colour and only
+  shown once it has something to display
+- **It reopens where you left it** — size, position and maximised state, with a
+  window saved on a monitor you've since unplugged pulled back onto a visible
+  one
+- **The window frame follows the UI's theme**, so a dark workbench no longer
+  sits inside a light frame
+- **Fixed**: the app hardcoded port 8347 and, when it was taken, silently
+  attached to whatever was already listening — so opening the app while
+  `devtil` ran in a browser gave you a second window onto another process. It
+  now takes a free port and reads the URL back from the backend
+- **Tightened** the renderer: a minimal preload bridge, `sandbox: true` and
+  `nodeIntegration: false`, so the page that talks to a backend running SSH and
+  kubectl has no reach into Node
 
 **Workspaces & UX**
 - Workspaces + tabs, all **autosaved**; rename tabs/workspaces; collapsible
