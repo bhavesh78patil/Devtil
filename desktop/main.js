@@ -20,11 +20,11 @@ const isWin = process.platform === "win32";
 
 // The two canvas colours from web/style.css. The window is painted with one of
 // these before the UI loads, so launching never flashes white.
-const CANVAS = { light: "#fffefb", dark: "#201515" };
+const CANVAS = { light: "#f6f8fa", dark: "#07090c" };
 
 let backend = null;
 let win = null;
-let theme = "light";
+let theme = "dark"; // the UI's default; corrected as soon as it reports in
 
 function findBinary() {
   const name = isWin ? "devtil.exe" : "devtil";
@@ -108,8 +108,8 @@ function chrome() {
 function overlayColors() {
   return {
     color: CANVAS[theme],
-    symbolColor: theme === "dark" ? "#fffefb" : "#201515",
-    height: 40, // matches #tabbar's min-height in web/style.css
+    symbolColor: theme === "dark" ? "#e8edf3" : "#0d1117",
+    height: 44, // matches #tabbar's min-height in web/style.css
   };
 }
 

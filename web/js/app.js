@@ -8,6 +8,38 @@
   // sidebar tab filter — a view concern, deliberately not persisted
   let tabQuery = "";
 
+  // ---- tool presentation ----
+  // How each tool is drawn in the shell: a short monospace glyph on a tile
+  // tinted by its category, in place of emoji, which rendered differently on
+  // every OS and fought the rest of the UI. Behaviour lives in tools.js; this
+  // is purely how the shell presents them.
+  const CATEGORIES = [
+    { id: "apis", label: "APIs & messaging" },
+    { id: "stores", label: "Data stores" },
+    { id: "infra", label: "Infrastructure" },
+    { id: "formats", label: "Formats & encoding" },
+    { id: "utils", label: "Everyday utilities" },
+    { id: "knowledge", label: "Knowledge & diagnostics" },
+  ];
+  const TOOL_META = {
+    api: ["API", "apis"], kafka: ["KF", "apis"],
+    elastic: ["ES", "stores"], cassandra: ["C*", "stores"], oracle: ["SQL", "stores"],
+    kube: ["K8s", "infra"], putty: [">_", "infra"], sftp: ["FTP", "infra"],
+    json: ["{ }", "formats"], jsonpath: ["$.", "formats"], xmljson: ["</>", "formats"],
+    base64: ["64", "formats"], url: ["%", "formats"], jwt: ["JWT", "formats"],
+    notepad: ["TXT", "utils"], generate: ["ID", "utils"], timestamp: ["TS", "utils"],
+    regex: [".*", "utils"], diff: ["±", "utils"],
+    knowledge: ["KG", "knowledge"], applogs: ["LOG", "knowledge"],
+  };
+  const toolMeta = (tool) => {
+    const [glyph, cat] = TOOL_META[tool && tool.type] || [(tool && tool.icon) || "?", "utils"];
+    return { glyph, cat, catLabel: (CATEGORIES.find((c) => c.id === cat) || {}).label || "" };
+  };
+  function glyph(tool, size) {
+    const m = toolMeta(tool);
+    return el("span", { class: `glyph cat-${m.cat}` + (size ? " " + size : ""), text: m.glyph, "aria-hidden": "true" });
+  }
+
   // ---- autosave ----
 
   const indicator = document.getElementById("save-indicator");
@@ -176,7 +208,7 @@
       if (q && !tabHit && !hitSubs.length) continue;
       const title = el("span", {
         class: "tt-title",
-        text: (tool ? tool.icon + " " : "") + tab.title,
+        text: tab.title,
         title: "Click to open · double-click to rename",
       });
       const startRename = () => {
@@ -205,6 +237,7 @@
       const row = el("div", {
         class: "tt-row" + (tab.id === ws.activeTabId && !tab.closed ? " active" : "") + (tab.closed ? " closed" : ""),
       }, [
+        glyph(tool, "sm"),
         title,
         tab.closed ? el("span", { class: "tt-badge", text: "closed" }) : null,
         el("button", { class: "icon-btn", text: "✎", title: "Rename tab", onclick: (e) => { e.stopPropagation(); startRename(); } }),
@@ -245,10 +278,11 @@
     for (const tab of ws.tabs.filter((t) => !t.closed)) {
       const tool = getTool(tab.type);
       const titleSpan = el("span", {
-        text: (tool ? tool.icon + " " : "") + tab.title,
+        text: tab.title,
         title: "Double-click to rename",
       });
       const node = el("div", { class: "tab" + (tab.id === ws.activeTabId ? " active" : "") }, [
+        glyph(tool, "sm"),
         titleSpan,
         el("button", {
           class: "tab-close", text: "×", title: "Close tab",
@@ -295,14 +329,11 @@
     const ws = activeWorkspace();
     const tab = ws.tabs.find((t) => t.id === ws.activeTabId && !t.closed);
     if (!tab) {
-      rootBox.append(el("div", { class: "empty-hint" }, [
-        el("div", { class: "big", text: "🧰" }),
-        el("div", { text: "No tabs open in this workspace." }),
-        el("button", { class: "btn primary", text: "+ New tab", onclick: openPicker }),
-      ]));
+      rootBox.append(renderHome(ws));
       return;
     }
     const tool = getTool(tab.type);
+    if (tool) rootBox.append(toolHead(tool, tab));
     const container = el("div", { class: "tool" });
     rootBox.append(container);
     if (!tool) {
@@ -311,6 +342,88 @@
     }
     if (!tab.data) tab.data = tool.defaults();
     tool.render(container, tab, { save });
+  }
+
+  // One line that says what this tab is: the tool, its category, what it
+  // does, and that it is saved locally. The tab's own name leads when it has
+  // been renamed, with the tool's name as the eyebrow.
+  function toolHead(tool, tab) {
+    const m = toolMeta(tool);
+    const renamed = tab.title && tab.title !== tool.name;
+    return el("div", { class: "tool-head" }, [
+      glyph(tool, "lg"),
+      el("div", { class: "tool-head-text" }, [
+        el("div", { class: "tool-head-title" }, [
+          el("h1", { text: renamed ? tab.title : tool.name }),
+          el("span", { class: "eyebrow", text: renamed ? tool.name : m.catLabel }),
+        ]),
+        el("div", { class: "tool-head-desc", text: tool.desc || "", title: tool.desc || "" }),
+      ]),
+      el("div", { class: "tool-head-meta" }, [
+        el("span", { class: "chip ok", text: "● Autosaved" }),
+        el("span", { class: "chip", text: "Local only" }),
+      ]),
+    ]);
+  }
+
+  // The workspace's home when no tab is open: what Devtil is, what is in this
+  // workspace, and every tool one click away.
+  function renderHome(ws) {
+    const open = ws.tabs.filter((t) => !t.closed).length;
+    const closed = ws.tabs.length - open;
+    const allTabs = state.workspaces.reduce((n, w) => n + w.tabs.length, 0);
+    const stat = (label, value, sub) => el("div", { class: "stat" }, [
+      el("span", { class: "stat-label", text: label }),
+      el("span", { class: "stat-value", text: String(value) }),
+      el("span", { class: "stat-sub", text: sub }),
+    ]);
+    const headline = el("h1", {}, ["Every tool after ", el("em", { text: "the code." })]);
+    return el("div", { class: "empty-hint" }, [
+      el("section", { class: "home-hero" }, [
+        el("span", { class: "eyebrow pill", text: "Local-first workbench" }),
+        headline,
+        el("p", { text: "APIs, Kafka, databases, Kubernetes, SSH and the everyday formatters — organised into workspaces, autosaved as you go, and open to your AI agents over MCP. Nothing leaves this machine." }),
+        el("div", { class: "home-cta" }, [
+          el("button", { class: "btn primary", onclick: openPicker }, ["+ New tab ", el("span", { class: "kbd", text: "Ctrl K" })]),
+          el("button", { class: "btn", text: "Settings · MCP", onclick: () => openSettings() }),
+        ]),
+      ]),
+      el("div", { class: "stat-row" }, [
+        stat("Workspace", ws.name, "Active"),
+        stat("Tabs here", open, closed ? `${closed} closed · reopen from sidebar` : "Open now"),
+        stat("Saved tabs", allTabs, `Across ${state.workspaces.length} workspace(s)`),
+        stat("Tools", tools.length, `${CATEGORIES.length} categories`),
+      ]),
+      el("section", { class: "home-section" }, [
+        el("div", { class: "home-section-head" }, [
+          el("span", { class: "eyebrow", text: "Launch a tool" }),
+        ]),
+        toolGroups(tools, (t) => newTab(t.type)),
+      ]),
+    ]);
+  }
+
+  // Tools grouped by category, as cards. Shared by the home screen and the
+  // picker so the two never drift apart.
+  function toolGroups(list, onPick) {
+    const box = el("div", { class: "tool-groups" });
+    for (const cat of CATEGORIES) {
+      const inCat = list.filter((t) => toolMeta(t).cat === cat.id);
+      if (!inCat.length) continue;
+      box.append(el("div", { class: "tool-group" }, [
+        el("span", { class: "eyebrow quiet", text: cat.label }),
+        el("div", { class: "tool-grid" }, inCat.map((t) =>
+          el("button", { class: "picker-card", "data-type": t.type, onclick: () => onPick(t) }, [
+            glyph(t),
+            el("span", { class: "pc-text" }, [
+              el("span", { class: "pc-name", text: t.name }),
+              el("span", { class: "pc-desc", text: t.desc, title: t.desc }),
+            ]),
+          ])
+        )),
+      ]));
+    }
+    return box;
   }
 
   function renderAll() {
@@ -329,17 +442,41 @@
 
   const overlay = document.getElementById("picker-overlay");
 
-  function openPicker() {
-    const grid = document.getElementById("picker-grid");
-    grid.replaceChildren(...tools.map((t) =>
-      el("button", { class: "picker-card", onclick: () => { overlay.classList.add("hidden"); newTab(t.type); } }, [
-        el("div", { class: "pc-icon", text: t.icon }),
-        el("div", { class: "pc-name", text: t.name }),
-        el("div", { class: "pc-desc", text: t.desc }),
-      ])
-    ));
-    overlay.classList.remove("hidden");
+  const pickerSearch = document.getElementById("picker-search");
+
+  function pickerMatches() {
+    const q = pickerSearch.value.trim().toLowerCase();
+    if (!q) return tools;
+    return tools.filter((t) =>
+      [t.name, t.desc, t.type, toolMeta(t).catLabel].join(" ").toLowerCase().includes(q));
   }
+
+  function drawPicker() {
+    const grid = document.getElementById("picker-grid");
+    const hits = pickerMatches();
+    const pick = (t) => { overlay.classList.add("hidden"); newTab(t.type); };
+    if (!hits.length) {
+      grid.replaceChildren(el("div", { class: "picker-empty", text: "No tool matches that search." }));
+      return;
+    }
+    grid.replaceChildren(toolGroups(hits, pick));
+    // Enter opens the first hit, so Ctrl+K → type → Enter never needs the mouse
+    if (pickerSearch.value.trim()) grid.querySelector(".picker-card")?.classList.add("hot");
+  }
+
+  function openPicker() {
+    pickerSearch.value = "";
+    drawPicker();
+    overlay.classList.remove("hidden");
+    pickerSearch.focus();
+  }
+
+  pickerSearch.addEventListener("input", drawPicker);
+  pickerSearch.addEventListener("keydown", (e) => {
+    e.stopPropagation();
+    if (e.key === "Escape") overlay.classList.add("hidden");
+    if (e.key === "Enter") document.querySelector("#picker-grid .picker-card")?.click();
+  });
 
   overlay.addEventListener("click", (e) => { if (e.target === overlay) overlay.classList.add("hidden"); });
   document.getElementById("picker-close").addEventListener("click", () => overlay.classList.add("hidden"));
@@ -389,7 +526,7 @@
   const themeSelect = document.getElementById("theme-select");
 
   function applyTheme(theme) {
-    const next = theme === "dark" ? "dark" : "light";
+    const next = theme === "light" ? "light" : "dark";
     document.documentElement.setAttribute("data-theme", next);
     themeSelect.value = next;
     // In the desktop app the window frame is drawn by the OS around this UI;
@@ -789,12 +926,12 @@ still a delete.`;
     if (loaded && Array.isArray(loaded.workspaces) && loaded.workspaces.length) {
       state = loaded;
     } else {
-      state = { version: 1, theme: "light", workspaces: [], activeWorkspaceId: null };
+      state = { version: 1, theme: "dark", workspaces: [], activeWorkspaceId: null };
       const ws = { id: uid(), name: "Default", tabs: [], activeTabId: null };
       state.workspaces.push(ws);
       state.activeWorkspaceId = ws.id;
     }
-    applyTheme(state.theme || "light");
+    applyTheme(state.theme || "dark");
     applyNav();
     renderAll();
     connectDesktopShell();
@@ -812,7 +949,7 @@ still a delete.`;
     // Desktop-only styling (draggable title bar, room for the window
     // controls) is gated on these classes, so browser mode is untouched.
     document.body.classList.add("desktop", "platform-" + shell.platform);
-    shell.setTheme(state.theme === "dark" ? "dark" : "light");
+    shell.setTheme(state.theme === "light" ? "light" : "dark");
 
     const actions = {
       "new-tab": () => openPicker(),

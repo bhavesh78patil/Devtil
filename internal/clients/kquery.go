@@ -25,12 +25,14 @@ import (
 //	NOT status:shipped       also -status:shipped
 //	(a OR b) AND NOT c
 //
-// Bare terms are ANDed, so `held urgent` means both. A field that is not
-// present never matches — including under NOT, where "not present" makes the
-// NOT true.
+// Bare terms are ANDed, so `held urgent` means both. Operators are upper-case
+// (AND, OR, NOT); lower-case words are just words.
 //
-// Anything that is not valid JSON still works for bare terms and phrases;
-// field lookups simply do not match, which is honest rather than surprising.
+// A `name:value` whose name is not a field of the message is searched as
+// literal text instead, so a key like `order:120`, a URL or a timestamp still
+// finds itself, and so does anything in a payload that is not JSON. A JSON
+// fragment pasted straight from a payload — "status":"held" — is read as the
+// field test it looks like.
 
 // MatchTarget is what a bare term searches when the query does not name a
 // field: the message key or its value.
@@ -63,8 +65,12 @@ type MsgFields struct {
 func (m *MsgFields) json() (any, bool) {
 	if !m.didParse {
 		m.didParse = true
+		// UseNumber keeps 64-bit ids exact: decoded as float64,
+		// 1234567890123456789 becomes 1234567890123456800 and never matches
+		dec := json.NewDecoder(strings.NewReader(m.Value))
+		dec.UseNumber()
 		var v any
-		if json.Unmarshal([]byte(m.Value), &v) == nil {
+		if dec.Decode(&v) == nil && !dec.More() {
 			m.parsed, m.parsedOK = v, true
 		}
 	}
@@ -86,6 +92,7 @@ type termNode struct{ text string }
 // fieldNode is `name:value`. name is a dotted path into the JSON payload, or
 // one of the reserved names below.
 type fieldNode struct {
+	raw   string // the term as typed, lower-cased: the fallback substring
 	path  []string
 	op    string // "contains" | "eq" | ">" | ">=" | "<" | "<="
 	text  string
@@ -130,8 +137,17 @@ const (
 	fieldHeader = "header"
 )
 
-func (n *fieldNode) match(m *MsgFields, _ MatchTarget) bool {
-	for _, cand := range n.candidates(m) {
+func (n *fieldNode) match(m *MsgFields, t MatchTarget) bool {
+	cands, resolved := n.candidates(m)
+	if !resolved {
+		// The name is not a field of this message, so the colon was most
+		// likely just part of the text: a key like `order:120`, a URL, a
+		// timestamp, or a payload that is not JSON at all. Searching for it
+		// literally is what was meant; reporting "no match" for every message
+		// is what made these searches come back empty.
+		return (&termNode{n.raw}).match(m, t)
+	}
+	for _, cand := range cands {
 		if n.compare(cand) {
 			return true
 		}
@@ -142,11 +158,15 @@ func (n *fieldNode) match(m *MsgFields, _ MatchTarget) bool {
 // candidates returns every value the field name resolves to. A dotted path is
 // tried first; failing that the name is looked up as a key at any depth, so
 // `city:Pune` finds `customer.city` without the caller knowing the shape.
-func (n *fieldNode) candidates(m *MsgFields) []string {
+//
+// resolved is false when the name is not a field of this message at all (no
+// such JSON key, or a payload that is not JSON). The reserved names always
+// resolve: `header.x:` on a record without that header is a real "no".
+func (n *fieldNode) candidates(m *MsgFields) (vals []string, resolved bool) {
 	switch strings.ToLower(n.path[0]) {
 	case fieldKey:
 		if len(n.path) == 1 {
-			return []string{m.Key}
+			return []string{m.Key}, true
 		}
 	case fieldHeader:
 		if len(n.path) == 2 {
@@ -156,29 +176,30 @@ func (n *fieldNode) candidates(m *MsgFields) []string {
 					out = append(out, h.Value)
 				}
 			}
-			return out
+			return out, true
 		}
 	case fieldValue:
 		if len(n.path) == 1 {
-			return []string{m.Value}
+			return []string{m.Value}, true
 		}
 		doc, ok := m.json()
 		if !ok {
-			return nil
+			return nil, true
 		}
-		return resolvePath(doc, n.path[1:])
+		return resolvePath(doc, n.path[1:]), true
 	}
 	doc, ok := m.json()
 	if !ok {
-		return nil
+		return nil, false
 	}
 	if hits := resolvePath(doc, n.path); len(hits) > 0 {
-		return hits
+		return hits, true
 	}
 	if len(n.path) == 1 {
-		return searchAnyDepth(doc, n.path[0])
+		hits := searchAnyDepth(doc, n.path[0])
+		return hits, len(hits) > 0
 	}
-	return nil
+	return nil, false
 }
 
 func (n *fieldNode) compare(got string) bool {
@@ -264,6 +285,8 @@ func leafString(v any) string {
 		return t
 	case bool:
 		return strconv.FormatBool(t)
+	case json.Number:
+		return t.String()
 	case float64:
 		return strconv.FormatFloat(t, 'f', -1, 64)
 	default:
@@ -307,34 +330,78 @@ func tokenize(s string) []token {
 			if i < len(runes) {
 				i++ // closing quote
 			}
+			// a quoted name followed straight by a separator is a field
+			// test, which is what a JSON fragment pasted from a payload
+			// looks like: "status":"held"
+			if i < len(runes) && (runes[i] == ':' || runes[i] == '=') {
+				word, next := readWord(runes, i)
+				// pretty-printed JSON puts a space after the colon:
+				// "status": "held" — the value is still this field's
+				if word == ":" || word == "=" {
+					j := next
+					for j < len(runes) && (runes[j] == ' ' || runes[j] == '\t') {
+						j++
+					}
+					if j < len(runes) && !strings.ContainsRune("()", runes[j]) {
+						var val string
+						if runes[j] == '"' || runes[j] == '\'' {
+							val, next = readQuoted(runes, j)
+						} else {
+							val, next = readWord(runes, j)
+						}
+						word += val
+					}
+				}
+				out = append(out, token{"word", b.String() + word})
+				i = next
+				continue
+			}
 			out = append(out, token{"phrase", b.String()})
 		default:
-			var b strings.Builder
-			for i < len(runes) && !strings.ContainsRune(" \t\n\r()", runes[i]) {
-				// a quote directly after a field separator starts a phrase
-				// that belongs to this word: status:"on hold"
-				if (runes[i] == '"' || runes[i] == '\'') && b.Len() > 0 {
-					quote := runes[i]
-					i++
-					for i < len(runes) && runes[i] != quote {
-						if runes[i] == '\\' && i+1 < len(runes) {
-							i++
-						}
-						b.WriteRune(runes[i])
-						i++
-					}
-					if i < len(runes) {
-						i++
-					}
-					continue
-				}
-				b.WriteRune(runes[i])
-				i++
-			}
-			out = append(out, token{"word", b.String()})
+			word, next := readWord(runes, i)
+			out = append(out, token{"word", word})
+			i = next
 		}
 	}
 	return out
+}
+
+// readQuoted reads a quoted string starting at the quote at i, returning its
+// content and the index after the closing quote.
+func readQuoted(runes []rune, i int) (string, int) {
+	quote := runes[i]
+	i++
+	var b strings.Builder
+	for i < len(runes) && runes[i] != quote {
+		if runes[i] == '\\' && i+1 < len(runes) {
+			i++
+		}
+		b.WriteRune(runes[i])
+		i++
+	}
+	if i < len(runes) {
+		i++ // closing quote
+	}
+	return b.String(), i
+}
+
+// readWord reads an unquoted word starting at i, returning it and the index
+// after it. A quote inside the word starts a phrase that belongs to it:
+// status:"on hold".
+func readWord(runes []rune, i int) (string, int) {
+	var b strings.Builder
+	start := i
+	for i < len(runes) && !strings.ContainsRune(" \t\n\r()", runes[i]) {
+		if (runes[i] == '"' || runes[i] == '\'') && i > start {
+			var q string
+			q, i = readQuoted(runes, i)
+			b.WriteString(q)
+			continue
+		}
+		b.WriteRune(runes[i])
+		i++
+	}
+	return b.String(), i
 }
 
 type parser struct {
@@ -349,12 +416,16 @@ func (p *parser) peek() (token, bool) {
 	return token{}, false
 }
 
+// isKeyword matches the boolean operators. They are upper-case only, as in
+// Lucene and Elasticsearch: lower-case "not", "or" and "and" turn up in
+// payloads all the time ("payment not found"), and reading them as operators
+// silently inverted those searches.
 func (p *parser) isKeyword(t token, words ...string) bool {
 	if t.kind != "word" {
 		return false
 	}
 	for _, w := range words {
-		if strings.EqualFold(t.text, w) {
+		if t.text == w {
 			return true
 		}
 	}
@@ -505,7 +576,7 @@ func parseFieldTerm(word string) node {
 	if rest == "" {
 		return nil
 	}
-	n := &fieldNode{path: strings.Split(name, "."), op: op, text: strings.ToLower(rest)}
+	n := &fieldNode{raw: strings.ToLower(word), path: strings.Split(name, "."), op: op, text: strings.ToLower(rest)}
 	if v, err := strconv.ParseFloat(rest, 64); err == nil {
 		n.num, n.isNum = v, true
 	}

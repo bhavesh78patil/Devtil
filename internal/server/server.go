@@ -380,6 +380,7 @@ func (s *Server) kafkaConsumeStream(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{
 			"type": "done", "messages": resp.Messages, "scanned": resp.Scanned,
 			"matched": resp.Matched, "truncated": resp.Truncated,
+			"scanCap": resp.ScanCap, "warning": resp.Warning,
 		})
 		return
 	}
@@ -412,6 +413,7 @@ func (s *Server) kafkaConsumeStream(w http.ResponseWriter, r *http.Request) {
 	write(map[string]any{
 		"type": "done", "messages": resp.Messages, "scanned": resp.Scanned,
 		"matched": resp.Matched, "truncated": resp.Truncated,
+		"scanCap": resp.ScanCap, "warning": resp.Warning,
 		"streamed": sent, "elapsedMs": time.Since(started).Milliseconds(),
 	})
 }

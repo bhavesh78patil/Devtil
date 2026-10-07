@@ -271,3 +271,43 @@ func TestConsumeRejectsABadQueryBeforeDialling(t *testing.T) {
 		t.Errorf("a bad key query should name the key box, got: %v", err)
 	}
 }
+
+// Searches people actually type that used to come back empty.
+func TestQueryEverydaySearches(t *testing.T) {
+	m := MsgFields{
+		Key:   "order:8837",
+		Value: `{"orderId":1234567890123456789,"status":"held","note":"payment not found","url":"https://shop/api/o/8837"}`,
+	}
+	plain := MsgFields{Key: "k", Value: "level=ERROR user=42 msg=payment not found"}
+	tests := []struct {
+		q      string
+		target MatchTarget
+		msg    MsgFields
+		want   bool
+		why    string
+	}{
+		{`"status":"held"`, MatchValue, m, true, "a JSON fragment pasted from a payload"},
+		{`"status": "held"`, MatchValue, m, true, "the same fragment, pretty-printed"},
+		{`"status":"shipped"`, MatchValue, m, false, "a pasted fragment still has to match"},
+		{"order:8837", MatchKey, m, true, "a colon-separated key is text, not a field"},
+		{"order:9999", MatchKey, m, false, "…and a different key still does not match"},
+		{"https://shop/api/o/8837", MatchValue, m, true, "a URL"},
+		{"orderId=1234567890123456789", MatchValue, m, true, "a 64-bit id survives JSON parsing"},
+		{"orderId:>1234567890123456000", MatchValue, m, true, "numeric comparison on a big id"},
+		{"not found", MatchValue, m, true, "lower-case not is a word"},
+		{"held or shipped", MatchValue, m, false, "lower-case or is a word, so all three must appear"},
+		{"held OR shipped", MatchValue, m, true, "upper-case OR is the operator"},
+		{"user=42", MatchValue, plain, true, "key=value text in a payload that is not JSON"},
+		{"level=ERROR", MatchValue, plain, true, "case-insensitive literal fallback"},
+		{"NOT user=7", MatchValue, plain, true, "NOT of a literal fallback"},
+		{"status:shipped", MatchValue, m, false, "a field that exists but differs is a real no"},
+		{"header.trace:x", MatchValue, m, false, "a reserved name never falls back to text"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.q, func(t *testing.T) {
+			if got := match(t, tt.q, tt.target, tt.msg); got != tt.want {
+				t.Errorf("%q = %v, want %v — %s", tt.q, got, tt.want, tt.why)
+			}
+		})
+	}
+}
