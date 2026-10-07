@@ -263,6 +263,7 @@ func (s *Server) registerKafka() {
 			"endMs":      num("Window end as epoch milliseconds, when from=time."),
 			"keyQuery":   str("Search the message key. Same syntax as valueQuery; a bare word is a substring of the key."),
 			"valueQuery": str(kafkaSearchSyntax),
+			"scanMax":    num("When searching: how many messages to look through across all partitions (default 50000, max 500000). The response's truncated flag says whether older history was left unsearched."),
 		}), "topic"),
 		Run: func(a Args) (any, error) {
 			conn, chosen, err := s.kafkaConn(a)
@@ -282,6 +283,7 @@ func (s *Server) registerKafka() {
 				EndMs:      a.Int64("endMs", 0),
 				KeyQuery:   a.Str("keyQuery"),
 				ValueQuery: a.Str("valueQuery"),
+				ScanMax:    a.Int("scanMax", 0),
 			})
 			if err != nil {
 				return nil, err
@@ -842,5 +844,7 @@ const kafkaSearchSyntax = "Search the message value. A bare word is a case-insen
 	"  status:held OR status:cancelled\n" +
 	"  NOT status:shipped          also -status:shipped\n" +
 	"  (a OR b) AND NOT c          brackets group\n" +
-	"A field that is not present never matches. On a payload that is not JSON, " +
-	"bare terms still work and field lookups simply do not match."
+	"Operators are upper-case; lower-case and/or/not are ordinary words. A pasted JSON fragment " +
+	"such as \"status\":\"held\" is read as status:held. A name:value whose name is not a field of " +
+	"the message (a key like order:120, a URL, or anything in a payload that is not JSON) is " +
+	"searched as literal text. A field that exists with a different value is a real non-match."

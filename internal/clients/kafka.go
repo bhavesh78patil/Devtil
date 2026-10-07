@@ -270,6 +270,15 @@ const (
 	// Per-partition budget, so one slow or idle partition can't eat the whole
 	// request deadline.
 	kafkaPartTimeout = 15 * time.Second
+
+	// How many messages a search looks through when the request does not say.
+	// A search is a scan, so its window has to be about the topic, not about
+	// how many results fit on screen: tying it to Last N (×20, so 1000 by
+	// default) meant anything older than the newest thousand messages was
+	// never even read, and the search reported zero matches.
+	kafkaSearchScanDefault = 50000
+	kafkaSearchScanMax     = 500000
+	kafkaSearchTimeout     = 90 * time.Second
 )
 
 type KafkaConsumeRequest struct {
@@ -283,6 +292,9 @@ type KafkaConsumeRequest struct {
 	// `field:value`, AND/OR/NOT and brackets are all understood.
 	KeyQuery   string `json:"keyQuery"`
 	ValueQuery string `json:"valueQuery"`
+	// ScanMax caps how many messages a search reads across all partitions.
+	// Zero means kafkaSearchScanDefault.
+	ScanMax int `json:"scanMax"`
 }
 
 type KafkaConsumeResponse struct {
@@ -290,12 +302,17 @@ type KafkaConsumeResponse struct {
 	Scanned   int            `json:"scanned"`
 	Matched   int            `json:"matched"`
 	Truncated bool           `json:"truncated"` // hit the scan/result cap
+	ScanCap   int            `json:"scanCap"`   // how far this read was allowed to look
+	// Warning is a partial failure: some partitions could not be read, so
+	// the result may be missing messages even though others came back.
+	Warning string `json:"warning,omitempty"`
 }
 
 // partRead is one partition's contribution to a consume.
 type partRead struct {
 	msgs      []KafkaMessage
 	scanned   int
+	matched   int // every match, including ones not kept
 	truncated bool
 	err       error
 	elapsed   time.Duration
@@ -305,7 +322,12 @@ type partRead struct {
 // window and reads up to limit messages, keeping the ones that match the
 // key/value filters. It never waits for new messages: reading stops at the
 // high watermark, or as soon as a fetch comes back empty.
-func readPartitionWindow(ctx context.Context, dialer *kafka.Dialer, broker string, req KafkaConsumeRequest, partID, limit int, keyQ, valQ *Query, emit func(KafkaMessage)) (out partRead) {
+//
+// keep bounds the matches held: the final result is at most that many, so a
+// partition never needs more — the newest keep for a "latest" read (older ones
+// are dropped as newer arrive), the earliest keep otherwise (and the read stops
+// there). Without it a broad search over a deep scan held every match.
+func readPartitionWindow(ctx context.Context, dialer *kafka.Dialer, broker string, req KafkaConsumeRequest, partID, limit, keep int, budget time.Duration, keyQ, valQ *Query, emit func(KafkaMessage)) (out partRead) {
 	started := time.Now()
 	defer func() { out.elapsed = time.Since(started) }()
 
@@ -337,6 +359,12 @@ func readPartitionWindow(ctx context.Context, dialer *kafka.Dialer, broker strin
 		if start < first {
 			start = first
 		}
+		// older history exists that this read will not look at; say so, or
+		// "0 matches" reads as "not in the topic" when it means "not in the
+		// part we searched"
+		if start > first {
+			out.truncated = true
+		}
 	}
 	if start >= last {
 		return out // partition is empty, or the window starts past its end
@@ -349,7 +377,7 @@ func readPartitionWindow(ctx context.Context, dialer *kafka.Dialer, broker strin
 	// Bound this partition's own work instead of inheriting the whole request
 	// budget, and keep the read deadline short so kafka-go can never derive a
 	// multi-minute fetch wait from it.
-	deadline := time.Now().Add(kafkaPartTimeout)
+	deadline := time.Now().Add(budget)
 	if d, ok := ctx.Deadline(); ok && d.Before(deadline) {
 		deadline = d
 	}
@@ -363,10 +391,12 @@ func readPartitionWindow(ctx context.Context, dialer *kafka.Dialer, broker strin
 			MaxWait:  kafkaFetchMaxWait,
 		})
 		inBatch, done := 0, false
+		var readErr error
 		for read < limit {
 			m, err := batch.ReadMessage()
 			if err != nil {
-				break // batch drained (or a read error) — handled below
+				readErr = err // batch drained (io.EOF) or a real failure
+				break
 			}
 			inBatch++
 			read++
@@ -392,9 +422,24 @@ func readPartitionWindow(ctx context.Context, dialer *kafka.Dialer, broker strin
 					Value:     value,
 					Headers:   hdrs,
 				}
+				out.matched++
+				if len(out.msgs) < keep && emit != nil {
+					// hand it to the caller now, don't wait for the whole read;
+					// past keep the final result settles the list instead
+					emit(km)
+				}
 				out.msgs = append(out.msgs, km)
-				if emit != nil {
-					emit(km) // hand it to the caller now, don't wait for the whole read
+				if len(out.msgs) > keep {
+					// latest: only the newest keep can make the cut
+					out.msgs = append(out.msgs[:0], out.msgs[len(out.msgs)-keep:]...)
+					out.truncated = true
+				}
+				if len(out.msgs) == keep && req.From != "latest" {
+					// forward reads return the earliest matches, so this
+					// partition has already contributed all it can
+					out.truncated = true
+					done = true
+					break
 				}
 			}
 			// offsets can be sparse (compaction, transaction markers), so stop
@@ -404,10 +449,23 @@ func readPartitionWindow(ctx context.Context, dialer *kafka.Dialer, broker strin
 				break
 			}
 		}
-		batch.Close()
-		// An empty fetch means there is no more history here — fetching again
-		// would only wait for messages that haven't been produced yet.
-		if done || inBatch == 0 {
+		closeErr := batch.Close()
+		if done {
+			return out
+		}
+		if inBatch == 0 {
+			// An empty fetch normally means there is no more history here —
+			// fetching again would only wait for messages that haven't been
+			// produced yet. But a fetch can also come back empty because it
+			// failed, and treating that as "end of partition" is how a read
+			// returned nothing without a word. Below the high watermark there
+			// is more to read, so an empty fetch there is a failure.
+			if err := fetchError(readErr, closeErr); err != nil {
+				if at, _ := c.Offset(); at < last {
+					out.err = fmt.Errorf("partition %d at offset %d: %v", partID, at, err)
+					out.truncated = true
+				}
+			}
 			return out
 		}
 	}
@@ -415,6 +473,17 @@ func readPartitionWindow(ctx context.Context, dialer *kafka.Dialer, broker strin
 		out.truncated = true // stopped on a budget, not at the log end
 	}
 	return out
+}
+
+// fetchError picks the error worth reporting from a drained batch: the end of
+// a batch (io.EOF) is not one.
+func fetchError(errs ...error) error {
+	for _, e := range errs {
+		if e != nil && !errors.Is(e, io.EOF) {
+			return e
+		}
+	}
+	return nil
 }
 
 // KafkaConsume reads messages from a topic — from the tail, the beginning,
@@ -445,6 +514,15 @@ func KafkaConsumeStream(req KafkaConsumeRequest, onMessage func(KafkaMessage)) (
 	if req.From == "time" && req.StartMs <= 0 {
 		return nil, fmt.Errorf("a start time is required for time-range reads")
 	}
+	if req.From == "" {
+		req.From = "latest" // the default everywhere, so trim to the newest too
+	}
+	// The time range belongs to time-range reads only. A tab keeps its end
+	// time after switching back to "latest", and applying it there stopped
+	// every partition at its first (newer) message: scanned 0, matched 0.
+	if req.From != "time" {
+		req.StartMs, req.EndMs = 0, 0
+	}
 
 	consumeStart := time.Now()
 	keyQ, err := ParseQuery(req.KeyQuery, MatchKey)
@@ -456,10 +534,22 @@ func KafkaConsumeStream(req KafkaConsumeRequest, onMessage func(KafkaMessage)) (
 		return nil, fmt.Errorf("value %v", err)
 	}
 	searching := !keyQ.IsEmpty() || !valQ.IsEmpty()
-	// searching or reading forward needs a wider scan window than the
-	// result size, so matches aren't limited to the newest few messages
+	// A plain read wants Last N messages; a search wants to look through as
+	// much of the topic as it reasonably can, and only keep Last N matches.
 	scanCap := max
-	if searching || req.From == "beginning" || req.From == "time" {
+	switch {
+	case searching:
+		scanCap = req.ScanMax
+		if scanCap <= 0 {
+			scanCap = kafkaSearchScanDefault
+		}
+		if scanCap > kafkaSearchScanMax {
+			scanCap = kafkaSearchScanMax
+		}
+		if scanCap < max {
+			scanCap = max
+		}
+	case req.From == "beginning" || req.From == "time":
 		scanCap = max * 20
 		if scanCap > 10000 {
 			scanCap = 10000
@@ -472,8 +562,17 @@ func KafkaConsumeStream(req KafkaConsumeRequest, onMessage func(KafkaMessage)) (
 	// deadline expired mid-scan and searches silently came back empty. Scale
 	// the operation deadline with the scan window instead.
 	opTimeout := conn.opDeadline()
+	partBudget := kafkaPartTimeout
 	if scanCap > max && opTimeout < 30*time.Second {
 		opTimeout = 30 * time.Second
+	}
+	if searching {
+		// a deep scan is mostly reading, not waiting: give each partition
+		// the whole budget rather than the 15s meant for slow handshakes
+		if opTimeout < kafkaSearchTimeout {
+			opTimeout = kafkaSearchTimeout
+		}
+		partBudget = opTimeout
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), opTimeout)
 	defer cancel()
@@ -522,25 +621,24 @@ func KafkaConsumeStream(req KafkaConsumeRequest, onMessage func(KafkaMessage)) (
 				results[idx] = partRead{truncated: true}
 				return
 			}
-			results[idx] = readPartitionWindow(ctx, dialer, brokers[0], req, partID, perPart, keyQ, valQ, emit)
+			results[idx] = readPartitionWindow(ctx, dialer, brokers[0], req, partID, perPart, max, partBudget, keyQ, valQ, emit)
 		}(i, p.ID)
 	}
 	wg.Wait()
 
-	resp := &KafkaConsumeResponse{Messages: []KafkaMessage{}}
+	resp := &KafkaConsumeResponse{Messages: []KafkaMessage{}, ScanCap: scanCap}
 	var firstErr error
 	var slowest time.Duration
 	for _, r := range results {
 		if r.elapsed > slowest {
 			slowest = r.elapsed
 		}
-		if r.err != nil {
-			if firstErr == nil {
-				firstErr = r.err
-			}
-			continue
+		if r.err != nil && firstErr == nil {
+			firstErr = r.err
 		}
+		// a partition that failed part-way still contributes what it read
 		resp.Scanned += r.scanned
+		resp.Matched += r.matched
 		resp.Messages = append(resp.Messages, r.msgs...)
 		if r.truncated {
 			resp.Truncated = true
@@ -553,8 +651,8 @@ func KafkaConsumeStream(req KafkaConsumeRequest, onMessage func(KafkaMessage)) (
 		if len(resp.Messages) == 0 && resp.Scanned == 0 {
 			return nil, fmt.Errorf("kafka: %v", firstErr)
 		}
+		resp.Warning = "some partitions could not be fully read: " + firstErr.Error()
 	}
-	resp.Matched = len(resp.Messages)
 
 	sort.Slice(resp.Messages, func(i, j int) bool {
 		if resp.Messages[i].Time != resp.Messages[j].Time {
