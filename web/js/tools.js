@@ -4163,6 +4163,42 @@
     draw();
   };
 
+  // reindentJson lays out already-valid JSON text with one entry per line,
+  // copying every literal through verbatim — numbers keep all their digits.
+  function reindentJson(text, unit) {
+    let out = "", depth = 0, inStr = false;
+    const nl = () => "\n" + unit.repeat(depth);
+    for (let i = 0; i < text.length; i++) {
+      const ch = text[i];
+      if (inStr) {
+        out += ch;
+        if (ch === "\\") out += text[++i];
+        else if (ch === '"') inStr = false;
+        continue;
+      }
+      if (ch === '"') { inStr = true; out += ch; continue; }
+      if (ch === " " || ch === "\t" || ch === "\n" || ch === "\r") continue;
+      if (ch === "{" || ch === "[") {
+        // keep {} and [] on one line
+        let j = i + 1;
+        while (/\s/.test(text[j] || "")) j++;
+        if (text[j] === (ch === "{" ? "}" : "]")) { out += ch + text[j]; i = j; continue; }
+        depth++;
+        out += ch + nl();
+      } else if (ch === "}" || ch === "]") {
+        depth--;
+        out += nl() + ch;
+      } else if (ch === ",") {
+        out += "," + nl();
+      } else if (ch === ":") {
+        out += ": ";
+      } else {
+        out += ch;
+      }
+    }
+    return out;
+  }
+
   /** Kafka console: topics browser, consumer (latest/beginning/time-range
       with key & value search), producer. */
   function kafkaConsole(body, conn, c, ctx) {
@@ -4267,7 +4303,22 @@
       "status:held OR status:cancelled",
       "NOT status:shipped        also  -status:shipped",
       "(a OR b) AND NOT c        brackets",
+      "",
+      "Operators are upper-case: lower-case and / or / not are plain words.",
+      'A pasted JSON fragment like  "status":"held"  works as  status:held.',
+      "order:120 or a URL, where the name is not a field, is searched as text.",
     ].join("\n");
+    // A search reads this many messages (across all partitions) looking for
+    // matches; Max is only how many matches to show. Tying the scan to Max
+    // is what made an older message unfindable.
+    const scan = el("select", { title: "How many messages a search looks through, across all partitions" }, [
+      el("option", { value: "10000", text: "10k" }),
+      el("option", { value: "50000", text: "50k" }),
+      el("option", { value: "200000", text: "200k" }),
+      el("option", { value: "500000", text: "500k" }),
+    ]);
+    scan.value = c.scanMax || "50000";
+    scan.addEventListener("change", () => { c.scanMax = scan.value; ctx.save(); });
     const keyQ = el("input", {
       type: "text", placeholder: "search key…", style: "min-width:150px",
       title: "Search the message key.\n\n" + SEARCH_HELP,
@@ -4286,7 +4337,16 @@
       el("pre", { class: "search-help-body", text: SEARCH_HELP }),
     ]);
 
-    const tryPretty = (v) => { try { return JSON.stringify(JSON.parse(v), null, 2); } catch { return v == null ? "" : String(v); } };
+    // Pretty-print without a parse/stringify round trip: JSON.parse turns a
+    // 64-bit id like 1234567890123456789 into 1234567890123456800, so the
+    // value shown would not be the value on the topic (or the one a search
+    // just matched). Validate with JSON.parse, then re-indent the raw text.
+    const tryPretty = (v) => {
+      if (v == null) return "";
+      const raw = String(v);
+      try { JSON.parse(raw); } catch { return raw; }
+      return reindentJson(raw, "  ");
+    };
 
     // the ⤢ button on a value cell opens the full-screen Value/Headers view
     const maximizeBtn = (m) => {
@@ -4388,10 +4448,13 @@
             topic: c.topic,
             max: Number(c.max) || 50,
             from: c.from || "latest",
-            startMs: c.startT ? new Date(c.startT).getTime() : 0,
-            endMs: c.endT ? new Date(c.endT).getTime() : 0,
+            // the saved range belongs to "Time range" only — sent with
+            // "Latest" it cut every read off at its first message
+            startMs: c.from === "time" && c.startT ? new Date(c.startT).getTime() : 0,
+            endMs: c.from === "time" && c.endT ? new Date(c.endT).getTime() : 0,
             keyQuery: c.keyQ || "",
             valueQuery: c.valQ || "",
+            scanMax: Number(c.scanMax) || 50000,
           }),
         });
         if (!res.ok || !res.body) {
@@ -4439,9 +4502,19 @@
         c.name = c.topic;
         ctx.save();
         draw();
+        const searching = !!((c.keyQ || "").trim() || (c.valQ || "").trim());
+        let note = "";
+        if (done && done.truncated) {
+          note = searching
+            ? (done.matched > done.messages.length
+              ? ` — more matches than Max; raise Max to see them`
+              : ` — older messages were not searched; raise Scan or use a time range`)
+            : ` — more history exists; raise Max or read from the beginning`;
+        }
+        if (done && done.warning) note += ` ⚠ ${done.warning}`;
         say(status, "lastStatus", done
-          ? `✓ ${done.matched} match(es) of ${done.scanned} scanned, showing ${done.messages.length}${done.truncated ? " (scan capped — narrow the range or raise Last N)" : ""} · ${took}`
-          : `✓ ${c.messages.length} message(s) · ${took}`, "ok");
+          ? `✓ ${done.matched} match(es) of ${done.scanned.toLocaleString()} scanned, showing ${done.messages.length}${note} · ${took}`
+          : `✓ ${c.messages.length} message(s) · ${took}`, done && done.warning ? "err" : "ok");
       } catch (e) {
         clearInterval(ticker);
         say(status, "lastStatus", "✗ " + e.message + ` · ${fmtSecs(Date.now() - started)}`, "err");
@@ -4576,6 +4649,7 @@
       el("div", { class: "toolbar" }, [
         el("span", { class: "pane-label", text: "Search" }),
         keyQ, valQ,
+        el("label", { class: "inline" }, ["Scan", scan]),
       ]),
       searchHelp,
       status,
